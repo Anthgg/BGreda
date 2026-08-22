@@ -47,6 +47,9 @@ Copie `.env.example` a `.env` y complete los valores. **`.env` nunca se commitea
 | `SUPABASE_URL` | sí | URL del proyecto Supabase, sin barra final. |
 | `SUPABASE_PUBLISHABLE_KEY` | sí | Publishable key. **Solo backend**, jamás se envía al frontend. |
 | `SUPABASE_TIMEOUT_SECONDS` | no | Timeout de las llamadas a Supabase. Por defecto `10`. |
+| `SUPABASE_SECRET_KEY` | sí (logo) | Clave *service_role* / *secret*. Permite escribir en Storage. **Solo backend.** |
+| `SUPABASE_STORAGE_BUCKET` | no | Bucket de archivos. Por defecto `greda-assets`. |
+| `LOGO_MAX_BYTES` | no | Tamaño máximo del logo. Por defecto 2 MiB. |
 | `DATABASE_URL` | sí | Credencial PostgreSQL para SQLAlchemy y Alembic. |
 | `FRONTEND_ORIGINS` | sí | Orígenes CORS permitidos, separados por comas. Nunca `*`. |
 | `COOKIE_SECURE` | sí | `true` en producción. |
@@ -260,6 +263,25 @@ frontend.
 | `POST` | `/api/v1/auth/logout` | Cierra la sesión y borra las cookies. |
 | `GET` | `/api/v1/auth/me` | Sesión actual. Única fuente de verdad para React. |
 
+### Fase 2 — configuración
+
+| Método | Ruta | Rol | Descripción |
+|---|---|---|---|
+| `GET` | `/api/v1/settings/company` | autenticado | Datos de empresa. |
+| `PUT` | `/api/v1/settings/company` | **ADMIN** | Actualiza los datos de empresa. |
+| `GET` | `/api/v1/settings/company/logo` | autenticado | Sirve el logo desde el backend. |
+| `POST` | `/api/v1/settings/company/logo` | **ADMIN** | Sube o reemplaza el logo. |
+| `DELETE` | `/api/v1/settings/company/logo` | **ADMIN** | Elimina el logo. |
+| `GET` | `/api/v1/settings/commercial` | autenticado | Moneda, IGV, vigencia, textos y banco. |
+| `PUT` | `/api/v1/settings/commercial` | **ADMIN** | Actualiza los parámetros comerciales. |
+| `GET` | `/api/v1/settings/sequences` | autenticado | Configuración de correlativos. |
+| `PUT` | `/api/v1/settings/sequences/{tipo}` | **ADMIN** | Cambia prefijo, patrón, padding o política. |
+| `GET` | `/api/v1/settings/audit` | **ADMIN** | Historial de cambios. |
+
+OPERATOR consulta todo lo que necesita para trabajar, pero no modifica nada.
+La restricción vive en el backend: ocultar el botón en React no es seguridad.
+
+
 ---
 
 ## Docker
@@ -287,3 +309,181 @@ privilegios (UID 1001), instala desde `uv.lock` y no incluye `.env` ni tests.
    `/live` y comprobación de que el proceso no corre como root
 
 Ningún paso usa `continue-on-error`.
+
+
+---
+
+## Configuración de empresa (Fase 2)
+
+Todos los valores de negocio viven en base de datos. Cambiar razón social, RUC,
+logo, banco, IGV, moneda, vigencia, condiciones o serie documental **no requiere
+tocar código ni desplegar**.
+
+### Tablas
+
+| Tabla | Contenido |
+|---|---|
+| `company_settings` | Identidad, domicilio, contacto y referencia del logo. Fila única. |
+| `commercial_settings` | Moneda, IGV, vigencia y textos de documentos. Fila única. |
+| `bank_accounts` | Cuentas bancarias. Hija de `commercial_settings`. |
+| `document_sequences` | Configuración y contador de cada correlativo. |
+| `document_sequence_issues` | Registro inmutable de cada número emitido. |
+| `audit_events` | Historial de cambios, campo a campo. |
+
+`company_settings` y `commercial_settings` son *singleton*: la clave primaria
+lleva un `CHECK (id = 1)`, de modo que la unicidad la impone la base de datos y
+no la disciplina del código. No hay multitenancy porque el proyecto no la pide.
+
+Las cuentas bancarias viven en su propia tabla aunque la Fase 2 gestione una
+sola: es un grupo repetible, y el día que haga falta una segunda basta insertar
+una fila en vez de migrar el esquema. Un índice único parcial garantiza que solo
+exista una cuenta principal.
+
+### Precisión
+
+El IGV se guarda como `NUMERIC`, nunca como `float`, y se expresa en porcentaje
+—`18` significa 18 %— no como fracción. `app/core/precision.py` define tres
+escalas: importes comerciales, costos unitarios `NUMERIC(24,12)` —la que exige
+el Plan v1.2 para insumos que cuestan menos de S/ 0.01 por gramo— y porcentajes.
+
+### Concurrencia de edición
+
+Cada fila de configuración lleva un `version`. El cliente devuelve la versión que
+leyó; si no coincide, la escritura se rechaza con `409 SETTINGS_VERSION_CONFLICT`
+en vez de pisar en silencio un cambio más reciente. Guardar sin modificar nada no
+incrementa la versión ni genera historial.
+
+---
+
+## Logo
+
+```
+Frontend -> POST /settings/company/logo -> validación -> Supabase Storage
+                                                      -> referencia en PostgreSQL
+```
+
+El frontend **nunca** habla con Storage. El bucket es privado y el backend sirve
+el binario desde `GET /settings/company/logo`, de modo que el navegador no
+contacta jamás con `supabase.co`.
+
+Controles aplicados:
+
+- Formatos admitidos: `image/png`, `image/jpeg`, `image/webp`.
+- **SVG excluido**: admite scripts embebidos y no hay sanitización segura.
+- El tipo real se deduce de los bytes iniciales; la extensión y el
+  `Content-Type` declarados deben coincidir con él, y por sí solos no bastan.
+- Tamaño máximo configurable (`LOGO_MAX_BYTES`), archivo vacío rechazado.
+- La ruta interna la genera el backend con un identificador aleatorio: el
+  nombre original nunca la determina, así que el *path traversal* es imposible
+  por construcción y no por filtrado.
+- Al reemplazar, el archivo anterior se borra **después** de confirmar la
+  transacción: si el commit fallara, el logo vigente seguiría existiendo.
+
+---
+
+## Secuencias documentales
+
+Formato inicial, aprobado en el Plan v1.2 seccion 2.6:
+
+```
+CTZ-2026-000001    cotizaciones
+HR-2026-000001     quemas
+```
+
+El patrón es configurable con los marcadores `{PREFIX}`, `{YYYY}`, `{YY}`,
+`{MM}`, `{DD}` y `{NUMBER}`, más una política de reinicio (`NEVER`, `YEARLY`,
+`MONTHLY`, `DAILY`). El Documento Funcional describe una variante con mes y día;
+se alcanza cambiando configuración, sin tocar código.
+
+### Atomicidad
+
+El número se obtiene con **una sola sentencia**:
+
+```sql
+UPDATE document_sequences
+   SET current_value = CASE WHEN period_key = :periodo THEN current_value + 1 ELSE 1 END,
+       period_key    = :periodo
+ WHERE sequence_type = :tipo
+RETURNING current_value, prefix, pattern, padding
+```
+
+PostgreSQL bloquea la fila al ejecutar el `UPDATE`, de modo que dos transacciones
+simultáneas se serializan. No hace falta `SELECT ... FOR UPDATE` previo ni
+*advisory locking*: el propio `UPDATE` es el punto de sincronización.
+
+`SELECT MAX(numero) + 1` queda **prohibido**: entre el `SELECT` y el `INSERT`
+otra transacción puede leer el mismo máximo. Una prueba analiza el árbol
+sintáctico del servicio para impedir que reaparezca.
+
+Como red de seguridad, `document_sequence_issues` lleva restricciones `UNIQUE`
+sobre `(sequence_type, period_key, number)` y sobre el texto renderizado.
+
+### Reglas del correlativo
+
+- Lo genera **exclusivamente** el backend; el frontend nunca lo propone.
+- Es único, creciente y no se reutiliza aunque el documento se cancele.
+- Es inmutable una vez asignado: cambiar el prefijo afecta solo a los documentos
+  futuros. El texto emitido se guarda con el formato vigente en ese momento.
+- Descargar, imprimir o regenerar un PDF no consume número. Duplicar un
+  documento sí obtiene uno nuevo.
+- **No existe ningún endpoint público que consuma números.** La Fase 2 entrega
+  configuración, infraestructura, un servicio interno transaccional y pruebas.
+  El consumo real se conecta en Fase 4 (HR) y Fase 5 (CTZ).
+- La vista previa de `GET /settings/sequences` es informativa y se calcula en
+  memoria: consultarla no reserva nada.
+
+---
+
+## Auditoría
+
+El Documento Funcional describe la trazabilidad con el *chatter* de Odoo. Esta
+aplicación no es Odoo: el requisito se traduce a `audit_events`, un registro
+propio con una fila por campo modificado.
+
+Se conserva quién cambió, cuándo, qué campo, el valor anterior y el nuevo, más
+el nombre visible del autor en ese momento —si el perfil se renombra después, el
+historial sigue siendo legible—.
+
+**Nunca** se registran contraseñas, tokens, cookies, `DATABASE_URL`, claves de
+API ni credenciales: la exclusión se aplica por nombre de campo antes de
+escribir, de modo que un descuido futuro tampoco filtraría un secreto. Del logo
+se registra el cambio de referencia y su tamaño, jamás el binario.
+
+Los eventos se escriben en la misma transacción que el cambio auditado: si la
+operación falla, el historial tampoco miente.
+
+---
+
+## Textos configurables
+
+Condiciones generales, notas de pago y pie de documento son **texto plano**.
+Se rechazan las etiquetas HTML y los caracteres de control antes de almacenar.
+La defensa real es el escapado en la salida; esta validación es una barrera
+adicional para que un script no llegue siquiera a la base de datos. No hay
+editor de texto enriquecido en esta fase.
+
+---
+
+## Pruebas con base de datos
+
+`tests/db/` necesita PostgreSQL real: probar la concurrencia de correlativos
+contra un motor simulado no demostraría nada.
+
+```bash
+TEST_DATABASE_URL=postgresql://usuario:clave@host:5432/base uv run pytest tests/db
+```
+
+**Local sin PostgreSQL:** sin `TEST_DATABASE_URL`, `tests/db` se marca como
+`skipped` de forma explícita — nunca como `error` — y `uv run pytest
+--ignore=tests/smoke` termina en verde con código de salida 0. El salto lo
+aplica el hook `pytest_collection_modifyitems` de `tests/db/conftest.py`; un
+`pytestmark` en ese archivo no funcionaría, porque pytest solo lo lee en los
+módulos de prueba.
+
+**CI:** las pruebas con base de datos son obligatorias y se ejecutan contra el
+servicio `postgres:16-alpine` del pipeline. La CI exige que
+`TEST_DATABASE_URL` llegue al runner, que se ejecute al menos una prueba y que
+el recuento de omitidas sea cero: si algo las saltara, el pipeline **falla**.
+Así, un fallo de conexión no puede dejarlo en verde sin haber probado nada.
+
+Todo ocurre en un esquema propio que se crea y se destruye en cada ejecución.

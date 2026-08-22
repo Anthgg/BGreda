@@ -14,6 +14,7 @@ dependencies = [
     "alembic>=1.14",
     "httpx>=0.27",
     "email-validator>=2.2",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]
@@ -77,6 +78,10 @@ quote-style = "double"
 minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Un unico bucle de evento por sesion: las fixtures de base de datos son de
+# ambito session y no pueden vivir en bucles distintos que las pruebas.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 addopts = "-ra --strict-markers"
 markers = [
     "smoke: pruebas contra un entorno real desplegado (requieren red y credenciales)",

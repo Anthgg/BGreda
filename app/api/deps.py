@@ -26,7 +26,12 @@ from app.core.errors import (
 from app.db.session import get_db_session
 from app.models.profile import UserRole
 from app.schemas.auth import AuthenticatedUser
+from app.services.audit import AuditRecorder
+from app.services.catalogs import CatalogService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.sequences import SequenceService
+from app.services.settings import SettingsService
+from app.services.storage import ObjectStorage, StorageUnavailableError
 from app.services.supabase_auth import SupabaseAuthClient
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -142,3 +147,58 @@ def require_roles(
         return user
 
     return _dependency
+
+
+# ---------------------------------------------------------------------------
+# Fase 2: configuracion, secuencias, auditoria y almacenamiento
+# ---------------------------------------------------------------------------
+DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+
+#: Solo ADMIN modifica la configuracion. La restriccion la impone el backend:
+#: ocultar el boton en React no es una medida de seguridad.
+AdminUserDep = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
+
+
+async def get_audit_recorder(session: DbSessionDep) -> AuditRecorder:
+    return AuditRecorder(session)
+
+
+AuditRecorderDep = Annotated[AuditRecorder, Depends(get_audit_recorder)]
+
+
+async def get_catalog_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> CatalogService:
+    return CatalogService(session, audit)
+
+
+CatalogServiceDep = Annotated[CatalogService, Depends(get_catalog_service)]
+
+
+async def get_settings_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> SettingsService:
+    return SettingsService(session, audit)
+
+
+SettingsServiceDep = Annotated[SettingsService, Depends(get_settings_service)]
+
+
+async def get_sequence_service(session: DbSessionDep) -> SequenceService:
+    return SequenceService(session)
+
+
+SequenceServiceDep = Annotated[SequenceService, Depends(get_sequence_service)]
+
+
+def get_object_storage(request: Request) -> ObjectStorage:
+    """Cliente de almacenamiento creado durante el arranque."""
+    storage: ObjectStorage | None = getattr(request.app.state, "object_storage", None)
+    if storage is None:
+        raise StorageUnavailableError()
+    return storage
+
+
+ObjectStorageDep = Annotated[ObjectStorage, Depends(get_object_storage)]
