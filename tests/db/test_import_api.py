@@ -332,15 +332,20 @@ class TestPreviewYResolucion:
             {
                 "Categoria de producto": [
                     CATEGORY_HEADERS,
-                    ["Insumos Taller", None, "Insumos Taller", 6021031.0],
-                    ["Esmaltes", "Insumos Taller", "Insumos Taller / Esmaltes", 6021032.0],
+                    ["Productos Terminados Taller", None, "Productos Terminados Taller", 6021031.0],
+                    [
+                        "Esmaltes",
+                        "Productos Terminados Taller",
+                        "Productos Terminados Taller / Esmaltes",
+                        6021032.0,
+                    ],
                 ],
                 "Productos": [
                     PRODUCT_HEADERS,
                     [
                         "BARNIZ BASE 25",
                         "LAB70140",
-                        "Insumos Taller / Esmaltes",
+                        "Productos Terminados Taller / Esmaltes",
                         None,
                         None,
                         0.18,
