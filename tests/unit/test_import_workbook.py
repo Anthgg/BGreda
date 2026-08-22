@@ -29,6 +29,7 @@ from app.core.masters import (
     WARN_LOCATION_MISMATCH,
     WARN_NORMALIZED_LOCATION,
     WARN_ROUNDED_COST,
+    WARN_SOURCE_UOM_MISSING,
     WARN_VARIABLE_PRICE_ZERO,
 )
 from app.models.importing import ImportAction, ImportEntity, ImportRowStatus
@@ -364,6 +365,33 @@ class TestProductos:
         )[ImportEntity.PRODUCT][0]
         assert ERR_UNKNOWN_CATEGORY in codes(row.errors)
         assert row.action is ImportAction.ERROR
+
+    def test_sin_unidad_el_archivo_no_bloquea_pero_pide_decision(self) -> None:
+        """Solo un servicio puede prescindir de la unidad; el resto se revisa."""
+        row = self._sheet(
+            [
+                [
+                    "Esmalte sin unidad",
+                    "PRE-1",
+                    "Insumos Taller",
+                    None,
+                    None,
+                    None,
+                    "No",
+                    "Si",
+                    "No",
+                    None,
+                    None,
+                    None,
+                    None,
+                ]
+            ]
+        )[ImportEntity.PRODUCT][0]
+        assert row.status is ImportRowStatus.REVIEW_REQUIRED
+        assert WARN_SOURCE_UOM_MISSING in codes(row.warnings)
+        # El preview conserva que el origen venia vacio.
+        assert row.normalized["source_uom"] is None
+        assert row.normalized["base_uom_code"] is None
 
     def test_una_unidad_desconocida_bloquea(self) -> None:
         row = self._sheet(

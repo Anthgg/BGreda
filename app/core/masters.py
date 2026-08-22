@@ -29,6 +29,7 @@ WARN_NORMALIZED_LOCATION = "NORMALIZED_LOCATION"
 WARN_DOCUMENT_FORMAT_LOST = "DOCUMENT_FORMAT_LOST"
 WARN_DUPLICATE_NAME = "DUPLICATE_NAME"
 WARN_RECIPE_DEFERRED = "RECIPE_DEFERRED_TO_PHASE_3_5"
+WARN_SOURCE_UOM_MISSING = "SOURCE_UOM_MISSING"
 
 ERR_UNRESOLVED_PRODUCT = "UNRESOLVED_PRODUCT"
 ERR_AMBIGUOUS_PRODUCT = "AMBIGUOUS_PRODUCT"
@@ -46,6 +47,9 @@ ERR_MISSING_REQUIRED = "MISSING_REQUIRED_VALUE"
 
 #: Estado de importacion, no rol del maestro: ningun tercero se guarda asi.
 ROLE_PENDING = "PENDING_CLASSIFICATION"
+
+#: Marca de quien decidio un valor que el archivo no traia.
+RESOLUTION_USER = "USER_DECISION"
 
 #: Raiz de la categoria -> tipo funcional. Se deriva de la categoria, nunca de
 #: adivinar por el nombre del producto.

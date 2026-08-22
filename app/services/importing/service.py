@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
-from app.core.masters import ROLE_PENDING, fold
+from app.core.masters import RESOLUTION_USER, ROLE_PENDING, fold
 from app.models.catalog import UbigeoDistrict
 from app.models.importing import (
     ImportAction,
@@ -216,7 +216,10 @@ class ImportService:
             if decision.product_id is not None:
                 payload["product_id"] = decision.product_id
             if decision.base_uom_code is not None:
+                # Se conserva que el archivo no la traia y quien la decidio.
                 payload["base_uom_code"] = decision.base_uom_code
+                payload["resolved_uom"] = decision.base_uom_code
+                payload["resolution_source"] = RESOLUTION_USER
             if decision.partner_role is not None:
                 payload["role"] = decision.partner_role.value
             if decision.ubigeo_code is not None:

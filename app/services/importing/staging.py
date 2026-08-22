@@ -35,6 +35,7 @@ from app.core.masters import (
     WARN_NORMALIZED_LOCATION,
     WARN_RECIPE_DEFERRED,
     WARN_ROUNDED_COST,
+    WARN_SOURCE_UOM_MISSING,
     WARN_VARIABLE_PRICE_ZERO,
     fold,
     normalize_document,
@@ -336,10 +337,14 @@ class StagingBuilder:
             if uom_literal and uom is None:
                 builder.error(ERR_UNKNOWN_UOM, f"Unidad desconocida: {uom_literal!r}")
             if uom is None and product_type is not None and product_type.value != "SERVICE":
-                builder.error(
-                    ERR_MISSING_REQUIRED,
-                    "Solo un servicio puede quedarse sin unidad de medida",
+                # El archivo no la trae y solo un servicio puede prescindir de
+                # ella: la decide una persona, no el importador.
+                builder.warn(
+                    WARN_SOURCE_UOM_MISSING,
+                    "El archivo no indica unidad de medida y este tipo la exige",
+                    source_uom=None,
                 )
+                builder.needs_review()
 
             purchase_literal = sheet.value(values, "purchase_uom")
             purchase_uom = normalize_uom(purchase_literal)
@@ -423,6 +428,7 @@ class StagingBuilder:
                         "product_type": product_type.value if product_type else None,
                         "category_path": path,
                         "pos_category_name": pos_category,
+                        "source_uom": uom_literal,
                         "base_uom_code": uom,
                         "purchase_uom_code": purchase_uom,
                         "cost": normalized_cost,
