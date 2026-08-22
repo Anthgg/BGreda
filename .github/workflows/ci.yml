@@ -17,6 +17,27 @@ jobs:
   quality:
     name: Lint, tipos y tests
     runs-on: ubuntu-latest
+
+    # PostgreSQL real: las pruebas de concurrencia de correlativos y las de la
+    # API de configuracion no tienen valor contra un motor simulado.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: greda
+          POSTGRES_PASSWORD: greda
+          POSTGRES_DB: greda_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U greda"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://greda:greda@localhost:5432/greda_ci
+
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +62,22 @@ jobs:
 
       - name: Pytest
         # Los smoke tests se excluyen: requieren un entorno desplegado.
+        # Las pruebas de tests/db si se ejecutan: TEST_DATABASE_URL apunta al
+        # servicio PostgreSQL de arriba.
         run: uv run pytest --ignore=tests/smoke --cov=app --cov-report=term-missing
+
+      - name: Comprobar que las pruebas con base de datos se ejecutaron
+        # Sin esta verificacion, un fallo de conexion las omitiria en silencio
+        # y la CI seguiria en verde sin haber probado la concurrencia.
+        run: |
+          total=$(uv run pytest tests/db --collect-only -q 2>/dev/null | tail -1)
+          echo "Pruebas de base de datos recolectadas: $total"
+          uv run pytest tests/db -q --no-header | tee /tmp/db.txt
+          grep -qE "[0-9]+ passed" /tmp/db.txt
+          if grep -qE "[0-9]+ skipped" /tmp/db.txt; then
+            echo "Las pruebas con base de datos se omitieron; TEST_DATABASE_URL no llego al runner."
+            exit 1
+          fi
 
       - name: Verificar que la migracion es renderizable
         # Genera el SQL en modo offline. No abre conexion alguna: la URL solo
