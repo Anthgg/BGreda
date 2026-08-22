@@ -14,6 +14,7 @@ import csv
 import os
 import uuid
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -33,6 +34,7 @@ from app.db.session import normalize_database_url
 from app.main import create_app
 from app.models import Base
 from app.models.catalog import CurrencyCatalog, SequencePatternPreset, UbigeoDistrict
+from app.models.masters import UnitOfMeasure
 from app.models.profile import Profile, UserRole
 from app.models.settings import SINGLETON_ID
 from tests.conftest import TEST_EMAIL, TEST_PASSWORD, TEST_USER_ID
@@ -112,6 +114,35 @@ async def db_engine() -> AsyncIterator[object]:
             UbigeoDistrict.__table__.insert(), _catalog_rows("ubigeo_inei_2022.csv")
         )
         await connection.execute(
+            UnitOfMeasure.__table__.insert(),
+            [
+                {
+                    "code": "g",
+                    "name": "Gramo",
+                    "symbol": "g",
+                    "dimension": "MASS",
+                    "factor_to_base": Decimal(1),
+                    "is_base": True,
+                },
+                {
+                    "code": "kg",
+                    "name": "Kilogramo",
+                    "symbol": "kg",
+                    "dimension": "MASS",
+                    "factor_to_base": Decimal(1000),
+                    "is_base": False,
+                },
+                {
+                    "code": "unit",
+                    "name": "Unidad",
+                    "symbol": "u",
+                    "dimension": "COUNT",
+                    "factor_to_base": Decimal(1),
+                    "is_base": True,
+                },
+            ],
+        )
+        await connection.execute(
             SequencePatternPreset.__table__.insert(),
             [
                 {
@@ -151,7 +182,9 @@ async def reset_database(
         await session.execute(
             text(
                 "TRUNCATE audit_events, bank_accounts, document_sequence_issues, "
-                "document_sequences, commercial_settings, company_settings, profiles "
+                "document_sequences, commercial_settings, company_settings, profiles, "
+                "import_rows, import_batches, stock_movements, stock_balances, "
+                "stock_locations, products, partners, product_categories, pos_categories "
                 "RESTART IDENTITY CASCADE"
             )
         )

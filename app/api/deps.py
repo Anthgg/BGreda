@@ -28,6 +28,9 @@ from app.models.profile import UserRole
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.catalogs import CatalogService
+from app.services.importing import ImportService
+from app.services.inventory import InventoryService
+from app.services.masters import MasterDataService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -191,6 +194,36 @@ async def get_sequence_service(session: DbSessionDep) -> SequenceService:
 
 
 SequenceServiceDep = Annotated[SequenceService, Depends(get_sequence_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 3: maestros, inventario e importador
+# ---------------------------------------------------------------------------
+async def get_master_data_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> MasterDataService:
+    return MasterDataService(session, audit)
+
+
+MasterDataServiceDep = Annotated[MasterDataService, Depends(get_master_data_service)]
+
+
+async def get_inventory_service(session: DbSessionDep) -> InventoryService:
+    return InventoryService(session)
+
+
+InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
+
+
+async def get_import_service(
+    session: DbSessionDep,
+    inventory: InventoryServiceDep,
+) -> ImportService:
+    return ImportService(session, inventory)
+
+
+ImportServiceDep = Annotated[ImportService, Depends(get_import_service)]
 
 
 def get_object_storage(request: Request) -> ObjectStorage:
