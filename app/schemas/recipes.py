@@ -187,6 +187,11 @@ class RecipeStagingLineOut(_Out):
     component_product_name: str | None = None
     component_type: RecipeComponentType | None = None
     suggested_component_type: RecipeComponentType | None = None
+    classification_role: str = "BASE"  # BASE, ADDITIONAL, UNKNOWN
+    classification_source: str = (
+        "SOURCE_STRUCTURE"  # SOURCE_STRUCTURE, HUMAN_RESOLUTION, UNRESOLVED, SUGGESTED
+    )
+    cumulative_percentage: Decimal = Decimal(0)
     source_percentage: Decimal
     final_percentage: Decimal
     percentage: Decimal
@@ -212,6 +217,7 @@ class RecipeStagingGroupOut(_Out):
     yield_factor: Decimal
     estimated_cost_per_gram: Decimal
     is_valid: bool
+    has_structural_base_boundary: bool = True
     status: str = "READY"  # READY, REVIEW_REQUIRED, ERROR
     warnings: list[str] = []
     errors: list[str] = []

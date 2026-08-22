@@ -2,6 +2,13 @@
 
 No vuelve a leer el archivo Excel: opera exclusivamente sobre las filas de
 staging preservadas en `import_rows` con entity='RECIPE'.
+
+Clasificacion estructural obligatoria:
+- La BASE de una receta esta formada por las lineas iniciales que en orden
+  acumulan exactamente 100 % (dentro de PERCENTAGE_TOLERANCE).
+- Las lineas posteriores a ese boundary son ADDITIONAL (COLORANT o ADDITIVE).
+- Precedencia: HUMAN_RESOLUTION > SOURCE_STRUCTURE_BASE > SUGGESTION > REVIEW_REQUIRED.
+- Las keywords NUNCA sobreescriben componentes que pertenecen a la BASE estructural.
 """
 
 from __future__ import annotations
@@ -46,7 +53,27 @@ class RecipeImportError(APIError):
     message = "Error en la importacion de recetas"
 
 
-COLORANT_KEYWORDS = ("ÓXIDO", "OXIDO", "CARBONATO DE COBRE", "OCRE", "PIGMENTO", "ESMALTE")
+COLORANT_KEYWORDS = (
+    "ÓXIDO",
+    "OXIDO",
+    "CARBONATO DE COBRE",
+    "CARBONATO DE COBALTO",
+    "CARBONATO DE MANGANESO",
+    "CARBONATO DE NIQUEL",
+    "OCRE",
+    "PIGMENTO",
+    "ESMALTE",
+    "COBRE",
+    "COBALTO",
+    "HIERRO",
+    "MANGANESO",
+    "NIQUEL",
+    "CROMO",
+    "RUTILO",
+    "ESTAÑO",
+    "ESTANO",
+    "ZINC",
+)
 ADDITIVE_KEYWORDS = ("BENTONITA", "GOMA", "SUSPENSIVO", "CMC")
 
 
@@ -64,7 +91,7 @@ class RecipeImportService:
         self._audit = audit or AuditRecorder(session)
 
     async def preview(self, batch_id: int) -> RecipeImportPreviewOut:
-        """Analiza las filas de staging de recetas y genera un preview detallado."""
+        """Analiza las filas de staging aplicando clasificacion estructural por boundary 100%."""
         rows = await self._get_staging_rows(batch_id)
         if not rows:
             raise RecipeImportError(f"No hay filas de recetas en el lote {batch_id}")
@@ -102,22 +129,42 @@ class RecipeImportService:
                 )
                 errors.append(msg)
 
-            staging_lines: list[RecipeStagingLineOut] = []
-            parsed_tuples: list[tuple[RecipeComponentType, Decimal]] = []
+            # Paso 1: Ordenar filas por source_row ASC
+            sorted_rows = sorted(group_rows, key=lambda item: item.source_row)
 
-            # Analisis preliminar de lineas
-            raw_lines_data = []
-            total_raw_sum = Decimal(0)
-            for r in group_rows:
+            # Paso 2: Detectar el boundary estructural de base 100%
+            boundary_index: int | None = None
+            cumulative_calc = Decimal(0)
+            row_quantities: list[tuple[ImportRow, str, Product | None, Decimal, Decimal]] = []
+
+            for idx, r in enumerate(sorted_rows):
                 comp_name = r.raw.get("component") or ""
                 comp_prod = products_by_fold.get(fold(comp_name))
                 qty_raw = Decimal(str(r.raw.get("component_quantity") or 0))
-                total_raw_sum += qty_raw
-                raw_lines_data.append((r, comp_name, comp_prod, qty_raw))
+                source_pct = qty_raw * Decimal(100)
+                cumulative_calc += source_pct
 
-            # Clasificacion y resolucion de componentes
+                if (
+                    boundary_index is None
+                    and abs(cumulative_calc - BASE_PERCENTAGE_TARGET) <= PERCENTAGE_TOLERANCE
+                ):
+                    boundary_index = idx
+
+                row_quantities.append((r, comp_name, comp_prod, qty_raw, cumulative_calc))
+
+            has_structural_boundary = boundary_index is not None
+            if not has_structural_boundary:
+                warnings.append(
+                    "BASE_BOUNDARY_NOT_FOUND: "
+                    "La fórmula no alcanza exactamente 100% base en el orden del maestro"
+                )
+
+            staging_lines: list[RecipeStagingLineOut] = []
+            parsed_tuples: list[tuple[RecipeComponentType, Decimal]] = []
             has_unresolved_lines = False
-            for r, comp_name, comp_prod, qty_raw in raw_lines_data:
+
+            # Paso 3: Clasificacion segun precedencia
+            for idx, (r, comp_name, comp_prod, qty_raw, cum_pct) in enumerate(row_quantities):
                 line_errors: list[str] = []
                 line_warnings: list[str] = []
 
@@ -130,40 +177,70 @@ class RecipeImportService:
                 resolution = r.resolution or {}
                 res_action = resolution.get("action", "RESOLVE")
                 source_percentage = qty_raw * Decimal(100)
-                suggested_type = self._suggest_component_type(comp_name, qty_raw, total_raw_sum)
+                suggested_t = self._suggest_additional_type(comp_name)
+
+                # Regla de boundary: ¿Pertenece al bloque base estructural inicial?
+                is_in_structural_base = has_structural_boundary and idx <= boundary_index  # type: ignore[operator]
 
                 if res_action == "SKIP":
+                    # Precedencia 1: Human Resolution (SKIP)
                     action = "SKIP"
                     status = "RESOLVED"
                     requires_review = False
                     comp_type = None
+                    classification_role = "BASE" if is_in_structural_base else "ADDITIONAL"
+                    classification_source = "HUMAN_RESOLUTION"
+                    resolution_source = "HUMAN"
                     final_percentage = (
                         Decimal(str(resolution["percentage"]))
                         if resolution.get("percentage") is not None
                         else source_percentage
                     )
-                    resolution_source = "HUMAN"
-                else:
+                elif resolution.get("component_type"):
+                    # Precedencia 1: Human Resolution (Component Type Explicito)
                     action = "CREATE"
-                    # Si tiene resolucion humana
-                    if resolution.get("component_type"):
-                        comp_type = RecipeComponentType(resolution["component_type"])
-                        status = "RESOLVED"
-                        requires_review = False
-                        resolution_source = "HUMAN"
-                    else:
-                        # Sugerencia unicamente: NO autoridad final, requiere revision
-                        comp_type = None
-                        status = "REVIEW_REQUIRED"
-                        requires_review = True
-                        resolution_source = "UNRESOLVED"
-                        has_unresolved_lines = True
-
-                    if resolution.get("percentage") is not None:
-                        final_percentage = Decimal(str(resolution["percentage"]))
-                        resolution_source = "HUMAN"
-                    else:
-                        final_percentage = source_percentage
+                    comp_type = RecipeComponentType(resolution["component_type"])
+                    status = "RESOLVED"
+                    requires_review = False
+                    classification_role = (
+                        "BASE" if comp_type == RecipeComponentType.BASE else "ADDITIONAL"
+                    )
+                    classification_source = "HUMAN_RESOLUTION"
+                    resolution_source = "HUMAN"
+                    final_percentage = (
+                        Decimal(str(resolution["percentage"]))
+                        if resolution.get("percentage") is not None
+                        else source_percentage
+                    )
+                elif is_in_structural_base:
+                    # Precedencia 2: Source Structure BASE (100% exacto acumulado)
+                    action = "CREATE"
+                    comp_type = RecipeComponentType.BASE
+                    status = "READY"
+                    requires_review = False
+                    classification_role = "BASE"
+                    classification_source = "SOURCE_STRUCTURE"
+                    resolution_source = "SOURCE"
+                    final_percentage = (
+                        Decimal(str(resolution["percentage"]))
+                        if resolution.get("percentage") is not None
+                        else source_percentage
+                    )
+                else:
+                    # Precedencia 4 / 5: Linea adicional posterior sin resolucion -> REVIEW_REQUIRED
+                    action = "CREATE"
+                    comp_type = None
+                    status = "REVIEW_REQUIRED"
+                    requires_review = True
+                    has_unresolved_lines = True
+                    classification_role = "ADDITIONAL" if has_structural_boundary else "UNKNOWN"
+                    classification_source = "UNRESOLVED"
+                    resolution_source = "UNRESOLVED"
+                    final_percentage = (
+                        Decimal(str(resolution["percentage"]))
+                        if resolution.get("percentage") is not None
+                        else source_percentage
+                    )
 
                 percentage = final_percentage
 
@@ -179,7 +256,10 @@ class RecipeImportService:
                         component_reference=comp_prod.internal_reference if comp_prod else None,
                         component_product_name=comp_prod.name if comp_prod else None,
                         component_type=comp_type,
-                        suggested_component_type=suggested_type,
+                        suggested_component_type=suggested_t,
+                        classification_role=classification_role,
+                        classification_source=classification_source,
+                        cumulative_percentage=cum_pct,
                         source_percentage=source_percentage,
                         final_percentage=final_percentage,
                         percentage=percentage,
@@ -194,13 +274,15 @@ class RecipeImportService:
                     )
                 )
 
-            # Validar proporciones
+            # Paso 4: Validar proporciones y rendimiento
             base_total = Decimal(0)
             add_total = Decimal(0)
             yield_factor = Decimal(1)
 
             if has_unresolved_lines:
-                warnings.append("La receta tiene componentes pendientes de clasificacion humana")
+                warnings.append(
+                    "La receta contiene componentes adicionales pendientes de clasificación"
+                )
                 is_valid = False
             elif not parsed_tuples:
                 if all(line.action == "SKIP" for line in staging_lines):
@@ -220,7 +302,7 @@ class RecipeImportService:
                     warnings.append(str(exc))
                     is_valid = False
 
-            # Costo estimado
+            # Paso 5: Costo estimado por unidad real de salida
             estimated_cost = Decimal(0)
             if target_prod and not errors and parsed_tuples:
                 for line_out in staging_lines:
@@ -239,7 +321,7 @@ class RecipeImportService:
             if errors:
                 group_status = "ERROR"
                 error_count += 1
-            elif not is_valid or has_unresolved_lines or warnings:
+            elif not is_valid or has_unresolved_lines or warnings or not has_structural_boundary:
                 group_status = "REVIEW_REQUIRED"
                 review_count += 1
             else:
@@ -261,6 +343,7 @@ class RecipeImportService:
                     yield_factor=yield_factor,
                     estimated_cost_per_gram=estimated_cost,
                     is_valid=is_valid,
+                    has_structural_base_boundary=has_structural_boundary,
                     status=group_status,
                     warnings=warnings,
                     errors=errors,
@@ -441,20 +524,13 @@ class RecipeImportService:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
-    def _suggest_component_type(
+    def _suggest_additional_type(
         self,
         comp_name: str,
-        qty_raw: Decimal,
-        total_raw_sum: Decimal,
     ) -> RecipeComponentType:
-        """Sugiere una clasificacion funcional basada en nombres ceramicos.
-
-        Solo es una sugerencia previa; requiere confirmacion humana.
-        """
+        """Sugiere COLORANT o ADDITIVE para lineas que estan fuera del boundary BASE."""
         upper = fold(comp_name)
         if any(k in upper for k in ADDITIVE_KEYWORDS):
             return RecipeComponentType.ADDITIVE
-        if any(k in upper for k in COLORANT_KEYWORDS):
-            return RecipeComponentType.COLORANT
 
-        return RecipeComponentType.BASE
+        return RecipeComponentType.COLORANT
