@@ -104,6 +104,8 @@ class RowResolution(_In):
     #: SKIP descarta la fila; RESOLVE la deja lista para el commit.
     action: Annotated[str, Field(pattern="^(RESOLVE|SKIP)$")] = "RESOLVE"
     product_id: int | None = None
+    #: Unidad que el archivo no traia. Solo el usuario puede decidirla.
+    base_uom_code: Annotated[str | None, Field(max_length=16)] = None
     partner_role: PartnerRole | None = None
     document_number: Annotated[str | None, Field(max_length=20)] = None
     ubigeo_code: Annotated[str | None, Field(min_length=6, max_length=6)] = None

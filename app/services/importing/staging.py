@@ -35,7 +35,6 @@ from app.core.masters import (
     WARN_NORMALIZED_LOCATION,
     WARN_RECIPE_DEFERRED,
     WARN_ROUNDED_COST,
-    WARN_UOM_ALIAS,
     WARN_VARIABLE_PRICE_ZERO,
     fold,
     normalize_document,
@@ -139,7 +138,8 @@ class StagingBuilder:
         self._seen_references: dict[str, int] = {}
         self._seen_documents: dict[tuple[str, str], int] = {}
         self._batch_paths: set[str] = set()
-        self._batch_products: dict[str, str] = {}
+        #: nombre normalizado -> (referencia, nombre tal cual)
+        self._batch_products: dict[str, tuple[str, str]] = {}
 
     # -- API ----------------------------------------------------------------
     def build(self, sheets: list[WorkbookSheet]) -> tuple[list[ImportRow], dict[str, Any]]:
@@ -335,13 +335,6 @@ class StagingBuilder:
             uom = normalize_uom(uom_literal)
             if uom_literal and uom is None:
                 builder.error(ERR_UNKNOWN_UOM, f"Unidad desconocida: {uom_literal!r}")
-            elif uom and str(uom_literal).strip().lower() != uom:
-                builder.warn(
-                    WARN_UOM_ALIAS,
-                    f"La unidad {uom_literal!r} se normaliza a {uom!r}",
-                    source=str(uom_literal),
-                    normalized=uom,
-                )
             if uom is None and product_type is not None and product_type.value != "SERVICE":
                 builder.error(
                     ERR_MISSING_REQUIRED,
@@ -402,8 +395,8 @@ class StagingBuilder:
                 )
 
             existing = self._existing.products_by_reference.get(reference_key)
-            if reference_key:
-                self._batch_products[fold(name or "")] = reference_key
+            if reference_key and name:
+                self._batch_products[fold(name)] = (reference_key, str(name))
 
             rows.append(
                 ImportRow(
@@ -619,6 +612,13 @@ class StagingBuilder:
                     {"type": "product", "product_id": pid, "reference": ref, "label": label}
                     for pid, ref, label in entries
                 )
+        # Un producto que se crea en este mismo archivo tambien es candidato:
+        # todavia no tiene id, asi que se enlaza por referencia interna.
+        for folded_name, (ref, label) in self._batch_products.items():
+            if head in folded_name:
+                found.append(
+                    {"type": "product", "product_id": None, "reference": ref, "label": label}
+                )
         return found[:20]
 
     def _build_stock(self, sheet: WorkbookSheet, _snapshot: dict[str, Any]) -> list[ImportRow]:
@@ -642,7 +642,7 @@ class StagingBuilder:
                 if len(matches) == 1:
                     product_id, reference, _ = matches[0]
                 elif not matches and in_batch is not None:
-                    reference = in_batch
+                    reference = in_batch[0]
                 elif len(matches) > 1:
                     builder.error(
                         ERR_AMBIGUOUS_PRODUCT,

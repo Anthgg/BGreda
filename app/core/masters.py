@@ -27,7 +27,6 @@ WARN_LOCATION_MISMATCH = "SOURCE_LOCATION_MISMATCH"
 WARN_CATEGORY_MISMATCH = "POSSIBLE_CATEGORY_MISMATCH"
 WARN_NORMALIZED_LOCATION = "NORMALIZED_LOCATION"
 WARN_DOCUMENT_FORMAT_LOST = "DOCUMENT_FORMAT_LOST"
-WARN_UOM_ALIAS = "UOM_ALIAS_APPLIED"
 WARN_DUPLICATE_NAME = "DUPLICATE_NAME"
 WARN_RECIPE_DEFERRED = "RECIPE_DEFERRED_TO_PHASE_3_5"
 
@@ -169,7 +168,9 @@ def normalize_document(document_type: object, raw: object) -> tuple[str, str | N
     length = expected.get(kind)
     if length is None or len(text) == length:
         return text, None, False
-    if len(text) < length and text.isdigit():
+    # Solo el DNI tiene el caso conocido del cero inicial que Excel se come.
+    # Rellenar un CE o un pasaporte seria inventarse un documento.
+    if kind is DocumentType.DNI and len(text) < length and text.isdigit():
         return text, text.zfill(length), True
     return text, None, True
 

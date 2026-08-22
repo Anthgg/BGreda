@@ -215,6 +215,8 @@ class ImportService:
 
             if decision.product_id is not None:
                 payload["product_id"] = decision.product_id
+            if decision.base_uom_code is not None:
+                payload["base_uom_code"] = decision.base_uom_code
             if decision.partner_role is not None:
                 payload["role"] = decision.partner_role.value
             if decision.ubigeo_code is not None:
@@ -244,6 +246,9 @@ class ImportService:
             return payload.get("role") in (None, ROLE_PENDING)
         if row.entity is ImportEntity.STOCK:
             return payload.get("product_id") is None and not payload.get("internal_reference")
+        if row.entity is ImportEntity.PRODUCT:
+            # Solo un servicio puede quedarse sin unidad.
+            return payload.get("product_type") != "SERVICE" and not payload.get("base_uom_code")
         return False
 
     async def _refresh_summary(self, batch: ImportBatch) -> None:
