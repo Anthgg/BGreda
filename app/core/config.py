@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     SUPABASE_PUBLISHABLE_KEY: SecretStr = SecretStr("")
     SUPABASE_TIMEOUT_SECONDS: float = 10.0
 
+    # ---- Supabase Storage -----------------------------------------------
+    # Clave con permiso de escritura en Storage (service_role / secret key).
+    # Ignora RLS por completo: solo backend, jamas en una variable VITE_*.
+    SUPABASE_SECRET_KEY: SecretStr = SecretStr("")
+    SUPABASE_STORAGE_BUCKET: str = "greda-assets"
+    #: Tamano maximo del logo. 2 MiB cubre cualquier logo razonable.
+    LOGO_MAX_BYTES: int = 2 * 1024 * 1024
+
     # ---- Base de datos --------------------------------------------------
     # Credencial PostgreSQL usada por SQLAlchemy/Alembic. NO se deduce de
     # SUPABASE_URL ni de la publishable key: es una credencial distinta.
@@ -170,6 +178,15 @@ class Settings(BaseSettings):
     @property
     def database_configured(self) -> bool:
         return bool(self.DATABASE_URL.get_secret_value())
+
+    @property
+    def storage_configured(self) -> bool:
+        """True cuando se puede escribir en Supabase Storage."""
+        return bool(
+            self.SUPABASE_URL
+            and self.SUPABASE_SECRET_KEY.get_secret_value()
+            and self.SUPABASE_STORAGE_BUCKET
+        )
 
     @property
     def csrf_configured(self) -> bool:
