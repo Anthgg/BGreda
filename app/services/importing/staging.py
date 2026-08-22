@@ -636,8 +636,13 @@ class StagingBuilder:
                 builder.error(ERR_MISSING_REQUIRED, "La fila de stock no indica producto")
             else:
                 matches = self._existing.products_by_name.get(fold(raw_product), [])
+                # Un producto que nace en este mismo archivo tambien cuenta: se
+                # enlaza por referencia y el commit lo resuelve tras crearlo.
+                in_batch = self._batch_products.get(fold(raw_product))
                 if len(matches) == 1:
                     product_id, reference, _ = matches[0]
+                elif not matches and in_batch is not None:
+                    reference = in_batch
                 elif len(matches) > 1:
                     builder.error(
                         ERR_AMBIGUOUS_PRODUCT,

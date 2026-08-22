@@ -243,7 +243,7 @@ class ImportService:
         if row.entity is ImportEntity.PARTNER:
             return payload.get("role") in (None, ROLE_PENDING)
         if row.entity is ImportEntity.STOCK:
-            return payload.get("product_id") is None
+            return payload.get("product_id") is None and not payload.get("internal_reference")
         return False
 
     async def _refresh_summary(self, batch: ImportBatch) -> None:
@@ -517,15 +517,24 @@ class ImportService:
             item.code: item.factor_to_base
             for item in (await self._session.execute(select(UnitOfMeasure))).scalars()
         }
+        by_reference = {
+            item.internal_reference: item
+            for item in (await self._session.execute(select(Product))).scalars()
+        }
         for row in rows:
             payload = row.normalized
             product_id = payload.get("product_id")
-            if row.action is ImportAction.SKIP or product_id is None:
+            reference = payload.get("internal_reference")
+            if row.action is ImportAction.SKIP or (product_id is None and not reference):
                 row.status = ImportRowStatus.COMMITTED
                 self._count(result, ImportEntity.STOCK, "skipped")
                 continue
 
-            product = await self._session.get(Product, int(product_id))
+            product = (
+                await self._session.get(Product, int(product_id))
+                if product_id is not None
+                else by_reference.get(str(reference))
+            )
             if product is None:
                 raise ImportBlockedError("Una fila de stock apunta a un producto inexistente")
 

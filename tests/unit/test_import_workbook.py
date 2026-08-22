@@ -576,6 +576,36 @@ class TestStock:
         assert row.normalized["product_id"] is None
         assert row.candidates[0]["reference"] == "INS-1"
 
+    def test_un_producto_creado_en_el_mismo_archivo_tambien_vale(self) -> None:
+        """El producto aun no esta en la base, pero nace en este mismo libro."""
+        grouped = stage(
+            {
+                "Productos": [
+                    PRODUCT_HEADERS,
+                    [
+                        "Arcilla roja",
+                        "INS-9",
+                        "Insumos Taller",
+                        None,
+                        None,
+                        None,
+                        "No",
+                        "Si",
+                        "No",
+                        None,
+                        None,
+                        "gr",
+                        None,
+                    ],
+                ],
+                "Stock": [STOCK_HEADERS, ["Arcilla roja", "g", 50, "Deposito"]],
+            }
+        )
+        row = grouped[ImportEntity.STOCK][0]
+        assert row.status is ImportRowStatus.READY
+        assert row.normalized["internal_reference"] == "INS-9"
+        assert row.normalized["product_id"] is None
+
     def test_un_producto_inexistente_bloquea_la_fila(self) -> None:
         row = self._sheet([["Plato palta", "Unidad", 3, "Tienda"]])[0]
         assert row.status is ImportRowStatus.BLOCKED
