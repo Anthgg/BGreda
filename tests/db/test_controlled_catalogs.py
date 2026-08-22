@@ -42,7 +42,7 @@ async def test_el_backend_deriva_el_simbolo_de_la_moneda(
 ) -> None:
     response = await api.put(
         COMMERCIAL,
-        json={"version": 1, "currency_code": "PEN", "currency_symbol": "inventado"},
+        json={"version": 1, "currency_code": "PEN", "currency_symbol": "X"},
         headers={"X-CSRF-Token": admin_csrf},
     )
 
