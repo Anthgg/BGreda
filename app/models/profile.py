@@ -44,7 +44,12 @@ class Profile(Base, TimestampMixin):
         server_default=UserRole.OPERATOR.value,
     )
 
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    #: Indexado: las consultas de habilitacion filtran siempre por este campo.
+    #: El indice existe desde la migracion 0001; se declara aqui para que el
+    #: modelo y la base de datos no diverjan en autogenerate.
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"), index=True
+    )
 
     __table_args__ = (
         CheckConstraint(
