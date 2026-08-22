@@ -64,7 +64,7 @@ class RecipeImportService:
         self._audit = audit or AuditRecorder(session)
 
     async def preview(self, batch_id: int) -> RecipeImportPreviewOut:
-        """Analiza las 592 filas de staging de recetas y genera un preview detallado."""
+        """Analiza las filas de staging de recetas y genera un preview detallado."""
         rows = await self._get_staging_rows(batch_id)
         if not rows:
             raise RecipeImportError(f"No hay filas de recetas en el lote {batch_id}")
@@ -115,20 +115,60 @@ class RecipeImportService:
                 total_raw_sum += qty_raw
                 raw_lines_data.append((r, comp_name, comp_prod, qty_raw))
 
-            # Clasificacion de componentes
+            # Clasificacion y resolucion de componentes
+            has_unresolved_lines = False
             for r, comp_name, comp_prod, qty_raw in raw_lines_data:
+                line_errors: list[str] = []
+                line_warnings: list[str] = []
+
                 if comp_prod is None:
+                    line_errors.append(
+                        f"Componente '{comp_name}' no existe en catalogo de productos"
+                    )
                     errors.append(f"Componente '{comp_name}' no existe en catalogo de productos")
 
-                # Si la fila tiene resolucion humana explicita en staging, respetarla
                 resolution = r.resolution or {}
-                if resolution.get("component_type"):
-                    comp_type = RecipeComponentType(resolution["component_type"])
-                else:
-                    comp_type = self._classify_component_type(comp_name, qty_raw, total_raw_sum)
+                res_action = resolution.get("action", "RESOLVE")
+                source_percentage = qty_raw * Decimal(100)
+                suggested_type = self._suggest_component_type(comp_name, qty_raw, total_raw_sum)
 
-                percentage = qty_raw * Decimal(100)
-                parsed_tuples.append((comp_type, percentage))
+                if res_action == "SKIP":
+                    action = "SKIP"
+                    status = "RESOLVED"
+                    requires_review = False
+                    comp_type = None
+                    final_percentage = (
+                        Decimal(str(resolution["percentage"]))
+                        if resolution.get("percentage") is not None
+                        else source_percentage
+                    )
+                    resolution_source = "HUMAN"
+                else:
+                    action = "CREATE"
+                    # Si tiene resolucion humana
+                    if resolution.get("component_type"):
+                        comp_type = RecipeComponentType(resolution["component_type"])
+                        status = "RESOLVED"
+                        requires_review = False
+                        resolution_source = "HUMAN"
+                    else:
+                        # Sugerencia unicamente: NO autoridad final, requiere revision
+                        comp_type = None
+                        status = "REVIEW_REQUIRED"
+                        requires_review = True
+                        resolution_source = "UNRESOLVED"
+                        has_unresolved_lines = True
+
+                    if resolution.get("percentage") is not None:
+                        final_percentage = Decimal(str(resolution["percentage"]))
+                        resolution_source = "HUMAN"
+                    else:
+                        final_percentage = source_percentage
+
+                percentage = final_percentage
+
+                if action != "SKIP" and comp_type is not None:
+                    parsed_tuples.append((comp_type, percentage))
 
                 staging_lines.append(
                     RecipeStagingLineOut(
@@ -139,9 +179,18 @@ class RecipeImportService:
                         component_reference=comp_prod.internal_reference if comp_prod else None,
                         component_product_name=comp_prod.name if comp_prod else None,
                         component_type=comp_type,
+                        suggested_component_type=suggested_type,
+                        source_percentage=source_percentage,
+                        final_percentage=final_percentage,
                         percentage=percentage,
+                        resolution_source=resolution_source,
+                        status=status,
+                        action=action,
+                        requires_review=requires_review,
                         quantity_raw=qty_raw,
                         uom_raw=r.raw.get("component_uom"),
+                        warnings=line_warnings,
+                        errors=line_errors,
                     )
                 )
 
@@ -150,16 +199,32 @@ class RecipeImportService:
             add_total = Decimal(0)
             yield_factor = Decimal(1)
 
-            try:
-                base_total, add_total, yield_factor = validate_recipe_percentages(parsed_tuples)
-            except Exception as exc:
-                warnings.append(str(exc))
+            if has_unresolved_lines:
+                warnings.append("La receta tiene componentes pendientes de clasificacion humana")
+                is_valid = False
+            elif not parsed_tuples:
+                if all(line.action == "SKIP" for line in staging_lines):
+                    warnings.append("Todas las lineas de la receta estan marcadas como SKIP")
+                    is_valid = True
+                else:
+                    warnings.append("No hay componentes validos para calcular proporciones")
+                    is_valid = False
+            else:
+                try:
+                    base_total, add_total, yield_factor = validate_recipe_percentages(parsed_tuples)
+                    is_valid = (
+                        len(errors) == 0
+                        and abs(base_total - BASE_PERCENTAGE_TARGET) <= PERCENTAGE_TOLERANCE
+                    )
+                except Exception as exc:
+                    warnings.append(str(exc))
+                    is_valid = False
 
             # Costo estimado
             estimated_cost = Decimal(0)
-            if target_prod and not errors:
+            if target_prod and not errors and parsed_tuples:
                 for line_out in staging_lines:
-                    if line_out.component_product_id:
+                    if line_out.action != "SKIP" and line_out.component_product_id:
                         comp_p = next(
                             (p for p in all_products if p.id == line_out.component_product_id), None
                         )
@@ -167,20 +232,18 @@ class RecipeImportService:
                             c_cost_g = normalize_component_unit_cost_to_grams(
                                 comp_p.cost, comp_p.base_uom_code
                             )
-                            estimated_cost += (line_out.percentage / Decimal(100)) * c_cost_g
+                            estimated_cost += (line_out.final_percentage / Decimal(100)) * c_cost_g
                 if yield_factor > Decimal(0):
                     estimated_cost = estimated_cost / yield_factor
 
-            is_valid = (
-                len(errors) == 0
-                and abs(base_total - BASE_PERCENTAGE_TARGET) <= PERCENTAGE_TOLERANCE
-            )
-
             if errors:
+                group_status = "ERROR"
                 error_count += 1
-            elif not is_valid or warnings:
+            elif not is_valid or has_unresolved_lines or warnings:
+                group_status = "REVIEW_REQUIRED"
                 review_count += 1
             else:
+                group_status = "READY"
                 ready_count += 1
 
             groups_out.append(
@@ -198,6 +261,7 @@ class RecipeImportService:
                     yield_factor=yield_factor,
                     estimated_cost_per_gram=estimated_cost,
                     is_valid=is_valid,
+                    status=group_status,
                     warnings=warnings,
                     errors=errors,
                     lines=staging_lines,
@@ -242,12 +306,16 @@ class RecipeImportService:
         batch_id: int,
         user: AuthenticatedUser,
     ) -> dict[str, Any]:
-        """Convierte atomicamente las 93 recetas de staging en recetas productivas."""
+        """Convierte atomicamente las recetas de staging en recetas productivas.
+
+        Bloquea el commit si existen errores O decisiones pendientes de revision.
+        """
         preview_data = await self.preview(batch_id)
-        if preview_data.error_count > 0:
+        if preview_data.error_count > 0 or preview_data.review_required_count > 0:
             msg = (
-                f"El lote contiene {preview_data.error_count} recetas con errores: "
-                "resuelvelas antes de confirmar"
+                f"RECIPE_IMPORT_ROWS_PENDING: El lote contiene {preview_data.error_count} errores "
+                f"y {preview_data.review_required_count} recetas pendientes de revision: "
+                "resuelve todas las lineas antes de confirmar"
             )
             raise RecipeImportError(msg)
 
@@ -256,15 +324,20 @@ class RecipeImportService:
         skipped_count = 0
 
         for group in preview_data.recipes:
-            # Construir lineas de entrada
+            # Construir lineas de entrada excluyendo SKIP
+            active_lines = [line for line in group.lines if line.action != "SKIP"]
+            if not active_lines:
+                skipped_count += 1
+                continue
+
             lines_in: list[RecipeLineIn] = [
                 RecipeLineIn(
                     component_product_id=line.component_product_id,  # type: ignore[arg-type]
-                    component_type=line.component_type,
-                    percentage=line.percentage,
+                    component_type=line.component_type,  # type: ignore[arg-type]
+                    percentage=line.final_percentage,
                     sort_order=idx,
                 )
-                for idx, line in enumerate(group.lines)
+                for idx, line in enumerate(active_lines)
             ]
 
             existing_recipe = await self._recipe_service.get_recipe_by_product_id(
@@ -368,17 +441,16 @@ class RecipeImportService:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
-    def _classify_component_type(
+    def _suggest_component_type(
         self,
         comp_name: str,
         qty_raw: Decimal,
         total_raw_sum: Decimal,
     ) -> RecipeComponentType:
-        """Clasifica funcionalmente una linea segun su naturaleza ceramica."""
-        # Si la suma total de la formula es 1.0 (100%), todos los componentes son base
-        if abs(total_raw_sum - Decimal(1)) <= Decimal("0.0001"):
-            return RecipeComponentType.BASE
+        """Sugiere una clasificacion funcional basada en nombres ceramicos.
 
+        Solo es una sugerencia previa; requiere confirmacion humana.
+        """
         upper = fold(comp_name)
         if any(k in upper for k in ADDITIVE_KEYWORDS):
             return RecipeComponentType.ADDITIVE

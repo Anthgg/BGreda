@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Query, status
+from sqlalchemy import select
 
 from app.api.deps import (
     AdminUserDep,
@@ -13,6 +14,7 @@ from app.api.deps import (
     RecipeImportServiceDep,
     RecipeServiceDep,
 )
+from app.models.importing import ImportEntity, ImportRow
 from app.schemas.recipes import (
     RecipeCalculateIn,
     RecipeCalculateOut,
@@ -153,6 +155,22 @@ async def calculate_recipe(
 # ---------------------------------------------------------------------------
 # Importacion desde Staging
 # ---------------------------------------------------------------------------
+@router.get("/recipe-imports/latest-batch")
+async def get_latest_recipe_import_batch(
+    session: DbSessionDep,
+    _: AdminUserDep,
+) -> dict[str, Any]:
+    """Obtiene el batch_id mas reciente que contiene filas de recetas en staging."""
+    stmt = (
+        select(ImportRow.batch_id)
+        .where(ImportRow.entity == ImportEntity.RECIPE)
+        .order_by(ImportRow.batch_id.desc())
+        .limit(1)
+    )
+    batch_id = (await session.execute(stmt)).scalar_one_or_none()
+    return {"batch_id": batch_id}
+
+
 @router.get("/recipe-imports/{batch_id}/preview", response_model=RecipeImportPreviewOut)
 async def preview_recipe_import(
     batch_id: int,

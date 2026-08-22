@@ -185,10 +185,19 @@ class RecipeStagingLineOut(_Out):
     component_product_id: int | None = None
     component_reference: str | None = None
     component_product_name: str | None = None
-    component_type: RecipeComponentType
+    component_type: RecipeComponentType | None = None
+    suggested_component_type: RecipeComponentType | None = None
+    source_percentage: Decimal
+    final_percentage: Decimal
     percentage: Decimal
+    resolution_source: str = "SOURCE"  # SOURCE, HUMAN, SUGGESTED, UNRESOLVED
+    status: str = "READY"  # READY, REVIEW_REQUIRED, RESOLVED, SKIPPED, ERROR
+    action: str = "CREATE"  # CREATE, SKIP
+    requires_review: bool = False
     quantity_raw: Decimal | None = None
     uom_raw: str | None = None
+    warnings: list[str] = []
+    errors: list[str] = []
 
 
 class RecipeStagingGroupOut(_Out):
@@ -203,6 +212,7 @@ class RecipeStagingGroupOut(_Out):
     yield_factor: Decimal
     estimated_cost_per_gram: Decimal
     is_valid: bool
+    status: str = "READY"  # READY, REVIEW_REQUIRED, ERROR
     warnings: list[str] = []
     errors: list[str] = []
     lines: list[RecipeStagingLineOut] = []
@@ -222,4 +232,4 @@ class RecipeRowResolutionIn(_In):
     row_id: int
     component_type: RecipeComponentType | None = None
     percentage: Decimal | None = None
-    action: str = "RESOLVE"  # RESOLVE o SKIP
+    action: str = "RESOLVE"  # RESOLVE, SKIP
