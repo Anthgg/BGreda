@@ -302,6 +302,12 @@ class RecipeImportService:
                     warnings.append(str(exc))
                     is_valid = False
 
+            if not has_structural_boundary and not (is_valid and not has_unresolved_lines):
+                warnings.append(
+                    "BASE_BOUNDARY_NOT_FOUND: La fórmula no alcanza exactamente 100% "
+                    "base en el orden del maestro"
+                )
+
             # Paso 5: Costo estimado por unidad real de salida
             estimated_cost = Decimal(0)
             if target_prod and not errors and parsed_tuples:
@@ -321,7 +327,7 @@ class RecipeImportService:
             if errors:
                 group_status = "ERROR"
                 error_count += 1
-            elif not is_valid or has_unresolved_lines or warnings or not has_structural_boundary:
+            elif not is_valid or has_unresolved_lines:
                 group_status = "REVIEW_REQUIRED"
                 review_count += 1
             else:
