@@ -24,9 +24,6 @@ MONEY_SCALE = 6
 QUANTITY_PRECISION = 18
 QUANTITY_SCALE = 6
 
-#: Cuantizador de presentacion para importes en moneda.
-MONEY_QUANTUM = Decimal("0.01")
-
 
 def money_numeric() -> Numeric[Decimal]:
     """Columna SQLAlchemy para importes monetarios.

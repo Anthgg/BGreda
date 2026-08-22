@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.errors import APIError
+from app.core.errors import APIError, ValidationFailedError
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ async def _validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
     ]
     return JSONResponse(
         status_code=422,
-        content=_envelope("VALIDATION_ERROR", "Los datos enviados no son validos", details),
+        content=_envelope(ValidationFailedError.code, ValidationFailedError.message, details),
     )
 
 
