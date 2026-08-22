@@ -178,8 +178,18 @@ async def resolve_everything(api: httpx.AsyncClient, csrf: str, batch_id: int) -
 
 
 class TestAutorizacion:
-    async def test_sin_sesion_no_se_sube(self, api: httpx.AsyncClient) -> None:
+    async def test_sin_token_csrf_no_se_sube(self, api: httpx.AsyncClient) -> None:
         response = await api.post(UPLOAD, files={"file": ("x.xlsx", b"x", "application/xlsx")})
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "CSRF_TOKEN_MISSING"
+
+    async def test_con_csrf_pero_sin_sesion_tampoco(self, api: httpx.AsyncClient) -> None:
+        token = (await api.get("/api/v1/auth/csrf")).json()["csrf_token"]
+        response = await api.post(
+            UPLOAD,
+            files={"file": ("x.xlsx", b"x", "application/xlsx")},
+            headers={"X-CSRF-Token": token},
+        )
         assert response.status_code == 401
 
     async def test_operator_no_puede_importar(

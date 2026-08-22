@@ -30,6 +30,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.precision import stock_quantity_numeric
 from app.db.base import Base, TimestampMixin
+from app.db.types import StrEnumType
 
 
 class MovementType(StrEnum):
@@ -104,7 +105,9 @@ class StockMovement(Base):
     location_id: Mapped[int] = mapped_column(
         ForeignKey("stock_locations.id", ondelete="RESTRICT"), nullable=False
     )
-    movement_type: Mapped[MovementType] = mapped_column(String(24), nullable=False)
+    movement_type: Mapped[MovementType] = mapped_column(
+        StrEnumType(MovementType, 24), nullable=False
+    )
     quantity: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
     balance_after: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
     uom_code: Mapped[str] = mapped_column(

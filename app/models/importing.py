@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.db.types import StrEnumType
 
 
 class ImportStatus(StrEnum):
@@ -81,7 +82,7 @@ class ImportBatch(Base):
     #: identica sin necesidad de conservar el binario.
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[ImportStatus] = mapped_column(String(16), nullable=False)
+    status: Mapped[ImportStatus] = mapped_column(StrEnumType(ImportStatus, 16), nullable=False)
 
     summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     #: Datos del archivo que no forman parte del modelo final —cuentas
@@ -124,7 +125,7 @@ class ImportRow(Base):
     batch_id: Mapped[int] = mapped_column(
         ForeignKey("import_batches.id", ondelete="CASCADE"), nullable=False
     )
-    entity: Mapped[ImportEntity] = mapped_column(String(24), nullable=False)
+    entity: Mapped[ImportEntity] = mapped_column(StrEnumType(ImportEntity, 24), nullable=False)
     sheet_name: Mapped[str] = mapped_column(String(120), nullable=False)
     source_row: Mapped[int] = mapped_column(Integer, nullable=False)
     #: Orden de aplicacion dentro de la entidad (jerarquias primero).
@@ -132,8 +133,10 @@ class ImportRow(Base):
 
     raw: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     normalized: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    action: Mapped[ImportAction] = mapped_column(String(16), nullable=False)
-    status: Mapped[ImportRowStatus] = mapped_column(String(24), nullable=False)
+    action: Mapped[ImportAction] = mapped_column(StrEnumType(ImportAction, 16), nullable=False)
+    status: Mapped[ImportRowStatus] = mapped_column(
+        StrEnumType(ImportRowStatus, 24), nullable=False
+    )
 
     errors: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     warnings: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)

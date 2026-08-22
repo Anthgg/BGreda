@@ -25,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.precision import money_numeric, percentage_numeric, unit_cost_numeric
 from app.db.base import Base, TimestampMixin
+from app.db.types import StrEnumType
 
 #: Unidad canonica de masa. El maestro escribe "gr" y la hoja de stock "g":
 #: son la misma unidad y se normalizan a esta.
@@ -142,7 +143,7 @@ class UnitOfMeasure(Base, TimestampMixin):
     code: Mapped[str] = mapped_column(String(16), primary_key=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     symbol: Mapped[str] = mapped_column(String(16), nullable=False)
-    dimension: Mapped[UomDimension] = mapped_column(String(16), nullable=False)
+    dimension: Mapped[UomDimension] = mapped_column(StrEnumType(UomDimension, 16), nullable=False)
     #: Cuantas unidades base equivalen a una unidad de esta.
     factor_to_base: Mapped[Decimal] = mapped_column(unit_cost_numeric(), nullable=False)
     is_base: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
@@ -165,7 +166,7 @@ class Product(Base, TimestampMixin):
     #: Clave de negocio y clave de deduplicacion de la importacion.
     internal_reference: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    product_type: Mapped[ProductType] = mapped_column(String(24), nullable=False)
+    product_type: Mapped[ProductType] = mapped_column(StrEnumType(ProductType, 24), nullable=False)
 
     product_category_id: Mapped[int] = mapped_column(
         ForeignKey("product_categories.id", ondelete="RESTRICT"), nullable=False
@@ -220,9 +221,9 @@ class Partner(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    role: Mapped[PartnerRole] = mapped_column(String(16), nullable=False)
+    role: Mapped[PartnerRole] = mapped_column(StrEnumType(PartnerRole, 16), nullable=False)
 
-    document_type: Mapped[DocumentType | None] = mapped_column(String(16))
+    document_type: Mapped[DocumentType | None] = mapped_column(StrEnumType(DocumentType, 16))
     #: Siempre texto: un DNI con cero inicial deja de ser un DNI si se guarda
     #: como numero.
     document_number: Mapped[str | None] = mapped_column(String(20))
