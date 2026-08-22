@@ -325,6 +325,57 @@ class TestPreviewYResolucion:
         assert (await api.get(PARTNERS)).json()["total"] == 0
         assert (await api.get(PRODUCTS)).json()["total"] == 1
 
+    async def test_material_preparado_sin_uom_requiere_revision_y_admite_gramos(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        payload = workbook_bytes(
+            {
+                "Categoria de producto": [
+                    CATEGORY_HEADERS,
+                    ["Insumos Taller", None, "Insumos Taller", 6021031.0],
+                    ["Esmaltes", "Insumos Taller", "Insumos Taller / Esmaltes", 6021032.0],
+                ],
+                "Productos": [
+                    PRODUCT_HEADERS,
+                    [
+                        "BARNIZ BASE 25",
+                        "LAB70140",
+                        "Insumos Taller / Esmaltes",
+                        None,
+                        None,
+                        0.18,
+                        "No",
+                        "No",
+                        "No",
+                        None,
+                        None,
+                        None,  # UOM vacia en Excel
+                        None,
+                    ],
+                ],
+            }
+        )
+        batch = (await upload(api, admin_csrf, payload)).json()
+        row = (await rows_of(api, batch["id"], "PRODUCT"))[0]
+        # Debe requerir revision y no auto-asignar 'unit'
+        assert row["status"] == "REVIEW_REQUIRED"
+        assert row["normalized"]["base_uom_code"] is None
+
+        # La decision humana resuelve a gramos 'g'
+        await resolve(
+            api,
+            admin_csrf,
+            batch["id"],
+            [{"row_id": row["id"], "base_uom_code": "g"}],
+        )
+        commit = await api.post(
+            f"{IMPORTS}/{batch['id']}/commit", headers={"X-CSRF-Token": admin_csrf}
+        )
+        assert commit.status_code == 200, commit.text
+        product = (await api.get(PRODUCTS)).json()["items"][0]
+        assert product["product_type"] == "PREPARED_MATERIAL"
+        assert product["base_uom_code"] == "g"
+
 
 class TestCommit:
     async def test_el_commit_escribe_los_maestros(
