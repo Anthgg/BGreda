@@ -26,6 +26,18 @@ async def test_operator_puede_leer_los_catalogos(
     assert next(item for item in body["currencies"] if item["code"] == "PEN")["symbol"] == "S/"
 
 
+async def test_los_formatos_de_sistema_conservan_la_ortografia_castellana(
+    api: httpx.AsyncClient, operator_csrf: str
+) -> None:
+    catalog = (await api.get(REFERENCE)).json()["sequence_patterns"]
+
+    nombres = {item["pattern"]: item["name"] for item in catalog if item["is_system"]}
+    assert nombres == {
+        "{PREFIX}-{YYYY}-{NUMBER}": "Prefijo - año - número",
+        "{PREFIX}-{NUMBER}": "Prefijo - número",
+    }
+
+
 async def test_una_moneda_inexistente_se_rechaza(api: httpx.AsyncClient, admin_csrf: str) -> None:
     response = await api.put(
         COMMERCIAL,

@@ -473,9 +473,17 @@ contra un motor simulado no demostraría nada.
 TEST_DATABASE_URL=postgresql://usuario:clave@host:5432/base uv run pytest tests/db
 ```
 
-Sin `TEST_DATABASE_URL` esas pruebas se omiten y el resto de la suite sigue
-verde. La CI levanta un PostgreSQL de servicio y **verifica que no se hayan
-omitido**, para que un fallo de conexión no deje el pipeline en verde sin haber
-probado nada.
+**Local sin PostgreSQL:** sin `TEST_DATABASE_URL`, `tests/db` se marca como
+`skipped` de forma explícita — nunca como `error` — y `uv run pytest
+--ignore=tests/smoke` termina en verde con código de salida 0. El salto lo
+aplica el hook `pytest_collection_modifyitems` de `tests/db/conftest.py`; un
+`pytestmark` en ese archivo no funcionaría, porque pytest solo lo lee en los
+módulos de prueba.
+
+**CI:** las pruebas con base de datos son obligatorias y se ejecutan contra el
+servicio `postgres:16-alpine` del pipeline. La CI exige que
+`TEST_DATABASE_URL` llegue al runner, que se ejecute al menos una prueba y que
+el recuento de omitidas sea cero: si algo las saltara, el pipeline **falla**.
+Así, un fallo de conexión no puede dejarlo en verde sin haber probado nada.
 
 Todo ocurre en un esquema propio que se crea y se destruye en cada ejecución.

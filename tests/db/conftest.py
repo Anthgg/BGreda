@@ -47,10 +47,28 @@ OPERATOR_ID = uuid.UUID("22222222-3333-4444-5555-666666666666")
 OPERATOR_EMAIL = "operario@empresa.com"
 OPERATOR_PASSWORD = "clave-operario-de-prueba"
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
+#: Marca de omision. ``pytestmark`` no sirve aqui: pytest solo lo lee en los
+#: modulos de prueba, no en un conftest, de modo que sin base de datos las
+#: pruebas llegaban a la fixture ``db_engine`` y reventaban con ERROR en vez de
+#: omitirse. El hook de coleccion si es un mecanismo valido a nivel de conftest.
+_SKIP_SIN_BASE_DE_DATOS = pytest.mark.skip(
     reason="TEST_DATABASE_URL no definida: se omiten las pruebas con base de datos",
 )
+_DB_TESTS_DIR = Path(__file__).resolve().parent
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Omite las pruebas de este directorio cuando no hay PostgreSQL.
+
+    En la CI ``TEST_DATABASE_URL`` siempre esta definida, asi que alli no se
+    omite nada y un fallo de conexion sigue apareciendo como error real.
+    """
+    if TEST_DATABASE_URL:
+        return
+    for item in items:
+        if item.path is not None and _DB_TESTS_DIR in item.path.parents:
+            item.add_marker(_SKIP_SIN_BASE_DE_DATOS)
+
 
 DEFAULT_PATTERN = "{PREFIX}-{YYYY}-{NUMBER}"
 DATA_DIR = Path(__file__).resolve().parents[2] / "alembic" / "data"
@@ -97,12 +115,12 @@ async def db_engine() -> AsyncIterator[object]:
             SequencePatternPreset.__table__.insert(),
             [
                 {
-                    "name": "Prefijo - ano - numero",
+                    "name": "Prefijo - año - número",
                     "pattern": DEFAULT_PATTERN,
                     "is_system": True,
                 },
                 {
-                    "name": "Prefijo - numero",
+                    "name": "Prefijo - número",
                     "pattern": "{PREFIX}-{NUMBER}",
                     "is_system": True,
                 },
