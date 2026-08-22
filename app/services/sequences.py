@@ -177,3 +177,21 @@ class SequenceService:
             )
         )
         return formatted
+
+    async def synchronize(self, sequence_type: SequenceType, max_number: int) -> None:
+        """Ajusta el contador de forma atomica si el valor maximo supera el actual.
+
+        Se usa al confirmar importaciones masivas para sincronizar los contadores
+        en una sola operacion transaccional sin incrementar fila por fila.
+        """
+        if max_number <= 0:
+            return
+        await self._session.execute(
+            update(DocumentSequence)
+            .where(
+                DocumentSequence.sequence_type == sequence_type,
+                DocumentSequence.current_value < max_number,
+            )
+            .values(current_value=max_number)
+            .execution_options(synchronize_session=False)
+        )

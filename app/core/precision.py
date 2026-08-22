@@ -36,6 +36,12 @@ UNIT_COST_SCALE = 12
 QUANTITY_PRECISION = 18
 QUANTITY_SCALE = 6
 
+#: Saldos y movimientos de inventario. Comparten escala con los costos
+#: unitarios porque una receta puede consumir fracciones de gramo y el saldo
+#: resultante no debe redondearse antes que el costo que lo valoriza.
+STOCK_QUANTITY_PRECISION = 24
+STOCK_QUANTITY_SCALE = 12
+
 #: Porcentajes. Se almacena 18 para "18 %", nunca la fraccion 0.18.
 PERCENT_PRECISION = 9
 PERCENT_SCALE = 6
@@ -58,6 +64,11 @@ def unit_cost_numeric() -> Numeric[Decimal]:
 def quantity_numeric() -> Numeric[Decimal]:
     """Columna para cantidades fisicas."""
     return Numeric(QUANTITY_PRECISION, QUANTITY_SCALE, asdecimal=True)
+
+
+def stock_quantity_numeric() -> Numeric[Decimal]:
+    """Columna para saldos y movimientos de inventario."""
+    return Numeric(STOCK_QUANTITY_PRECISION, STOCK_QUANTITY_SCALE, asdecimal=True)
 
 
 def percentage_numeric() -> Numeric[Decimal]:
