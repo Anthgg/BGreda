@@ -1,0 +1,100 @@
+[project]
+name = "bgreda"
+version = "0.1.0"
+description = "Backend del Cotizador Greda (FastAPI). Unica autoridad de negocio y de acceso a datos."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "httpx>=0.27",
+    "email-validator>=2.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "respx>=0.21",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# --------------------------------------------------------------------------
+# Ruff
+# --------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "S",    # bandit (seguridad)
+    "ASYNC",
+    "RUF",
+]
+ignore = [
+    "S101",  # assert: permitido, se usa en tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]      # credenciales ficticias en fixtures de test
+"alembic/*" = ["I001"]
+
+[tool.ruff.lint.isort]
+# "app" y "tests" se instalan en el venv; sin esto isort los trataria como
+# dependencias de terceros y agruparia mal los imports.
+known-first-party = ["app", "tests"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --------------------------------------------------------------------------
+# Pytest
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = [
+    "smoke: pruebas contra un entorno real desplegado (requieren red y credenciales)",
+]
+
+# --------------------------------------------------------------------------
+# Mypy
+# --------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+packages = ["app"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
