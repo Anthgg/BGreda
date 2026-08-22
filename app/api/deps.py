@@ -202,8 +202,9 @@ SequenceServiceDep = Annotated[SequenceService, Depends(get_sequence_service)]
 async def get_master_data_service(
     session: DbSessionDep,
     audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
 ) -> MasterDataService:
-    return MasterDataService(session, audit)
+    return MasterDataService(session, audit, sequences)
 
 
 MasterDataServiceDep = Annotated[MasterDataService, Depends(get_master_data_service)]
@@ -219,8 +220,9 @@ InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)
 async def get_import_service(
     session: DbSessionDep,
     inventory: InventoryServiceDep,
+    sequences: SequenceServiceDep,
 ) -> ImportService:
-    return ImportService(session, inventory)
+    return ImportService(session, inventory, sequences)
 
 
 ImportServiceDep = Annotated[ImportService, Depends(get_import_service)]

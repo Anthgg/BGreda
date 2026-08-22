@@ -195,17 +195,29 @@ async def reset_database(
         await session.execute(
             text("INSERT INTO commercial_settings (id) VALUES (:id)"), {"id": SINGLETON_ID}
         )
-        for sequence_type, prefix in (("QUOTE", "CTZ"), ("FIRING", "HR")):
+        for sequence_type, prefix, pattern, padding, reset_policy in (
+            ("QUOTE", "CTZ", DEFAULT_PATTERN, 6, "YEARLY"),
+            ("FIRING", "HR", DEFAULT_PATTERN, 6, "YEARLY"),
+            ("PRODUCT_50", "LAB50", "{PREFIX}{NUMBER}", 3, "NEVER"),
+            ("PRODUCT_70", "LAB70", "{PREFIX}{NUMBER}", 3, "NEVER"),
+        ):
             await session.execute(
                 text(
                     "INSERT INTO document_sequences "
                     "(sequence_type, prefix, pattern, padding, reset_policy, "
                     " current_value, period_key, active) "
-                    "VALUES (:t, :p, :pat, 6, 'YEARLY', 0, '', true)"
+                    "VALUES (:t, :p, :pat, :pad, :rp, 0, '', true)"
                 ),
-                {"t": sequence_type, "p": prefix, "pat": DEFAULT_PATTERN},
+                {
+                    "t": sequence_type,
+                    "p": prefix,
+                    "pat": pattern,
+                    "pad": padding,
+                    "rp": reset_policy,
+                },
             )
         await session.commit()
+
     yield
 
 

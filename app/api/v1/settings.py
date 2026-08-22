@@ -323,7 +323,11 @@ async def read_sequences(_: CurrentUserDep, service: SequenceServiceDep) -> Sequ
     ``preview`` es solo una muestra del formato: leer este endpoint **no**
     reserva ni consume ningun correlativo.
     """
-    sequences = await service.list_sequences()
+    sequences = [
+        item
+        for item in await service.list_sequences()
+        if item.sequence_type in {SequenceType.QUOTE, SequenceType.FIRING}
+    ]
     return SequenceListOut(sequences=[_sequence_out(item) for item in sequences])
 
 

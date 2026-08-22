@@ -35,11 +35,13 @@ from app.models.masters import (
     ProductType,
     UnitOfMeasure,
 )
+from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.imports import RowResolution
 from app.services.importing.staging import ExistingData, StagingBuilder
 from app.services.importing.workbook import analyze_workbook, read_workbook
 from app.services.inventory import InventoryService
+from app.services.sequences import SequenceService
 
 MAX_PAGE_SIZE = 500
 
@@ -63,9 +65,15 @@ class ImportBlockedError(APIError):
 
 
 class ImportService:
-    def __init__(self, session: AsyncSession, inventory: InventoryService) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        inventory: InventoryService,
+        sequences: SequenceService | None = None,
+    ) -> None:
         self._session = session
         self._inventory = inventory
+        self._sequences = sequences or SequenceService(session)
 
     # -- carga y analisis ---------------------------------------------------
     async def upload(
@@ -418,6 +426,10 @@ class ImportService:
             for item in (await self._session.execute(select(Product))).scalars()
         }
 
+        max_50 = 0
+        max_70 = 0
+        import re
+
         for row in rows:
             payload = row.normalized
             reference = str(payload.get("internal_reference") or "")
@@ -425,6 +437,13 @@ class ImportService:
                 row.status = ImportRowStatus.COMMITTED
                 self._count(result, ImportEntity.PRODUCT, "skipped")
                 continue
+
+            m50 = re.match(r"^LAB50(\d+)$", reference)
+            if m50:
+                max_50 = max(max_50, int(m50.group(1)))
+            m70 = re.match(r"^LAB70(\d+)$", reference)
+            if m70:
+                max_70 = max(max_70, int(m70.group(1)))
 
             category_id = categories.get(fold(payload.get("category_path") or ""))
             pos_id = pos_categories.get(fold(payload.get("pos_category_name") or ""))
@@ -458,6 +477,11 @@ class ImportService:
             row.target_table = "products"
             row.target_id = str(product.id)
             row.status = ImportRowStatus.COMMITTED
+
+        if max_50 > 0:
+            await self._sequences.synchronize(SequenceType.PRODUCT_50, max_50)
+        if max_70 > 0:
+            await self._sequences.synchronize(SequenceType.PRODUCT_70, max_70)
 
     async def _commit_partners(
         self, rows: list[ImportRow], result: dict[str, dict[str, int]]

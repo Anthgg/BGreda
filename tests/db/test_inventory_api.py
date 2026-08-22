@@ -22,7 +22,6 @@ async def _setup(api: httpx.AsyncClient, csrf: str) -> tuple[int, int]:
     product = await api.post(
         PRODUCTS,
         json={
-            "internal_reference": "INS-1",
             "name": "Arcilla blanca",
             "product_type": "RAW_MATERIAL",
             "product_category_id": category.json()["id"],
@@ -150,7 +149,7 @@ class TestFiltros:
     async def test_busqueda_por_producto(self, api: httpx.AsyncClient, admin_csrf: str) -> None:
         product_id, location_id = await _setup(api, admin_csrf)
         await _adjust(api, admin_csrf, product_id, location_id, "5")
-        found = (await api.get(INVENTORY, params={"search": "INS-1"})).json()
+        found = (await api.get(INVENTORY, params={"search": "Arcilla"})).json()
         assert found["total"] == 1
         missing = (await api.get(INVENTORY, params={"search": "no existe"})).json()
         assert missing["total"] == 0

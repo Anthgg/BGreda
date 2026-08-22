@@ -23,6 +23,7 @@ from app.models.masters import (
     ProductType,
     UnitOfMeasure,
 )
+from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.masters import (
     PartnerCreate,
@@ -35,8 +36,15 @@ from app.schemas.masters import (
     UnitOfMeasureCreate,
 )
 from app.services.audit import AuditRecorder
+from app.services.sequences import SequenceService
 
 MAX_PAGE_SIZE = 200
+
+
+def sequence_type_for_product_type(product_type: ProductType) -> SequenceType:
+    if product_type is ProductType.FINISHED_PRODUCT:
+        return SequenceType.PRODUCT_50
+    return SequenceType.PRODUCT_70
 
 
 class MasterNotFoundError(APIError):
@@ -62,9 +70,15 @@ def _limit(limit: int) -> int:
 
 
 class MasterDataService:
-    def __init__(self, session: AsyncSession, audit: AuditRecorder) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        audit: AuditRecorder,
+        sequences: SequenceService | None = None,
+    ) -> None:
         self._session = session
         self._audit = audit
+        self._sequences = sequences or SequenceService(session)
 
     # -- categorias ---------------------------------------------------------
     async def list_product_categories(self, *, only_active: bool = False) -> list[ProductCategory]:
@@ -217,9 +231,11 @@ class MasterDataService:
 
     async def create_product(self, payload: ProductCreate, user: AuthenticatedUser) -> Product:
         await self._check_product_refs(payload)
+        seq_type = sequence_type_for_product_type(payload.product_type)
+        reference = await self._sequences.issue(seq_type, user_id=user.id)
         product = Product(
-            internal_reference=payload.internal_reference,
-            **payload.model_dump(exclude={"internal_reference"}),
+            internal_reference=reference,
+            **payload.model_dump(),
         )
         self._session.add(product)
         await self._flush(MasterConflictError("Ya existe un producto con esa referencia interna"))

@@ -29,7 +29,6 @@ async def create_category(
 
 async def create_product(api: httpx.AsyncClient, csrf: str, **overrides: Any) -> httpx.Response:
     payload: dict[str, Any] = {
-        "internal_reference": "INS-1",
         "name": "Arcilla blanca",
         "product_type": "RAW_MATERIAL",
         "product_category_id": overrides.pop("product_category_id"),
@@ -140,35 +139,144 @@ class TestProductos:
         response = await create_product(api, admin_csrf, product_category_id=category["id"])
         assert response.status_code == 201, response.text
         body = response.json()
-        assert body["internal_reference"] == "INS-1"
+        assert body["internal_reference"].startswith("LAB70")
         detail = await api.get(f"{PRODUCTS}/{body['id']}")
         assert detail.json()["product_category_path"] == "Insumos Taller"
 
-    async def test_la_referencia_interna_es_unica(
+    async def test_finished_product_genera_prefijo_lab50(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        category = await create_category(api, admin_csrf, "Artesanias")
+        res1 = await create_product(
+            api,
+            admin_csrf,
+            product_category_id=category["id"],
+            product_type="FINISHED_PRODUCT",
+            name="Taza 1",
+            base_uom_code="unit",
+        )
+        assert res1.status_code == 201, res1.text
+        assert res1.json()["internal_reference"] == "LAB50001"
+
+        res2 = await create_product(
+            api,
+            admin_csrf,
+            product_category_id=category["id"],
+            product_type="FINISHED_PRODUCT",
+            name="Taza 2",
+            base_uom_code="unit",
+        )
+        assert res2.status_code == 201, res2.text
+        assert res2.json()["internal_reference"] == "LAB50002"
+
+    async def test_raw_material_prepared_y_service_generan_prefijo_lab70(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        category = await create_category(api, admin_csrf, "Taller")
+        raw = await create_product(
+            api,
+            admin_csrf,
+            product_category_id=category["id"],
+            product_type="RAW_MATERIAL",
+            name="Arcilla",
+            base_uom_code="g",
+        )
+        assert raw.status_code == 201, raw.text
+        assert raw.json()["internal_reference"] == "LAB70001"
+
+        prep = await create_product(
+            api,
+            admin_csrf,
+            product_category_id=category["id"],
+            product_type="PREPARED_MATERIAL",
+            name="Esmalte verde",
+            base_uom_code="g",
+        )
+        assert prep.status_code == 201, prep.text
+        assert prep.json()["internal_reference"] == "LAB70002"
+
+        serv = await create_product(
+            api,
+            admin_csrf,
+            product_category_id=category["id"],
+            product_type="SERVICE",
+            name="Clase de torno",
+            base_uom_code=None,
+        )
+        assert serv.status_code == 201, serv.text
+        assert serv.json()["internal_reference"] == "LAB70003"
+
+    async def test_la_api_rechaza_referencia_interna_suministrada_por_cliente(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
         category = await create_category(api, admin_csrf, "Insumos Taller")
-        await create_product(api, admin_csrf, product_category_id=category["id"])
-        repeated = await create_product(
-            api, admin_csrf, product_category_id=category["id"], name="Otro nombre"
+        response = await api.post(
+            PRODUCTS,
+            json={
+                "internal_reference": "HACK-999",
+                "name": "Intento de forzar codigo",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": category["id"],
+                "base_uom_code": "g",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
         )
-        assert repeated.status_code == 409
-        assert repeated.json()["error"]["code"] == "MASTER_VALUE_EXISTS"
+        assert response.status_code == 422
+
+    async def test_editar_producto_no_puede_cambiar_referencia_interna(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        category = await create_category(api, admin_csrf, "Insumos Taller")
+        created = (
+            await create_product(
+                api, admin_csrf, product_category_id=category["id"], name="Original"
+            )
+        ).json()
+        orig_ref = created["internal_reference"]
+
+        # Edicion normal cambia el nombre pero no la referencia
+        update_res = await api.put(
+            f"{PRODUCTS}/{created['id']}",
+            json={
+                "name": "Nombre Modificado",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": category["id"],
+                "base_uom_code": "g",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert update_res.status_code == 200
+        assert update_res.json()["name"] == "Nombre Modificado"
+        assert update_res.json()["internal_reference"] == orig_ref
+
+        # Intento de enviar internal_reference en PUT se rechaza
+        hack_res = await api.put(
+            f"{PRODUCTS}/{created['id']}",
+            json={
+                "internal_reference": "HACK-NEW",
+                "name": "Nombre Modificado",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": category["id"],
+                "base_uom_code": "g",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert hack_res.status_code == 422
 
     async def test_dos_productos_pueden_llamarse_igual(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        """El nombre no deduplica: la clave de negocio es la referencia."""
+        """El nombre no deduplica: la clave de negocio es la referencia autogenerada."""
         category = await create_category(api, admin_csrf, "Insumos Taller")
-        await create_product(api, admin_csrf, product_category_id=category["id"], name="VASO")
-        second = await create_product(
-            api,
-            admin_csrf,
-            product_category_id=category["id"],
-            internal_reference="INS-2",
-            name="VASO",
+        first = await create_product(
+            api, admin_csrf, product_category_id=category["id"], name="VASO"
         )
+        second = await create_product(
+            api, admin_csrf, product_category_id=category["id"], name="VASO"
+        )
+        assert first.status_code == 201
         assert second.status_code == 201
+        assert first.json()["internal_reference"] != second.json()["internal_reference"]
 
     async def test_el_costo_conserva_doce_decimales(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -218,7 +326,6 @@ class TestProductos:
             api,
             admin_csrf,
             product_category_id=category["id"],
-            internal_reference="SER-1",
             name="Clase suelta",
             product_type="SERVICE",
             base_uom_code=None,
@@ -226,6 +333,7 @@ class TestProductos:
         )
         assert response.status_code == 201, response.text
         assert response.json()["base_uom_code"] is None
+        assert response.json()["internal_reference"].startswith("LAB70")
 
     async def test_una_categoria_inexistente_se_rechaza(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -238,20 +346,22 @@ class TestProductos:
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
         category = await create_category(api, admin_csrf, "Insumos Taller")
+        created_refs = []
         for index in range(5):
-            await create_product(
+            res = await create_product(
                 api,
                 admin_csrf,
                 product_category_id=category["id"],
-                internal_reference=f"INS-{index}",
                 name=f"Arcilla {index}",
             )
+            created_refs.append(res.json()["internal_reference"])
         page = (await api.get(PRODUCTS, params={"limit": 2, "offset": 0})).json()
         assert page["total"] == 5
         assert len(page["items"]) == 2
 
-        by_reference = (await api.get(PRODUCTS, params={"search": "INS-3"})).json()
-        assert [item["internal_reference"] for item in by_reference["items"]] == ["INS-3"]
+        target_ref = created_refs[3]
+        by_reference = (await api.get(PRODUCTS, params={"search": target_ref})).json()
+        assert [item["internal_reference"] for item in by_reference["items"]] == [target_ref]
 
         by_name = (await api.get(PRODUCTS, params={"search": "Arcilla 4"})).json()
         assert by_name["total"] == 1

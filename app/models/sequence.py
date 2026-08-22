@@ -39,14 +39,16 @@ MAX_PADDING = 12
 
 
 class SequenceType(StrEnum):
-    """Tipos de documento con correlativo propio.
+    """Tipos de documento o maestro con correlativo propio.
 
     Cada tipo lleva su contador independiente: agotar cotizaciones no afecta a
-    las quemas.
+    las quemas ni a las familias de productos.
     """
 
     QUOTE = "QUOTE"
     FIRING = "FIRING"
+    PRODUCT_50 = "PRODUCT_50"
+    PRODUCT_70 = "PRODUCT_70"
 
 
 class ResetPolicy(StrEnum):
@@ -65,7 +67,7 @@ class ResetPolicy(StrEnum):
 
 
 class DocumentSequence(Base, TimestampMixin):
-    """Configuracion y contador de una secuencia documental."""
+    """Configuracion y contador de una secuencia documental o de maestro."""
 
     __tablename__ = "document_sequences"
 
@@ -96,7 +98,7 @@ class DocumentSequence(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "sequence_type IN ('QUOTE', 'FIRING')",
+            "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70')",
             name="type_allowed",
         ),
         CheckConstraint(

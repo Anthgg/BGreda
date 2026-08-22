@@ -192,12 +192,7 @@ class _ProductFields(_In):
 
 
 class ProductCreate(_ProductFields):
-    internal_reference: Annotated[str, Field(min_length=1, max_length=32)]
-
-    @field_validator("internal_reference", mode="after")
-    @classmethod
-    def _check_reference(cls, value: str) -> str:
-        return _plain_text(value)
+    """Creacion manual de producto: la referencia interna la genera el backend."""
 
 
 class ProductUpdate(_ProductFields):

@@ -486,3 +486,105 @@ class TestCommit:
 
         for table in ("products", "product_categories", "stock_balances"):
             assert await count_rows(db_session, table) == 0, table
+
+    async def test_la_importacion_preserva_referencias_y_sincroniza_contadores(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """Los productos importados conservan su codigo y sincronizan el contador familiar."""
+        payload = workbook_bytes(
+            {
+                "Categoria de producto": [
+                    CATEGORY_HEADERS,
+                    ["Insumos Taller", None, "Insumos Taller", 6021031.0],
+                    [
+                        "Artesanias Greda",
+                        "Productos Terminados Taller",
+                        "Productos Terminados Taller / Artesanias Greda",
+                        6021032.0,
+                    ],
+                ],
+                "Productos": [
+                    PRODUCT_HEADERS,
+                    [
+                        "Vaso Ceramica",
+                        "LAB50121",
+                        "Productos Terminados Taller / Artesanias Greda",
+                        None,
+                        None,
+                        0.18,
+                        "Si",
+                        "No",
+                        "Si",
+                        25.0,
+                        10.0,
+                        "Unidad",
+                        "Unidad",
+                    ],
+                    [
+                        "Arcilla Roja",
+                        "LAB70144",
+                        "Insumos Taller",
+                        None,
+                        None,
+                        0.18,
+                        "No",
+                        "Si",
+                        "No",
+                        None,
+                        0.0169,
+                        "gr",
+                        "kg",
+                    ],
+                ],
+            }
+        )
+        batch = (await upload(api, admin_csrf, payload)).json()
+        await resolve_everything(api, admin_csrf, batch["id"])
+        commit = await api.post(
+            f"{IMPORTS}/{batch['id']}/commit", headers={"X-CSRF-Token": admin_csrf}
+        )
+        assert commit.status_code == 200, commit.text
+
+        # 1. Los codigos del excel se preservaron intactos y NO crearon issues en secuencias
+        prods = (await api.get(PRODUCTS, params={"limit": 10})).json()["items"]
+        refs = {p["internal_reference"] for p in prods}
+        assert "LAB50121" in refs
+        assert "LAB70144" in refs
+        assert await count_rows(db_session, "document_sequence_issues") == 0
+
+        # 2. Las siguientes creaciones manuales arrancan por encima del maximo importado
+        cat_term = next(
+            p["product_category_id"] for p in prods if p["internal_reference"] == "LAB50121"
+        )
+        cat_ins = next(
+            p["product_category_id"] for p in prods if p["internal_reference"] == "LAB70144"
+        )
+
+        nuevo_50 = await api.post(
+            PRODUCTS,
+            json={
+                "name": "Nuevo Terminado Manual",
+                "product_type": "FINISHED_PRODUCT",
+                "product_category_id": cat_term,
+                "base_uom_code": "unit",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert nuevo_50.status_code == 201, nuevo_50.text
+        assert nuevo_50.json()["internal_reference"] == "LAB50122"
+
+        nuevo_70 = await api.post(
+            PRODUCTS,
+            json={
+                "name": "Nuevo Insumo Manual",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": cat_ins,
+                "base_uom_code": "g",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert nuevo_70.status_code == 201, nuevo_70.text
+        assert nuevo_70.json()["internal_reference"] == "LAB70145"
+
+        # 3. Solo las 2 creaciones manuales generaron issues auditables
+        assert await count_rows(db_session, "document_sequence_issues") == 2
