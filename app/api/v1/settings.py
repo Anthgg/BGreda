@@ -9,12 +9,13 @@ Reparto de permisos, impuesto siempre en el backend:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Response, UploadFile
+from fastapi import APIRouter, File, Response, UploadFile, status
 from fastapi.responses import Response as FileResponse
 
 from app.api.deps import (
     AdminUserDep,
     AuditRecorderDep,
+    CatalogServiceDep,
     CurrentUserDep,
     DbSessionDep,
     ObjectStorageDep,
@@ -26,6 +27,13 @@ from app.models.audit import AuditAction
 from app.models.sequence import DocumentSequence, SequenceType
 from app.models.settings import CommercialSettings, CompanySettings
 from app.schemas.audit import AuditEventOut, AuditEventPage
+from app.schemas.catalog import (
+    CurrencyOption,
+    ReferenceDataOut,
+    SequencePatternPresetCreate,
+    SequencePatternPresetOut,
+    UbigeoOption,
+)
 from app.schemas.common import ErrorResponse
 from app.schemas.sequence import SequenceConfigOut, SequenceConfigUpdate, SequenceListOut
 from app.schemas.settings import (
@@ -119,6 +127,43 @@ def _sequence_out(sequence: DocumentSequence) -> SequenceConfigOut:
         version=sequence.version,
         updated_at=sequence.updated_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Catalogos controlados
+# ---------------------------------------------------------------------------
+@router.get("/reference-data", response_model=ReferenceDataOut, responses=_ERRORS)
+async def read_reference_data(
+    _: CurrentUserDep,
+    service: CatalogServiceDep,
+) -> ReferenceDataOut:
+    """Monedas ISO, ubigeos INEI y formatos reutilizables almacenados en BD."""
+    currencies = await service.list_currencies()
+    districts = await service.list_districts()
+    patterns = await service.list_sequence_patterns()
+    return ReferenceDataOut(
+        currencies=[CurrencyOption.model_validate(item) for item in currencies],
+        districts=[UbigeoOption.model_validate(item) for item in districts],
+        sequence_patterns=[SequencePatternPresetOut.model_validate(item) for item in patterns],
+    )
+
+
+@router.post(
+    "/sequence-patterns",
+    response_model=SequencePatternPresetOut,
+    status_code=status.HTTP_201_CREATED,
+    responses=_ERRORS,
+)
+async def create_sequence_pattern(
+    payload: SequencePatternPresetCreate,
+    user: AdminUserDep,
+    service: CatalogServiceDep,
+    session: DbSessionDep,
+) -> SequencePatternPresetOut:
+    preset = await service.create_sequence_pattern(payload, user)
+    await session.commit()
+    await session.refresh(preset)
+    return SequencePatternPresetOut.model_validate(preset)
 
 
 # ---------------------------------------------------------------------------

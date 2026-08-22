@@ -10,9 +10,11 @@ sesion de pruebas: nunca se tocan las tablas reales de la aplicacion.
 
 from __future__ import annotations
 
+import csv
 import os
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 import pytest
@@ -30,6 +32,7 @@ from app.api.deps import (
 from app.db.session import normalize_database_url
 from app.main import create_app
 from app.models import Base
+from app.models.catalog import CurrencyCatalog, SequencePatternPreset, UbigeoDistrict
 from app.models.profile import Profile, UserRole
 from app.models.settings import SINGLETON_ID
 from tests.conftest import TEST_EMAIL, TEST_PASSWORD, TEST_USER_ID
@@ -50,6 +53,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 DEFAULT_PATTERN = "{PREFIX}-{YYYY}-{NUMBER}"
+DATA_DIR = Path(__file__).resolve().parents[2] / "alembic" / "data"
+
+
+def _catalog_rows(name: str) -> list[dict[str, object]]:
+    with (DATA_DIR / name).open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def _engine_url() -> str:
@@ -77,6 +86,28 @@ async def db_engine() -> AsyncIterator[object]:
     )
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        currencies = _catalog_rows("iso_4217_2026.csv")
+        for row in currencies:
+            row["minor_units"] = int(str(row["minor_units"])) if row["minor_units"] else None
+        await connection.execute(CurrencyCatalog.__table__.insert(), currencies)
+        await connection.execute(
+            UbigeoDistrict.__table__.insert(), _catalog_rows("ubigeo_inei_2022.csv")
+        )
+        await connection.execute(
+            SequencePatternPreset.__table__.insert(),
+            [
+                {
+                    "name": "Prefijo - ano - numero",
+                    "pattern": DEFAULT_PATTERN,
+                    "is_system": True,
+                },
+                {
+                    "name": "Prefijo - numero",
+                    "pattern": "{PREFIX}-{NUMBER}",
+                    "is_system": True,
+                },
+            ],
+        )
 
     yield engine
     await engine.dispose()
@@ -106,6 +137,7 @@ async def reset_database(
                 "RESTART IDENTITY CASCADE"
             )
         )
+        await session.execute(text("DELETE FROM sequence_pattern_presets WHERE NOT is_system"))
         await session.execute(
             text("INSERT INTO company_settings (id) VALUES (:id)"), {"id": SINGLETON_ID}
         )

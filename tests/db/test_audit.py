@@ -80,13 +80,26 @@ async def test_cada_campo_genera_su_propio_evento(
 ) -> None:
     await api.put(
         COMPANY,
-        json={"version": 1, "legal_name": "Greda", "phone": "987654321", "district": "Miraflores"},
+        json={
+            "version": 1,
+            "legal_name": "Greda",
+            "phone": "987654321",
+            "ubigeo_code": "150122",
+        },
         headers={"X-CSRF-Token": admin_csrf},
     )
 
     campos = {e.field for e in (await db_session.execute(select(AuditEvent))).scalars().all()}
 
-    assert campos == {"legal_name", "phone", "district"}
+    assert campos == {
+        "legal_name",
+        "phone",
+        "ubigeo_code",
+        "district",
+        "province",
+        "department",
+        "country",
+    }
 
 
 async def test_guardar_sin_cambios_no_genera_historial(

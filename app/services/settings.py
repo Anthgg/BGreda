@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
+from app.models.catalog import CurrencyCatalog, UbigeoDistrict
 from app.models.settings import SINGLETON_ID, BankAccount, CommercialSettings, CompanySettings
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.settings import (
@@ -45,6 +46,12 @@ class SettingsVersionConflictError(APIError):
         "La configuracion fue modificada por otra persona mientras editaba. "
         "Vuelva a cargarla para no perder ese cambio."
     )
+
+
+class InvalidCatalogValueError(APIError):
+    status_code = 422
+    code = "INVALID_CATALOG_VALUE"
+    message = "La moneda o ubicacion seleccionada no existe en el catalogo vigente"
 
 
 def _editable_fields(model: type[Any]) -> list[str]:
@@ -78,6 +85,7 @@ class SettingsService:
         self._check_version(settings.version, payload.version)
 
         incoming = payload.model_dump(exclude={"version"})
+        await self._canonicalize_location(incoming)
         fields = _editable_fields(CompanySettingsUpdate)
         changes = diff_model(settings, incoming, fields)
 
@@ -94,6 +102,33 @@ class SettingsService:
                 user_display_name=user.display_name,
             )
         return settings
+
+    async def _canonicalize_location(self, incoming: dict[str, Any]) -> None:
+        """Resuelve el ubigeo y nunca confia en nombres escritos por el cliente."""
+        code = incoming.get("ubigeo_code")
+        location_fields = ("district", "province", "department", "country")
+        if code is None:
+            if any(incoming.get(field) for field in location_fields):
+                raise InvalidCatalogValueError(
+                    "Seleccione departamento, provincia y distrito desde el catalogo INEI"
+                )
+            for field in location_fields:
+                incoming[field] = None
+            return
+
+        result = await self._session.execute(
+            select(UbigeoDistrict).where(UbigeoDistrict.code == code)
+        )
+        district = result.scalar_one_or_none()
+        if district is None:
+            raise InvalidCatalogValueError("El distrito seleccionado no existe en el catalogo INEI")
+
+        incoming.update(
+            district=district.district_name,
+            province=district.province_name,
+            department=district.department_name,
+            country="Peru",
+        )
 
     # ------------------------------------------------------------------
     # Comercial
@@ -118,6 +153,7 @@ class SettingsService:
         self._check_version(settings.version, payload.version)
 
         incoming = payload.model_dump(exclude={"version", "bank_account"})
+        await self._canonicalize_currency(incoming)
         fields = _editable_fields(CommercialSettingsUpdate)
         changes = diff_model(settings, incoming, fields)
 
@@ -137,6 +173,21 @@ class SettingsService:
                 user_display_name=user.display_name,
             )
         return settings
+
+    async def _canonicalize_currency(self, incoming: dict[str, Any]) -> None:
+        """Deriva el simbolo del codigo ISO almacenado en el catalogo."""
+        code = incoming.get("currency_code")
+        if code is None:
+            incoming["currency_symbol"] = None
+            return
+
+        result = await self._session.execute(
+            select(CurrencyCatalog).where(CurrencyCatalog.code == code)
+        )
+        currency = result.scalar_one_or_none()
+        if currency is None:
+            raise InvalidCatalogValueError("La moneda seleccionada no existe en ISO 4217")
+        incoming["currency_symbol"] = currency.symbol
 
     async def _apply_primary_bank_account(
         self,

@@ -27,6 +27,7 @@ from app.db.session import get_db_session
 from app.models.profile import UserRole
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.catalogs import CatalogService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -163,6 +164,16 @@ async def get_audit_recorder(session: DbSessionDep) -> AuditRecorder:
 
 
 AuditRecorderDep = Annotated[AuditRecorder, Depends(get_audit_recorder)]
+
+
+async def get_catalog_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> CatalogService:
+    return CatalogService(session, audit)
+
+
+CatalogServiceDep = Annotated[CatalogService, Depends(get_catalog_service)]
 
 
 async def get_settings_service(

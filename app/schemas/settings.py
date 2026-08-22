@@ -61,6 +61,8 @@ class CompanySettingsBase(_StrictModel):
 
     address_line1: ShortText = None
     address_line2: ShortText = None
+    #: Codigo oficial INEI. Los nombres se resuelven y canonizan en el servidor.
+    ubigeo_code: Annotated[str | None, Field(pattern=r"^\d{6}$")] = None
     district: Annotated[str | None, Field(max_length=120)] = None
     province: Annotated[str | None, Field(max_length=120)] = None
     department: Annotated[str | None, Field(max_length=120)] = None

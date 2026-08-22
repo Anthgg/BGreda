@@ -64,6 +64,9 @@ class CompanySettings(Base, VersionedSingletonMixin):
     # ---- Domicilio ------------------------------------------------------
     address_line1: Mapped[str | None] = mapped_column(String(200))
     address_line2: Mapped[str | None] = mapped_column(String(200))
+    ubigeo_code: Mapped[str | None] = mapped_column(
+        ForeignKey("ubigeo_districts.code", ondelete="RESTRICT"),
+    )
     district: Mapped[str | None] = mapped_column(String(120))
     province: Mapped[str | None] = mapped_column(String(120))
     department: Mapped[str | None] = mapped_column(String(120))
@@ -96,7 +99,9 @@ class CommercialSettings(Base, VersionedSingletonMixin):
     __tablename__ = "commercial_settings"
 
     #: Codigo ISO 4217. No se precarga ningun valor: lo define el usuario.
-    currency_code: Mapped[str | None] = mapped_column(String(3))
+    currency_code: Mapped[str | None] = mapped_column(
+        ForeignKey("currency_catalog.code", ondelete="RESTRICT"),
+    )
     currency_symbol: Mapped[str | None] = mapped_column(String(8))
 
     #: Porcentaje, no fraccion: 18 significa 18 %. NUMERIC, nunca float.
