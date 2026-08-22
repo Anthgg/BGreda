@@ -26,9 +26,7 @@ async def test_operator_puede_leer_los_catalogos(
     assert next(item for item in body["currencies"] if item["code"] == "PEN")["symbol"] == "S/"
 
 
-async def test_una_moneda_inexistente_se_rechaza(
-    api: httpx.AsyncClient, admin_csrf: str
-) -> None:
+async def test_una_moneda_inexistente_se_rechaza(api: httpx.AsyncClient, admin_csrf: str) -> None:
     response = await api.put(
         COMMERCIAL,
         json={"version": 1, "currency_code": "ZZZ", "currency_symbol": "Z"},
@@ -52,9 +50,7 @@ async def test_el_backend_deriva_el_simbolo_de_la_moneda(
     assert response.json()["currency_symbol"] == "S/"
 
 
-async def test_un_distrito_inexistente_se_rechaza(
-    api: httpx.AsyncClient, admin_csrf: str
-) -> None:
+async def test_un_distrito_inexistente_se_rechaza(api: httpx.AsyncClient, admin_csrf: str) -> None:
     response = await api.put(
         COMPANY,
         json={"version": 1, "ubigeo_code": "999999"},
@@ -116,9 +112,7 @@ async def test_admin_crea_un_formato_y_este_aparece_en_el_catalogo(
     assert any(item["name"] == "Serie mensual" for item in catalog)
 
 
-async def test_un_formato_duplicado_se_rechaza(
-    api: httpx.AsyncClient, admin_csrf: str
-) -> None:
+async def test_un_formato_duplicado_se_rechaza(api: httpx.AsyncClient, admin_csrf: str) -> None:
     response = await api.post(
         PATTERNS,
         json={"name": "Otro nombre", "pattern": "{PREFIX}-{YYYY}-{NUMBER}"},
@@ -129,9 +123,7 @@ async def test_un_formato_duplicado_se_rechaza(
     assert response.json()["error"]["code"] == "CATALOG_VALUE_EXISTS"
 
 
-async def test_operator_no_puede_crear_formatos(
-    api: httpx.AsyncClient, operator_csrf: str
-) -> None:
+async def test_operator_no_puede_crear_formatos(api: httpx.AsyncClient, operator_csrf: str) -> None:
     response = await api.post(
         PATTERNS,
         json={"name": "Intento", "pattern": "{PREFIX}-{NUMBER}"},
