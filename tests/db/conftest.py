@@ -184,6 +184,8 @@ async def reset_database(
                 "TRUNCATE audit_events, bank_accounts, document_sequence_issues, "
                 "document_sequences, commercial_settings, company_settings, profiles, "
                 "recipe_lines, recipe_versions, recipes, "
+                "firing_lines, firing_kiln_sessions, firings, "
+                "kiln_occupancy_factors, kiln_rates, kilns, "
                 "import_rows, import_batches, stock_movements, stock_balances, "
                 "stock_locations, products, partners, product_categories, pos_categories "
                 "RESTART IDENTITY CASCADE"
