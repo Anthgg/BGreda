@@ -127,6 +127,7 @@ class RecipeOut(_Out):
     active: bool
     current_version_id: int | None = None
     current_version: RecipeVersionOut | None = None
+    versions: list[RecipeVersionOut] = []
     versions_count: int = 0
     created_at: datetime
     updated_at: datetime

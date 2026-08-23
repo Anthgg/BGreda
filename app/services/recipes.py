@@ -86,8 +86,12 @@ class RecipeService:
             select(Recipe)
             .join(Product, Recipe.product_id == Product.id)
             .options(
-                selectinload(Recipe.current_version).selectinload(RecipeVersion.lines),
-                selectinload(Recipe.versions),
+                selectinload(Recipe.current_version)
+                .selectinload(RecipeVersion.lines)
+                .selectinload(RecipeLine.component_product),
+                selectinload(Recipe.versions)
+                .selectinload(RecipeVersion.lines)
+                .selectinload(RecipeLine.component_product),
             )
         )
 
@@ -118,8 +122,12 @@ class RecipeService:
             select(Recipe)
             .where(Recipe.id == recipe_id)
             .options(
-                selectinload(Recipe.current_version).selectinload(RecipeVersion.lines),
-                selectinload(Recipe.versions).selectinload(RecipeVersion.lines),
+                selectinload(Recipe.current_version)
+                .selectinload(RecipeVersion.lines)
+                .selectinload(RecipeLine.component_product),
+                selectinload(Recipe.versions)
+                .selectinload(RecipeVersion.lines)
+                .selectinload(RecipeLine.component_product),
             )
         )
         recipe = (await self._session.execute(stmt)).scalar_one_or_none()
@@ -278,9 +286,16 @@ class RecipeService:
 
         if activate:
             # Archivar version activa previa
-            for v in recipe.versions:
-                if v.status == RecipeStatus.ACTIVE:
-                    v.status = RecipeStatus.ARCHIVED
+            stmt_active = (
+                select(RecipeVersion)
+                .where(
+                    RecipeVersion.recipe_id == recipe.id,
+                    RecipeVersion.status == RecipeStatus.ACTIVE,
+                )
+            )
+            for prev_active in (await self._session.execute(stmt_active)).scalars().all():
+                prev_active.status = RecipeStatus.ARCHIVED
+            await self._session.flush()
 
         new_status = RecipeStatus.ACTIVE if activate else RecipeStatus.DRAFT
         version = RecipeVersion(
@@ -303,7 +318,7 @@ class RecipeService:
                 component_product_id=line_in.component_product_id,
                 component_type=line_in.component_type,
                 percentage=line_in.percentage,
-                sort_order=line_in.sort_order if line_in.sort_order else idx,
+                sort_order=idx + 1,
             )
             self._session.add(line)
 
@@ -316,7 +331,7 @@ class RecipeService:
             "recipe_version",
             AuditAction.CREATE,
             user,
-            f"V{next_version_number} ({new_status.value}) para receta {recipe.name}",
+            f"Creada V{version.version_number} para receta {recipe.name}",
         )
 
         full_version = await self.get_version(version.id)
@@ -334,9 +349,17 @@ class RecipeService:
             return self._to_version_out(version)
 
         # Archivar activa actual
-        for v in recipe.versions:
-            if v.id != version.id and v.status == RecipeStatus.ACTIVE:
-                v.status = RecipeStatus.ARCHIVED
+        stmt_active = (
+            select(RecipeVersion)
+            .where(
+                RecipeVersion.recipe_id == version.recipe_id,
+                RecipeVersion.status == RecipeStatus.ACTIVE,
+                RecipeVersion.id != version.id,
+            )
+        )
+        for prev_active in (await self._session.execute(stmt_active)).scalars().all():
+            prev_active.status = RecipeStatus.ARCHIVED
+        await self._session.flush()
 
         version.status = RecipeStatus.ACTIVE
         recipe.current_version_id = version.id
@@ -596,6 +619,14 @@ class RecipeService:
         current_version_out = (
             self._to_version_out(recipe.current_version) if recipe.current_version else None
         )
+        versions_out = (
+            [
+                self._to_version_out(v)
+                for v in sorted(recipe.versions, key=lambda x: x.version_number, reverse=True)
+            ]
+            if recipe.versions
+            else []
+        )
         return RecipeOut(
             id=recipe.id,
             product_id=recipe.product_id,
@@ -606,6 +637,7 @@ class RecipeService:
             active=recipe.active,
             current_version_id=recipe.current_version_id,
             current_version=current_version_out,
+            versions=versions_out,
             versions_count=len(recipe.versions) if recipe.versions else 0,
             created_at=recipe.created_at,
             updated_at=recipe.updated_at,
