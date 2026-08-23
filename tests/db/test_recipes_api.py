@@ -360,6 +360,101 @@ class TestCalculador:
         actual_unit_cost = Decimal(str(calc["cost_per_real_unit"]))
         assert abs(actual_unit_cost - expected_unit_cost) < Decimal("0.000001")
 
+    async def test_calculador_rechaza_uom_distinta_de_gramos(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        p = await setup_recipe_products(api, admin_csrf)
+        base_payload = {
+            "lines": [
+                {
+                    "component_product_id": p["feldespato_id"],
+                    "component_type": "BASE",
+                    "percentage": 100.0,
+                },
+            ],
+            "target_base_quantity": 1.0,
+        }
+
+        # target_uom = kg -> 422
+        res_kg = await api.post(
+            f"{RECIPES}/calculate",
+            json={**base_payload, "target_uom": "kg"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert res_kg.status_code == 422, res_kg.text
+
+        # target_uom = unit -> 422
+        res_unit = await api.post(
+            f"{RECIPES}/calculate",
+            json={**base_payload, "target_uom": "unit"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert res_unit.status_code == 422, res_unit.text
+
+        # target_uom = g -> 200 OK
+        res_g = await api.post(
+            f"{RECIPES}/calculate",
+            json={**base_payload, "target_uom": "g"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert res_g.status_code == 200, res_g.text
+
+    async def test_calculador_1000g_con_base60_base40_colorant6_sin_mutacion_stock(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        p = await setup_recipe_products(api, admin_csrf)
+
+        # Consultar total de movimientos de stock antes
+        movements_before = (await api.get("/api/v1/inventory/movements")).json().get("total", 0)
+
+        calc_payload = {
+            "lines": [
+                {
+                    "component_product_id": p["feldespato_id"],
+                    "component_type": "BASE",
+                    "percentage": 60.0,
+                },
+                {
+                    "component_product_id": p["cuarzo_id"],
+                    "component_type": "BASE",
+                    "percentage": 40.0,
+                },
+                {
+                    "component_product_id": p["oxido_id"],
+                    "component_type": "COLORANT",
+                    "percentage": 6.0,
+                },
+            ],
+            "target_base_quantity": 1000.0,
+            "target_uom": "g",
+        }
+
+        res = await api.post(
+            f"{RECIPES}/calculate",
+            json=calc_payload,
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert res.status_code == 200, res.text
+        calc = res.json()
+
+        # Cantidades esperadas:
+        # BASE 60% -> 600 g
+        # BASE 40% -> 400 g
+        # COLORANT 6% -> 60 g
+        # Output real: 1060 g
+        # Yield: 1.06
+        comp_map = {c["component_product_id"]: c for c in calc["components"]}
+        assert Decimal(str(comp_map[p["feldespato_id"]]["required_quantity"])) == Decimal("600")
+        assert Decimal(str(comp_map[p["cuarzo_id"]]["required_quantity"])) == Decimal("400")
+        assert Decimal(str(comp_map[p["oxido_id"]]["required_quantity"])) == Decimal("60")
+
+        assert Decimal(str(calc["real_output_quantity"])) == Decimal("1060")
+        assert Decimal(str(calc["yield_factor"])) == Decimal("1.06")
+
+        # Verificar que NO hubo mutación de stock (delta = 0)
+        movements_after = (await api.get("/api/v1/inventory/movements")).json().get("total", 0)
+        assert movements_after - movements_before == 0
+
 
 class TestCiclos:
     async def test_deteccion_de_ciclos_en_recetas_anidadas(

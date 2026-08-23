@@ -3,6 +3,7 @@
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.recipes import (
     RecipeBasePercentageError,
@@ -12,6 +13,7 @@ from app.core.recipes import (
     validate_recipe_percentages,
 )
 from app.models.recipes import RecipeComponentType
+from app.schemas.recipes import RecipeCalculateIn
 
 
 class TestRecipeMath:
@@ -108,3 +110,19 @@ class TestRecipeMath:
 
         # None -> Decimal(0)
         assert normalize_component_unit_cost_to_grams(None, "kg") == Decimal(0)
+
+    def test_recipe_calculate_in_target_uom_restriction(self) -> None:
+        # Default es "g"
+        calc_default = RecipeCalculateIn(target_base_quantity=Decimal("1000.0"))
+        assert calc_default.target_uom == "g"
+
+        # Explicit "g" es valido
+        calc_g = RecipeCalculateIn(target_base_quantity=Decimal("1000.0"), target_uom="g")
+        assert calc_g.target_uom == "g"
+
+        # kg o unit son rechazados con error de validacion
+        with pytest.raises(ValidationError):
+            RecipeCalculateIn(target_base_quantity=Decimal("1000.0"), target_uom="kg")  # type: ignore[arg-type]
+
+        with pytest.raises(ValidationError):
+            RecipeCalculateIn(target_base_quantity=Decimal("1000.0"), target_uom="unit")  # type: ignore[arg-type]

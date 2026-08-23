@@ -6,7 +6,7 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -148,7 +148,7 @@ class RecipeCalculateIn(_In):
     recipe_id: int | None = None
     lines: list[RecipeLineIn] | None = None
     target_base_quantity: Annotated[Decimal, Field(gt=Decimal(0))] = Decimal("1000.000000")
-    target_uom: Annotated[str, Field(max_length=16)] = "g"
+    target_uom: Literal["g"] = "g"
 
 
 class CalculatedComponentLineOut(_Out):
