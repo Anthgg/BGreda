@@ -79,7 +79,7 @@ async def crear_horno(
     for tipo, importe in (("LOW", baja), ("HIGH", alta)):
         creada = await api.post(
             f"{KILNS}/{kiln['id']}/rates",
-            json={"firing_type": tipo, "rate": importe},
+            json={"firing_type": tipo, "rate": importe, "valid_from": "2026-01-01"},
             headers=head(csrf),
         )
         assert creada.status_code == 201, creada.text
