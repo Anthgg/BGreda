@@ -220,9 +220,7 @@ async def test_editar_horno_cambia_capacidad_y_estado(
     assert actualizado["code"] == kiln["code"]
 
 
-async def test_capacidad_no_positiva_se_rechaza(
-    api: httpx.AsyncClient, admin_csrf: str
-) -> None:
+async def test_capacidad_no_positiva_se_rechaza(api: httpx.AsyncClient, admin_csrf: str) -> None:
     respuesta = await api.post(
         KILNS,
         json={"name": "Horno imposible", "capacity_volume_cm3": "0"},
@@ -249,9 +247,7 @@ async def test_listado_de_hornos_filtra_en_el_servidor(
 # ---------------------------------------------------------------------------
 # Tarifas e historial
 # ---------------------------------------------------------------------------
-async def test_tarifas_baja_y_alta_quedan_vigentes(
-    api: httpx.AsyncClient, admin_csrf: str
-) -> None:
+async def test_tarifas_baja_y_alta_quedan_vigentes(api: httpx.AsyncClient, admin_csrf: str) -> None:
     kiln = (
         await api.post(
             KILNS,
@@ -424,9 +420,9 @@ async def test_crear_borrador_emite_correlativo_y_calcula(
     assert Decimal(hoja["total_volume_cm3"]) == Decimal(26010)
     assert len(hoja["sessions"]) == 3
     assert len(hoja["lines"]) == 3
-    assert Decimal(hoja["lines"][0]["allocated_cost"]).quantize(
-        Decimal("0.01")
-    ) == Decimal("1249.66")
+    assert Decimal(hoja["lines"][0]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
+        "1249.66"
+    )
 
 
 async def test_editar_borrador_recalcula_los_costos(
@@ -434,17 +430,13 @@ async def test_editar_borrador_recalcula_los_costos(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
 
     cuerpo = hoja_de_referencia(chico, grande)
     cuerpo["lines"] = cuerpo["lines"][:1]  # type: ignore[index]
 
-    respuesta = await api.put(
-        f"{FIRINGS}/{hoja['id']}", json=cuerpo, headers=head(admin_csrf)
-    )
+    respuesta = await api.put(f"{FIRINGS}/{hoja['id']}", json=cuerpo, headers=head(admin_csrf))
     assert respuesta.status_code == 200
     actualizada = respuesta.json()
 
@@ -460,9 +452,7 @@ async def test_confirmar_congela_los_snapshots_de_tarifa(
     """§7 y §37: cambiar la tarifa manana no reescribe una quema de ayer."""
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
 
     confirmada = (
@@ -492,9 +482,7 @@ async def test_una_hoja_confirmada_no_se_puede_editar(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
     await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
 
@@ -512,9 +500,7 @@ async def test_una_hoja_confirmada_no_se_puede_reconfirmar(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
     await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
 
@@ -556,15 +542,11 @@ async def test_anular_no_borra_la_hoja(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
     await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
 
-    anulada = (
-        await api.post(f"{FIRINGS}/{hoja['id']}/cancel", headers=head(admin_csrf))
-    ).json()
+    anulada = (await api.post(f"{FIRINGS}/{hoja['id']}/cancel", headers=head(admin_csrf))).json()
     assert anulada["status"] == "CANCELLED"
     assert anulada["cancelled_at"] is not None
 
@@ -580,22 +562,16 @@ async def test_confirmar_una_quema_no_consume_materiales(
     """§25: el costo del horno no se mezcla con la produccion de esmaltes."""
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     movimientos_antes = int(
-        (
-            await db_session.execute(select(func.count()).select_from(StockMovement))
-        ).scalar_one()
+        (await db_session.execute(select(func.count()).select_from(StockMovement))).scalar_one()
     )
 
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
     await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
 
     movimientos_despues = int(
-        (
-            await db_session.execute(select(func.count()).select_from(StockMovement))
-        ).scalar_one()
+        (await db_session.execute(select(func.count()).select_from(StockMovement))).scalar_one()
     )
     assert movimientos_despues == movimientos_antes
 
@@ -608,13 +584,9 @@ async def test_listado_filtra_por_estado_y_horno_en_el_servidor(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     primera = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
-    await api.post(
-        FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-    )
+    await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     await api.post(f"{FIRINGS}/{primera['id']}/confirm", headers=head(admin_csrf))
 
     confirmadas = (await api.get(FIRINGS, params={"status": "CONFIRMED"})).json()
@@ -636,9 +608,7 @@ async def test_listado_pagina_en_el_servidor(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     for _ in range(3):
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
 
     pagina = (await api.get(FIRINGS, params={"limit": 2, "offset": 0})).json()
     assert pagina["total"] == 3
@@ -651,9 +621,7 @@ async def test_listado_pagina_en_el_servidor(
 # ---------------------------------------------------------------------------
 # Permisos y CSRF
 # ---------------------------------------------------------------------------
-async def test_operator_no_puede_crear_hornos(
-    api: httpx.AsyncClient, operator_csrf: str
-) -> None:
+async def test_operator_no_puede_crear_hornos(api: httpx.AsyncClient, operator_csrf: str) -> None:
     respuesta = await api.post(
         KILNS,
         json={"name": "Horno prohibido", "capacity_volume_cm3": "1000"},
@@ -667,9 +635,7 @@ async def test_operator_no_puede_crear_ni_confirmar_quemas(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
 
     operator_csrf = await authenticate(api, email=OPERATOR_EMAIL, password=OPERATOR_PASSWORD)
@@ -679,9 +645,7 @@ async def test_operator_no_puede_crear_ni_confirmar_quemas(
     )
     assert creacion.status_code == 403
 
-    confirmacion = await api.post(
-        f"{FIRINGS}/{hoja['id']}/confirm", headers=head(operator_csrf)
-    )
+    confirmacion = await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(operator_csrf))
     assert confirmacion.status_code == 403
 
 
@@ -690,9 +654,7 @@ async def test_operator_si_puede_consultar(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
     await authenticate(api, email=OPERATOR_EMAIL, password=OPERATOR_PASSWORD)
 
@@ -702,9 +664,7 @@ async def test_operator_si_puede_consultar(
 
 
 async def test_sin_csrf_no_se_muta(api: httpx.AsyncClient) -> None:
-    respuesta = await api.post(
-        KILNS, json={"name": "Sin csrf", "capacity_volume_cm3": "1000"}
-    )
+    respuesta = await api.post(KILNS, json={"name": "Sin csrf", "capacity_volume_cm3": "1000"})
     assert respuesta.status_code == 403
 
 
@@ -716,16 +676,12 @@ async def test_se_auditan_alta_de_horno_tarifa_y_ciclo_de_la_hoja(
 ) -> None:
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
     hoja = (
-        await api.post(
-            FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf)
-        )
+        await api.post(FIRINGS, json=hoja_de_referencia(chico, grande), headers=head(admin_csrf))
     ).json()
     await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
     await api.post(f"{FIRINGS}/{hoja['id']}/cancel", headers=head(admin_csrf))
 
-    eventos = (
-        await db_session.execute(select(AuditEvent.entity_type, AuditEvent.entity_id))
-    ).all()
+    eventos = (await db_session.execute(select(AuditEvent.entity_type, AuditEvent.entity_id))).all()
     tipos = {fila[0] for fila in eventos}
     assert {"kiln", "kiln_rate", "firing"} <= tipos
 
