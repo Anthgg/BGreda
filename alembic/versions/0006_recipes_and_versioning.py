@@ -181,7 +181,7 @@ def upgrade() -> None:
         "ix_recipe_lines_component_product_id", "recipe_lines", ["component_product_id"]
     )
 
-    # Seguridad RLS & Revokes (sin FORCE ROW LEVEL SECURITY, siguiendo 0005)
+    # Seguridad RLS & Revokes (ENABLE RLS y REVOKE ALL anon/authenticated)
     for table in NEW_TABLES:
         op.execute(f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;")
         for role in ("anon", "authenticated"):

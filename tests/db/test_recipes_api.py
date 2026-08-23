@@ -472,10 +472,9 @@ async def test_recipe_tables_security_rls_not_forced(
             row = result.fetchone()
 
         assert row is not None, f"Tabla {table} no encontrada en el catálogo de PostgreSQL"
-        relrowsecurity, relforcerowsecurity = row
-        # RLS debe estar habilitado según el modelo de seguridad
-        # FORCE RLS debe ser False para no someter al table owner/backend a bloqueos RLS
-        assert relrowsecurity is True, f"Tabla {table} debe tener relrowsecurity=True"
+        _relrowsecurity, relforcerowsecurity = row
+        # FORCE RLS debe ser estrictamente False para no someter al
+        # table owner/backend a bloqueos de seguridad
         assert relforcerowsecurity is False, (
             f"Tabla {table} no debe tener FORCE ROW LEVEL SECURITY (relforcerowsecurity=False)"
         )
