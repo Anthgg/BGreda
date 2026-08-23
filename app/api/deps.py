@@ -29,9 +29,11 @@ from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.catalogs import CatalogService
 from app.services.importing import ImportService
+from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
 from app.services.masters import MasterDataService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
 from app.services.storage import ObjectStorage, StorageUnavailableError
@@ -237,3 +239,27 @@ def get_object_storage(request: Request) -> ObjectStorage:
 
 
 ObjectStorageDep = Annotated[ObjectStorage, Depends(get_object_storage)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 3.5: recetas, versiones, calculos e importador de formulas
+# ---------------------------------------------------------------------------
+async def get_recipe_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> RecipeService:
+    return RecipeService(session, audit)
+
+
+RecipeServiceDep = Annotated[RecipeService, Depends(get_recipe_service)]
+
+
+async def get_recipe_import_service(
+    session: DbSessionDep,
+    recipe_service: RecipeServiceDep,
+    audit: AuditRecorderDep,
+) -> RecipeImportService:
+    return RecipeImportService(session, recipe_service, audit)
+
+
+RecipeImportServiceDep = Annotated[RecipeImportService, Depends(get_recipe_import_service)]

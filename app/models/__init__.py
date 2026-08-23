@@ -24,6 +24,13 @@ from app.models.masters import (
     UomDimension,
 )
 from app.models.profile import Profile, UserRole
+from app.models.recipes import (
+    Recipe,
+    RecipeComponentType,
+    RecipeLine,
+    RecipeStatus,
+    RecipeVersion,
+)
 from app.models.sequence import (
     DocumentSequence,
     DocumentSequenceIssue,
@@ -57,6 +64,11 @@ __all__ = [
     "ProductCategory",
     "ProductType",
     "Profile",
+    "Recipe",
+    "RecipeComponentType",
+    "RecipeLine",
+    "RecipeStatus",
+    "RecipeVersion",
     "ResetPolicy",
     "SequencePatternPreset",
     "SequenceType",
