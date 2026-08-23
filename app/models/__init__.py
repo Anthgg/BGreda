@@ -3,6 +3,16 @@
 from app.db.base import Base
 from app.models.audit import AuditAction, AuditEvent
 from app.models.catalog import CurrencyCatalog, SequencePatternPreset, UbigeoDistrict
+from app.models.firings import (
+    Firing,
+    FiringKilnSession,
+    FiringLine,
+    FiringStatus,
+    FiringType,
+    Kiln,
+    KilnOccupancyFactor,
+    KilnRate,
+)
 from app.models.importing import (
     ImportAction,
     ImportBatch,
@@ -50,12 +60,20 @@ __all__ = [
     "DocumentSequence",
     "DocumentSequenceIssue",
     "DocumentType",
+    "Firing",
+    "FiringKilnSession",
+    "FiringLine",
+    "FiringStatus",
+    "FiringType",
     "ImportAction",
     "ImportBatch",
     "ImportEntity",
     "ImportRow",
     "ImportRowStatus",
     "ImportStatus",
+    "Kiln",
+    "KilnOccupancyFactor",
+    "KilnRate",
     "MovementType",
     "Partner",
     "PartnerRole",

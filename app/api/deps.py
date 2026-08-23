@@ -28,6 +28,7 @@ from app.models.profile import UserRole
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.catalogs import CatalogService
+from app.services.firings import FiringService, KilnService
 from app.services.importing import ImportService
 from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
@@ -263,3 +264,27 @@ async def get_recipe_import_service(
 
 
 RecipeImportServiceDep = Annotated[RecipeImportService, Depends(get_recipe_import_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 4: hornos, tarifas y hojas de quema
+# ---------------------------------------------------------------------------
+async def get_kiln_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> KilnService:
+    return KilnService(session, audit)
+
+
+KilnServiceDep = Annotated[KilnService, Depends(get_kiln_service)]
+
+
+async def get_firing_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
+) -> FiringService:
+    return FiringService(session, audit, sequences)
+
+
+FiringServiceDep = Annotated[FiringService, Depends(get_firing_service)]
