@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 CATEGORIES = "/api/v1/categories"
 PRODUCTS = "/api/v1/products"
@@ -437,3 +438,44 @@ class TestCiclos:
         )
         assert res_cycle.status_code == 422
         assert res_cycle.json()["error"]["code"] == "RECIPE_CYCLE_DETECTED"
+
+
+async def test_recipe_tables_security_rls_not_forced(
+    db_session: AsyncSession,
+) -> None:
+    """Verifica que las tablas de recetas tengan RLS habilitado pero SIN FORCE RLS."""
+    from sqlalchemy import text
+
+    tables = ["recipes", "recipe_versions", "recipe_lines"]
+    for table in tables:
+        result = await db_session.execute(
+            text(
+                "SELECT c.relrowsecurity, c.relforcerowsecurity "
+                "FROM pg_class c "
+                "JOIN pg_namespace n ON c.relnamespace = n.oid "
+                "WHERE n.nspname = CURRENT_SCHEMA() AND c.relname = :table"
+            ),
+            {"table": table},
+        )
+        row = result.fetchone()
+        if row is None:
+            # Fallback a schema public si la tabla se crea en public
+            result = await db_session.execute(
+                text(
+                    "SELECT c.relrowsecurity, c.relforcerowsecurity "
+                    "FROM pg_class c "
+                    "JOIN pg_namespace n ON c.relnamespace = n.oid "
+                    "WHERE n.nspname = 'public' AND c.relname = :table"
+                ),
+                {"table": table},
+            )
+            row = result.fetchone()
+
+        assert row is not None, f"Tabla {table} no encontrada en el catálogo de PostgreSQL"
+        relrowsecurity, relforcerowsecurity = row
+        # RLS debe estar habilitado según el modelo de seguridad
+        # FORCE RLS debe ser False para no someter al table owner/backend a bloqueos RLS
+        assert relrowsecurity is True, f"Tabla {table} debe tener relrowsecurity=True"
+        assert relforcerowsecurity is False, (
+            f"Tabla {table} no debe tener FORCE ROW LEVEL SECURITY (relforcerowsecurity=False)"
+        )
