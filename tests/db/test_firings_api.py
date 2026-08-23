@@ -788,9 +788,7 @@ async def test_dimensiones_no_positivas_se_rechazan(
     assert respuesta.status_code == 422
 
 
-async def test_limpiar_notas_horno_con_null(
-    api: httpx.AsyncClient, admin_csrf: str
-) -> None:
+async def test_limpiar_notas_horno_con_null(api: httpx.AsyncClient, admin_csrf: str) -> None:
     kiln = (
         await api.post(
             KILNS,
@@ -1048,5 +1046,3 @@ async def test_concurrencia_update_vs_confirm_solo_un_ganador(
             assert resp_update.json()["error"]["code"] == "FIRING_NOT_EDITABLE"
     elif resp_update.status_code == 200:
         assert final["status"] in ("DRAFT", "CONFIRMED")
-
-

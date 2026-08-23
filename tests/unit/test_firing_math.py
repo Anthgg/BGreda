@@ -300,4 +300,3 @@ def test_volumen_total_de_la_hoja_desbordado_lanza_error() -> None:
     ]
     with pytest.raises(FiringVolumeOverflowError):
         compute_firing(sesiones, lineas, TABLAS)
-
