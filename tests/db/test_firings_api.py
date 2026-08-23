@@ -7,6 +7,7 @@ teniendo los mismos identificadores.
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import Any
 
@@ -785,3 +786,267 @@ async def test_dimensiones_no_positivas_se_rechazan(
         headers=head(admin_csrf),
     )
     assert respuesta.status_code == 422
+
+
+async def test_limpiar_notas_horno_con_null(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    kiln = (
+        await api.post(
+            KILNS,
+            json={
+                "name": "Horno Con Notas",
+                "capacity_volume_cm3": "1000",
+                "notes": "Notas a borrar",
+            },
+            headers=head(admin_csrf),
+        )
+    ).json()
+    assert kiln["notes"] == "Notas a borrar"
+
+    actualizado = (
+        await api.put(
+            f"{KILNS}/{kiln['id']}",
+            json={"notes": None},
+            headers=head(admin_csrf),
+        )
+    ).json()
+    assert actualizado["notes"] is None
+
+    obtenido = (await api.get(f"{KILNS}/{kiln['id']}")).json()
+    assert obtenido["notes"] is None
+
+
+async def test_horno_nuevo_sin_factores_bloquea_y_permite_configurarlos(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    # 1. Crear horno sin factores
+    kiln = (
+        await api.post(
+            KILNS,
+            json={"name": "Horno Recién Creado", "capacity_volume_cm3": "15000"},
+            headers=head(admin_csrf),
+        )
+    ).json()
+    assert kiln["occupancy_factors"] == []
+
+    # 2. Agregar tarifa
+    rate_resp = await api.post(
+        f"{KILNS}/{kiln['id']}/rates",
+        json={"firing_type": "LOW", "rate": "120.00"},
+        headers=head(admin_csrf),
+    )
+    assert rate_resp.status_code == 201
+
+    # 3. Intentar calcular sin factores -> 422
+    calc_fail = await api.post(
+        f"{FIRINGS}/calculate",
+        json={
+            "sessions": [{"kiln_id": kiln["id"], "firing_type": "LOW"}],
+            "lines": [
+                {
+                    "description": "Taza",
+                    "quantity": 1,
+                    "length_cm": "10",
+                    "width_cm": "10",
+                    "height_cm": "10",
+                    "low_kiln_id": kiln["id"],
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert calc_fail.status_code == 422
+    assert calc_fail.json()["error"]["code"] == "OCCUPANCY_FACTOR_NOT_CONFIGURED"
+
+    # 4. Configurar factores vía PUT /kilns/{id}/occupancy-factors
+    factors_payload = [
+        {"min_percentage": 1, "max_percentage": 50, "factor": "2.0"},
+        {"min_percentage": 51, "max_percentage": 100, "factor": "1.0"},
+    ]
+    set_factors_resp = await api.put(
+        f"{KILNS}/{kiln['id']}/occupancy-factors",
+        json=factors_payload,
+        headers=head(admin_csrf),
+    )
+    assert set_factors_resp.status_code == 200
+    factors_out = set_factors_resp.json()
+    assert len(factors_out) == 2
+
+    # 5. Calcular nuevamente -> 200 éxito
+    calc_ok = await api.post(
+        f"{FIRINGS}/calculate",
+        json={
+            "sessions": [{"kiln_id": kiln["id"], "firing_type": "LOW"}],
+            "lines": [
+                {
+                    "description": "Taza",
+                    "quantity": 1,
+                    "length_cm": "10",
+                    "width_cm": "10",
+                    "height_cm": "10",
+                    "low_kiln_id": kiln["id"],
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert calc_ok.status_code == 200
+
+
+async def test_tarifa_futura_no_aplica_antes_de_su_fecha_efectiva(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    chico, _ = await hornos_de_referencia(api, admin_csrf, db_session)
+
+    # Horno chico tiene tarifa LOW actual (90.00).
+    # Agregamos una tarifa futura para 2026-09-01 (150.00).
+    tarifa_futura = await api.post(
+        f"{KILNS}/{chico}/rates",
+        json={"firing_type": "LOW", "rate": "150.00", "valid_from": "2026-09-01"},
+        headers=head(admin_csrf),
+    )
+    assert tarifa_futura.status_code == 201
+
+    # Hoy / con fecha anterior a 2026-09-01 usa la tarifa vigente anterior (90.00)
+    calc_hoy = await api.post(
+        f"{FIRINGS}/calculate",
+        json={
+            "firing_date": "2026-08-23",
+            "sessions": [{"kiln_id": chico, "firing_type": "LOW"}],
+            "lines": [
+                {
+                    "description": "Plato",
+                    "quantity": 1,
+                    "length_cm": "10",
+                    "width_cm": "10",
+                    "height_cm": "5",
+                    "low_kiln_id": chico,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert calc_hoy.status_code == 200
+    assert calc_hoy.json()["sessions"][0]["rate_snapshot"] == "90.000000"
+
+    # Con fecha en el futuro (2026-09-05) aplica la nueva tarifa (150.00)
+    calc_futuro = await api.post(
+        f"{FIRINGS}/calculate",
+        json={
+            "firing_date": "2026-09-05",
+            "sessions": [{"kiln_id": chico, "firing_type": "LOW"}],
+            "lines": [
+                {
+                    "description": "Plato",
+                    "quantity": 1,
+                    "length_cm": "10",
+                    "width_cm": "10",
+                    "height_cm": "5",
+                    "low_kiln_id": chico,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert calc_futuro.status_code == 200
+    assert calc_futuro.json()["sessions"][0]["rate_snapshot"] == "150.000000"
+
+
+async def test_product_id_inexistente_rechaza_con_422(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    chico, _grande = await hornos_de_referencia(api, admin_csrf, db_session)
+    stale_payload = {
+        "sessions": [{"kiln_id": chico, "firing_type": "LOW"}],
+        "lines": [
+            {
+                "product_id": 999999,
+                "description": "Pieza Fantasma",
+                "quantity": 1,
+                "length_cm": "10",
+                "width_cm": "10",
+                "height_cm": "5",
+                "low_kiln_id": chico,
+            }
+        ],
+    }
+
+    # calculate con product_id inexistente -> 422
+    calc_resp = await api.post(f"{FIRINGS}/calculate", json=stale_payload, headers=head(admin_csrf))
+    assert calc_resp.status_code == 422
+    assert calc_resp.json()["error"]["code"] == "PRODUCT_NOT_FOUND"
+
+    # create con product_id inexistente -> 422 (no 500)
+    create_resp = await api.post(FIRINGS, json=stale_payload, headers=head(admin_csrf))
+    assert create_resp.status_code == 422
+    assert create_resp.json()["error"]["code"] == "PRODUCT_NOT_FOUND"
+
+
+async def test_volumen_que_desborda_precision_rechaza_con_422(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    chico, _ = await hornos_de_referencia(api, admin_csrf, db_session)
+    overflow_payload = {
+        "sessions": [{"kiln_id": chico, "firing_type": "LOW"}],
+        "lines": [
+            {
+                "description": "Pieza Gigante",
+                "quantity": 1,
+                "length_cm": "100000",
+                "width_cm": "100000",
+                "height_cm": "100000",
+                "low_kiln_id": chico,
+            }
+        ],
+    }
+
+    calc_resp = await api.post(
+        f"{FIRINGS}/calculate", json=overflow_payload, headers=head(admin_csrf)
+    )
+    assert calc_resp.status_code == 422
+    assert calc_resp.json()["error"]["code"] == "FIRING_VOLUME_OVERFLOW"
+
+    create_resp = await api.post(FIRINGS, json=overflow_payload, headers=head(admin_csrf))
+    assert create_resp.status_code == 422
+    assert create_resp.json()["error"]["code"] == "FIRING_VOLUME_OVERFLOW"
+
+
+async def test_concurrencia_update_vs_confirm_solo_un_ganador(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
+    creada = (
+        await api.post(
+            FIRINGS,
+            json=hoja_de_referencia(chico, grande),
+            headers=head(admin_csrf),
+        )
+    ).json()
+    firing_id = creada["id"]
+
+    update_payload = hoja_de_referencia(chico, grande)
+    update_payload["notes"] = "Nota modificada concurrentemente"
+
+    async def do_update() -> httpx.Response:
+        return await api.put(
+            f"{FIRINGS}/{firing_id}", json=update_payload, headers=head(admin_csrf)
+        )
+
+    async def do_confirm() -> httpx.Response:
+        return await api.post(f"{FIRINGS}/{firing_id}/confirm", headers=head(admin_csrf))
+
+    resp_update, resp_confirm = await asyncio.gather(do_update(), do_confirm())
+
+    assert resp_update.status_code in (200, 409)
+    assert resp_confirm.status_code in (200, 409)
+
+    final = (await api.get(f"{FIRINGS}/{firing_id}")).json()
+    if resp_confirm.status_code == 200:
+        assert final["status"] == "CONFIRMED"
+        if resp_update.status_code == 409:
+            assert resp_update.json()["error"]["code"] == "FIRING_NOT_EDITABLE"
+    elif resp_update.status_code == 200:
+        assert final["status"] in ("DRAFT", "CONFIRMED")
+
+

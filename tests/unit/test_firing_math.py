@@ -15,6 +15,7 @@ from app.core.firings import (
     ALLOWED_BRACKETS,
     FiringDimensionError,
     FiringEmptyError,
+    FiringVolumeOverflowError,
     LineInput,
     OccupancyFactorMissingError,
     SessionInput,
@@ -278,3 +279,25 @@ def test_el_horno_del_factor_por_omision_es_el_de_la_primera_sesion() -> None:
     lineas = [LineInput(1, Decimal(10), Decimal(10), Decimal(10), ("2:HIGH",), None)]
     resultado = compute_firing(SESIONES_REFERENCIA, lineas, TABLAS)
     assert resultado.lines[0].factor_kiln_id == GRANDE
+
+
+def test_volumen_unitario_desbordado_lanza_error() -> None:
+    with pytest.raises(FiringVolumeOverflowError):
+        line_volume(1, Decimal(100_000), Decimal(100_000), Decimal(100_000))
+
+
+def test_volumen_total_desbordado_por_cantidad_lanza_error() -> None:
+    with pytest.raises(FiringVolumeOverflowError):
+        line_volume(10_000_000, Decimal(50_000), Decimal(50_000), Decimal(50_000))
+
+
+def test_volumen_total_de_la_hoja_desbordado_lanza_error() -> None:
+    sesiones = [SessionInput("1:LOW", CHICO, "LOW", Decimal("90"), Decimal("100000000000"))]
+    # Dos líneas que por separado no exceden pero juntas sí superan MAX_VOLUME_NUMERIC (10^12)
+    lineas = [
+        LineInput(1, Decimal("600000"), Decimal("1000000"), Decimal("1"), ("1:LOW",), CHICO),
+        LineInput(1, Decimal("600000"), Decimal("1000000"), Decimal("1"), ("1:LOW",), CHICO),
+    ]
+    with pytest.raises(FiringVolumeOverflowError):
+        compute_firing(sesiones, lineas, TABLAS)
+

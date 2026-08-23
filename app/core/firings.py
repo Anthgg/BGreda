@@ -71,6 +71,15 @@ class FiringEmptyError(FiringError):
     message = "La hoja de quema necesita al menos una pieza y una sesion de horno"
 
 
+#: Límite de escala para columnas NUMERIC(18,6) en la base de datos (menor a 10^12).
+MAX_VOLUME_NUMERIC = Decimal("999999999999.999999")
+
+
+class FiringVolumeOverflowError(FiringError):
+    code = "FIRING_VOLUME_OVERFLOW"
+    message = "El volumen de la pieza o de la hoja excede la precisión máxima permitida"
+
+
 def line_volume(
     quantity: int,
     length_cm: Decimal,
@@ -87,7 +96,10 @@ def line_volume(
         raise FiringDimensionError("Largo, ancho y alto deben ser mayores que cero")
 
     unit = length_cm * width_cm * height_cm
-    return unit, unit * Decimal(quantity)
+    total = unit * Decimal(quantity)
+    if unit > MAX_VOLUME_NUMERIC or total > MAX_VOLUME_NUMERIC:
+        raise FiringVolumeOverflowError("El volumen calculado excede el límite máximo permitido")
+    return unit, total
 
 
 def physical_occupancy_percentage(volume_cm3: Decimal, capacity_cm3: Decimal) -> Decimal:
@@ -240,6 +252,10 @@ def compute_firing(
     total_volume = sum((total for _, total in volumes), Decimal(0))
     if total_volume <= 0:
         raise FiringEmptyError()
+    if total_volume > MAX_VOLUME_NUMERIC:
+        raise FiringVolumeOverflowError(
+            "El volumen total de la hoja excede el límite máximo permitido"
+        )
 
     line_results: list[LineResult] = []
     session_volume: dict[str, Decimal] = {session.key: Decimal(0) for session in sessions}

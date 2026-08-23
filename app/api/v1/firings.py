@@ -26,6 +26,8 @@ from app.schemas.firings import (
     FiringOut,
     FiringPage,
     KilnCreate,
+    KilnOccupancyFactorIn,
+    KilnOccupancyFactorOut,
     KilnOut,
     KilnPage,
     KilnRateIn,
@@ -85,6 +87,23 @@ async def update_kiln(
     kiln = await service.update_kiln(kiln_id, payload, user=admin)
     await session.commit()
     return kiln
+
+
+@router.put(
+    "/kilns/{kiln_id}/occupancy-factors",
+    response_model=list[KilnOccupancyFactorOut],
+)
+async def set_kiln_occupancy_factors(
+    kiln_id: int,
+    payload: list[KilnOccupancyFactorIn],
+    service: KilnServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> list[KilnOccupancyFactorOut]:
+    """Configura o reemplaza la tabla completa de factores de ocupacion del horno."""
+    factors = await service.set_occupancy_factors(kiln_id, payload, user=admin)
+    await session.commit()
+    return factors
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ from app.core.firings import (
     FiringRateMissingError,
     KilnCapacityExceededError,
     LineInput,
+    OccupancyFactorMissingError,
     SessionInput,
     compute_firing,
 )
@@ -45,6 +46,7 @@ from app.models.firings import (
     FiringStatus,
     FiringType,
     Kiln,
+    KilnOccupancyFactor,
     KilnRate,
 )
 from app.models.masters import Product
@@ -60,6 +62,7 @@ from app.schemas.firings import (
     FiringSessionOut,
     FiringSummaryOut,
     KilnCreate,
+    KilnOccupancyFactorIn,
     KilnOccupancyFactorOut,
     KilnOut,
     KilnRateIn,
@@ -88,6 +91,12 @@ class KilnInactiveError(APIError):
     status_code = 422
     code = "KILN_INACTIVE"
     message = "El horno esta desactivado y no puede usarse en una quema"
+
+
+class ProductNotFoundError(APIError):
+    status_code = 422
+    code = "PRODUCT_NOT_FOUND"
+    message = "Uno o más productos seleccionados no existen"
 
 
 class FiringNotFoundError(APIError):
@@ -155,15 +164,36 @@ class KilnService:
         result = await self._session.execute(select(func.count()).select_from(Kiln))
         return f"KILN-{(result.scalar_one() or 0) + 1:03d}"
 
-    def _to_out(self, kiln: Kiln) -> KilnOut:
+    @staticmethod
+    def _validate_occupancy_factors(
+        factors: Sequence[KilnOccupancyFactorIn],
+    ) -> list[KilnOccupancyFactorIn]:
+        if not factors:
+            raise FiringError("La tabla de factores de ocupación no puede estar vacía")
+        sorted_factors = sorted(factors, key=lambda f: f.min_percentage)
+        if sorted_factors[0].min_percentage != 1:
+            raise FiringError("El primer tramo de ocupación debe comenzar en 1 %")
+        if sorted_factors[-1].max_percentage != 100:
+            raise FiringError("El último tramo de ocupación debe terminar en 100 %")
+        for i in range(1, len(sorted_factors)):
+            expected_min = sorted_factors[i - 1].max_percentage + 1
+            if sorted_factors[i].min_percentage != expected_min:
+                raise FiringError(
+                    "Discontinuidad o solapamiento en tramos: "
+                    f"se esperaba inicio en {expected_min} % "
+                    f"pero se encontró {sorted_factors[i].min_percentage} %"
+                )
+        return sorted_factors
+
+    def _to_out(self, kiln: Kiln, *, effective_date: date | None = None) -> KilnOut:
+        today = effective_date or datetime.now(UTC).date()
         low = high = None
         for rate in kiln.rates:
-            if rate.valid_to is not None:
-                continue
-            if rate.firing_type is FiringType.LOW:
-                low = rate.rate
-            else:
-                high = rate.rate
+            if rate.valid_from <= today and (rate.valid_to is None or rate.valid_to > today):
+                if rate.firing_type is FiringType.LOW and low is None:
+                    low = rate.rate
+                elif rate.firing_type is FiringType.HIGH and high is None:
+                    high = rate.rate
         return KilnOut(
             id=kiln.id,
             code=kiln.code,
@@ -222,6 +252,19 @@ class KilnService:
         self._session.add(kiln)
         await self._session.flush()
 
+        if payload.occupancy_factors:
+            validated = self._validate_occupancy_factors(payload.occupancy_factors)
+            for f in validated:
+                self._session.add(
+                    KilnOccupancyFactor(
+                        kiln_id=kiln.id,
+                        min_percentage=f.min_percentage,
+                        max_percentage=f.max_percentage,
+                        factor=f.factor,
+                    )
+                )
+            await self._session.flush()
+
         self._audit.record_action(
             entity_type=KILN_ENTITY,
             entity_id=str(kiln.id),
@@ -244,9 +287,9 @@ class KilnService:
         changes: dict[str, tuple[object, object]] = {}
 
         for field in ("name", "capacity_volume_cm3", "active", "notes"):
-            new = getattr(payload, field)
-            if new is None:
+            if field not in payload.model_fields_set:
                 continue
+            new = getattr(payload, field)
             old = getattr(kiln, field)
             if old != new:
                 changes[field] = (old, new)
@@ -267,6 +310,48 @@ class KilnService:
         await self._session.refresh(kiln, ["updated_at"])
         return self._to_out(kiln)
 
+    async def set_occupancy_factors(
+        self,
+        kiln_id: int,
+        factors_in: list[KilnOccupancyFactorIn],
+        *,
+        user: AuthenticatedUser,
+    ) -> list[KilnOccupancyFactorOut]:
+        """Configura o reemplaza la tabla completa de factores de ocupacion del horno."""
+        kiln = await self._get(kiln_id)
+        validated = self._validate_occupancy_factors(factors_in)
+
+        await self._session.execute(
+            delete(KilnOccupancyFactor).where(KilnOccupancyFactor.kiln_id == kiln.id)
+        )
+        await self._session.flush()
+
+        created_factors: list[KilnOccupancyFactor] = []
+        for f in validated:
+            factor_row = KilnOccupancyFactor(
+                kiln_id=kiln.id,
+                min_percentage=f.min_percentage,
+                max_percentage=f.max_percentage,
+                factor=f.factor,
+            )
+            self._session.add(factor_row)
+            created_factors.append(factor_row)
+        await self._session.flush()
+
+        self._audit.record_action(
+            entity_type=KILN_ENTITY,
+            entity_id=str(kiln.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "action": "set_occupancy_factors",
+                "kiln_code": kiln.code,
+                "factor_count": len(created_factors),
+            },
+        )
+        return [KilnOccupancyFactorOut.model_validate(f) for f in created_factors]
+
     async def set_rate(
         self, kiln_id: int, payload: KilnRateIn, *, user: AuthenticatedUser
     ) -> KilnRateOut:
@@ -286,7 +371,7 @@ class KilnService:
                 break
 
         if previous is not None:
-            if previous.rate == payload.rate:
+            if previous.rate == payload.rate and previous.valid_from == valid_from:
                 return KilnRateOut.model_validate(previous)
             # La vigencia anterior se cierra cuando empieza la nueva. Si la
             # nueva se fecha antes, se cierra el mismo dia en que abrio: la
@@ -369,29 +454,56 @@ class FiringService:
             raise KilnNotFoundError(f"Horno inexistente: {sorted(missing)}")
         return kilns
 
-    async def _current_rates(self, kiln_ids: Sequence[int]) -> dict[tuple[int, str], Decimal]:
-        """Tarifas vigentes (``valid_to IS NULL``) de los hornos indicados."""
+    async def _current_rates(
+        self, kiln_ids: Sequence[int], *, effective_date: date
+    ) -> dict[tuple[int, str], Decimal]:
+        """Tarifas vigentes en la fecha efectiva indicada."""
         result = await self._session.execute(
-            select(KilnRate).where(
+            select(KilnRate)
+            .where(
                 KilnRate.kiln_id.in_(set(kiln_ids)),
-                KilnRate.valid_to.is_(None),
+                KilnRate.valid_from <= effective_date,
+                or_(KilnRate.valid_to.is_(None), KilnRate.valid_to > effective_date),
             )
+            .order_by(KilnRate.valid_from.desc(), KilnRate.id.desc())
         )
-        return {
-            (rate.kiln_id, FiringType(rate.firing_type).value): rate.rate
-            for rate in result.scalars()
-        }
+        rates: dict[tuple[int, str], Decimal] = {}
+        for rate in result.scalars():
+            key = (rate.kiln_id, FiringType(rate.firing_type).value)
+            if key not in rates:
+                rates[key] = rate.rate
+        return rates
 
     async def _factor_tables(
         self, kilns: dict[int, Kiln]
     ) -> dict[int, list[tuple[int, int, Decimal]]]:
-        return {
-            kiln_id: [
+        tables: dict[int, list[tuple[int, int, Decimal]]] = {}
+        for kiln_id, kiln in kilns.items():
+            if not kiln.occupancy_factors:
+                raise OccupancyFactorMissingError(
+                    f"El horno «{kiln.name}» no tiene configurada su tabla de factores de ocupación"
+                )
+            tables[kiln_id] = [
                 (factor.min_percentage, factor.max_percentage, factor.factor)
                 for factor in sorted(kiln.occupancy_factors, key=lambda f: f.min_percentage)
             ]
-            for kiln_id, kiln in kilns.items()
-        }
+        return tables
+
+    async def _validate_products(self, payload: FiringIn) -> dict[int, str]:
+        product_ids = {line.product_id for line in payload.lines if line.product_id is not None}
+        if not product_ids:
+            return {}
+        result = await self._session.execute(
+            select(Product.id, Product.internal_reference).where(Product.id.in_(product_ids))
+        )
+        found = {row[0]: row[1] for row in result.all()}
+        missing = product_ids - found.keys()
+        if missing:
+            missing_str = ", ".join(str(i) for i in sorted(missing))
+            raise ProductNotFoundError(
+                f"Uno o más productos seleccionados no existen (IDs: {missing_str})"
+            )
+        return found
 
     async def _build(
         self, payload: FiringIn
@@ -400,6 +512,7 @@ class FiringService:
         list[LineInput],
         dict[int, list[tuple[int, int, Decimal]]],
         dict[int, Kiln],
+        dict[int, str],
     ]:
         """Traduce el cuerpo recibido a las entradas puras del calculo."""
         if not payload.sessions:
@@ -411,13 +524,16 @@ class FiringService:
         if len(declared) != len(payload.sessions):
             raise FiringError("Hay sesiones de horno repetidas en la hoja")
 
+        references = await self._validate_products(payload)
+
         kiln_ids = [item.kiln_id for item in payload.sessions]
         kilns = await self._load_kilns(kiln_ids)
         for kiln in kilns.values():
             if not kiln.active:
                 raise KilnInactiveError(f"El horno «{kiln.name}» esta desactivado")
 
-        rates = await self._current_rates(kiln_ids)
+        effective_date = payload.firing_date or payload.scheduled_date or datetime.now(UTC).date()
+        rates = await self._current_rates(kiln_ids, effective_date=effective_date)
         sessions: list[SessionInput] = []
         for item in payload.sessions:
             rate_key = (item.kiln_id, item.firing_type.value)
@@ -476,7 +592,8 @@ class FiringService:
                 )
             )
 
-        return sessions, lines, await self._factor_tables(kilns), kilns
+        factors = await self._factor_tables(kilns)
+        return sessions, lines, factors, kilns, references
 
     # -- Simulador ----------------------------------------------------------
     async def calculate(self, payload: FiringIn) -> FiringCalculateOut:
@@ -485,12 +602,8 @@ class FiringService:
         No inserta, no actualiza, no consume correlativo y no genera ningun
         movimiento de inventario.
         """
-        sessions, lines, factors, kilns = await self._build(payload)
+        sessions, lines, factors, kilns, references = await self._build(payload)
         math = compute_firing(sessions, lines, factors)
-
-        references = await self._product_references(
-            [line.product_id for line in payload.lines if line.product_id is not None]
-        )
 
         session_out = [
             FiringSessionOut(
@@ -560,7 +673,7 @@ class FiringService:
     # -- Persistencia -------------------------------------------------------
     async def _apply(self, firing: Firing, payload: FiringIn) -> None:
         """Reescribe sesiones y lineas de la hoja y recalcula todos los costos."""
-        sessions, lines, factors, _kilns = await self._build(payload)
+        sessions, lines, factors, _kilns, _references = await self._build(payload)
         math = compute_firing(sessions, lines, factors)
 
         firing.scheduled_date = payload.scheduled_date
@@ -660,7 +773,7 @@ class FiringService:
     async def update(
         self, firing_id: int, payload: FiringIn, *, user: AuthenticatedUser
     ) -> FiringOut:
-        firing = await self._get(firing_id)
+        firing = await self._get(firing_id, for_update=True)
         if firing.status is not FiringStatus.DRAFT:
             raise FiringNotEditableError()
 
@@ -677,14 +790,14 @@ class FiringService:
 
     async def confirm(self, firing_id: int, *, user: AuthenticatedUser) -> FiringOut:
         """Congela la hoja: recalcula, valida capacidad y fija los snapshots."""
-        firing = await self._get(firing_id)
+        firing = await self._get(firing_id, for_update=True)
         if firing.status is not FiringStatus.DRAFT:
             raise FiringNotConfirmableError()
 
         # Se recalcula desde los datos capturados con las tarifas vigentes hoy:
         # confirmar es el momento en que el costo queda fijado.
         payload = self._to_input(firing)
-        sessions, lines, factors, _ = await self._build(payload)
+        sessions, lines, factors, _, _ = await self._build(payload)
         math = compute_firing(sessions, lines, factors)
 
         excedidas = [
@@ -719,7 +832,7 @@ class FiringService:
 
     async def cancel(self, firing_id: int, *, user: AuthenticatedUser) -> FiringOut:
         """Anula la hoja. Nunca se borra: el historial no se reescribe."""
-        firing = await self._get(firing_id)
+        firing = await self._get(firing_id, for_update=True)
         if firing.status is FiringStatus.CANCELLED:
             raise FiringAlreadyCancelledError()
 
@@ -782,13 +895,16 @@ class FiringService:
         )
 
     # -- Lectura ------------------------------------------------------------
-    async def _get(self, firing_id: int) -> Firing:
-        result = await self._session.execute(
+    async def _get(self, firing_id: int, *, for_update: bool = False) -> Firing:
+        stmt = (
             select(Firing)
             .where(Firing.id == firing_id)
             .options(selectinload(Firing.sessions), selectinload(Firing.lines))
             .execution_options(populate_existing=True)
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await self._session.execute(stmt)
         firing = result.scalar_one_or_none()
         if firing is None:
             raise FiringNotFoundError()

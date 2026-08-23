@@ -17,9 +17,9 @@ import re
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.firings import ALLOWED_BRACKETS
 from app.models.firings import FiringStatus, FiringType
@@ -80,6 +80,12 @@ class KilnOccupancyFactorIn(_In):
     max_percentage: Annotated[int, Field(ge=1, le=100)]
     factor: Annotated[Decimal, Field(gt=Decimal(0), le=Decimal(100))]
 
+    @model_validator(mode="after")
+    def validate_range(self) -> Self:
+        if self.max_percentage < self.min_percentage:
+            raise ValueError("max_percentage debe ser mayor o igual a min_percentage")
+        return self
+
 
 class KilnOccupancyFactorOut(_Out):
     id: int
@@ -97,6 +103,7 @@ class KilnCreate(_In):
     capacity_volume_cm3: Annotated[Decimal, Field(gt=Decimal(0))]
     active: bool = True
     notes: Annotated[str | None, Field(max_length=1000)] = None
+    occupancy_factors: list[KilnOccupancyFactorIn] | None = None
 
     @field_validator("name", "notes")
     @classmethod
