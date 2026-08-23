@@ -286,12 +286,9 @@ class RecipeService:
 
         if activate:
             # Archivar version activa previa
-            stmt_active = (
-                select(RecipeVersion)
-                .where(
-                    RecipeVersion.recipe_id == recipe.id,
-                    RecipeVersion.status == RecipeStatus.ACTIVE,
-                )
+            stmt_active = select(RecipeVersion).where(
+                RecipeVersion.recipe_id == recipe.id,
+                RecipeVersion.status == RecipeStatus.ACTIVE,
             )
             for prev_active in (await self._session.execute(stmt_active)).scalars().all():
                 prev_active.status = RecipeStatus.ARCHIVED
@@ -349,13 +346,10 @@ class RecipeService:
             return self._to_version_out(version)
 
         # Archivar activa actual
-        stmt_active = (
-            select(RecipeVersion)
-            .where(
-                RecipeVersion.recipe_id == version.recipe_id,
-                RecipeVersion.status == RecipeStatus.ACTIVE,
-                RecipeVersion.id != version.id,
-            )
+        stmt_active = select(RecipeVersion).where(
+            RecipeVersion.recipe_id == version.recipe_id,
+            RecipeVersion.status == RecipeStatus.ACTIVE,
+            RecipeVersion.id != version.id,
         )
         for prev_active in (await self._session.execute(stmt_active)).scalars().all():
             prev_active.status = RecipeStatus.ARCHIVED
