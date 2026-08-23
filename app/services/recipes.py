@@ -172,10 +172,14 @@ class RecipeService:
         product = await self._session.get(Product, payload.product_id)
         if product is None:
             raise RecipeError("El producto seleccionado no existe")
-        if product.product_type != ProductType.PREPARED_MATERIAL:
+        recipe_target_types = {
+            ProductType.PREPARED_MATERIAL,
+            ProductType.FINISHED_PRODUCT,
+        }
+        if product.product_type not in recipe_target_types:
             msg = (
                 f"El producto '{product.name}' es de tipo {product.product_type.value}, "
-                "solo PREPARED_MATERIAL admite recetas"
+                "solo PREPARED_MATERIAL o FINISHED_PRODUCT admite recetas"
             )
             raise RecipeTargetProductError(msg)
 

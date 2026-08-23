@@ -46,6 +46,12 @@ STOCK_QUANTITY_SCALE = 12
 PERCENT_PRECISION = 9
 PERCENT_SCALE = 6
 
+#: Resultados internos del cotizador. Se conserva mas precision que en los
+#: importes de presentacion porque el costo asignado de una quema puede tener
+#: muchas cifras decimales y no debe redondearse antes del precio unitario.
+CALCULATION_PRECISION = 36
+CALCULATION_SCALE = 18
+
 
 def money_numeric() -> Numeric[Decimal]:
     """Columna para importes monetarios.
@@ -74,3 +80,8 @@ def stock_quantity_numeric() -> Numeric[Decimal]:
 def percentage_numeric() -> Numeric[Decimal]:
     """Columna para porcentajes como el IGV."""
     return Numeric(PERCENT_PRECISION, PERCENT_SCALE, asdecimal=True)
+
+
+def calculation_numeric() -> Numeric[Decimal]:
+    """Columna para resultados intermedios y finales del cotizador."""
+    return Numeric(CALCULATION_PRECISION, CALCULATION_SCALE, asdecimal=True)

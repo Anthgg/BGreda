@@ -34,6 +34,20 @@ from app.models.masters import (
     UomDimension,
 )
 from app.models.profile import Profile, UserRole
+from app.models.quotations import (
+    Additional,
+    AdditionalFormulaType,
+    OtherCost,
+    OtherCostCalculationType,
+    Quotation,
+    QuotationAdditional,
+    QuotationOtherCost,
+    QuotationProductPriceUpdate,
+    QuotationStatus,
+    QuotationTechnique,
+    Technique,
+    TechniqueFormulaType,
+)
 from app.models.recipes import (
     Recipe,
     RecipeComponentType,
@@ -50,6 +64,8 @@ from app.models.sequence import (
 from app.models.settings import BankAccount, CommercialSettings, CompanySettings
 
 __all__ = [
+    "Additional",
+    "AdditionalFormulaType",
     "AuditAction",
     "AuditEvent",
     "BankAccount",
@@ -75,6 +91,8 @@ __all__ = [
     "KilnOccupancyFactor",
     "KilnRate",
     "MovementType",
+    "OtherCost",
+    "OtherCostCalculationType",
     "Partner",
     "PartnerRole",
     "PosCategory",
@@ -82,6 +100,12 @@ __all__ = [
     "ProductCategory",
     "ProductType",
     "Profile",
+    "Quotation",
+    "QuotationAdditional",
+    "QuotationOtherCost",
+    "QuotationProductPriceUpdate",
+    "QuotationStatus",
+    "QuotationTechnique",
     "Recipe",
     "RecipeComponentType",
     "RecipeLine",
@@ -93,6 +117,8 @@ __all__ = [
     "StockBalance",
     "StockLocation",
     "StockMovement",
+    "Technique",
+    "TechniqueFormulaType",
     "UbigeoDistrict",
     "UnitOfMeasure",
     "UomDimension",

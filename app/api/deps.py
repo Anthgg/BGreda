@@ -34,6 +34,7 @@ from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
 from app.services.masters import MasterDataService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.quotations import QuotationService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -288,3 +289,18 @@ async def get_firing_service(
 
 
 FiringServiceDep = Annotated[FiringService, Depends(get_firing_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 5: cotizaciones y maestros de costos
+# ---------------------------------------------------------------------------
+async def get_quotation_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
+    recipes: RecipeServiceDep,
+) -> QuotationService:
+    return QuotationService(session, audit, sequences, recipes)
+
+
+QuotationServiceDep = Annotated[QuotationService, Depends(get_quotation_service)]

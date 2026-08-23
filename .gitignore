@@ -53,3 +53,6 @@ dmypy.json
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Indice local del MCP de memoria de codigo: no es fuente del proyecto.
+.codebase-memory/
