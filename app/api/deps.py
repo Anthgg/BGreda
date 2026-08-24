@@ -36,6 +36,7 @@ from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
 from app.services.masters import MasterDataService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
@@ -357,3 +358,17 @@ async def get_identity_lookup_service(
 
 
 IdentityLookupServiceDep = Annotated[IdentityLookupService, Depends(get_identity_lookup_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 6A: motor backend de PDF de cotizacion
+# ---------------------------------------------------------------------------
+async def get_quotation_pdf_service(
+    session: DbSessionDep,
+    request: Request,
+) -> QuotationPdfService:
+    storage: ObjectStorage | None = getattr(request.app.state, "object_storage", None)
+    return QuotationPdfService(session, storage=storage)
+
+
+QuotationPdfServiceDep = Annotated[QuotationPdfService, Depends(get_quotation_pdf_service)]

@@ -29,10 +29,20 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
-    PORT=8080
+    PORT=8080 \
+    XDG_CACHE_HOME=/tmp/.cache
 
-# Usuario sin privilegios: el proceso nunca corre como root.
-RUN groupadd --system --gid 1001 appuser \
+# Dependencias de sistema minimas para generacion de PDF (WeasyPrint / Pango / Cairo)
+# y usuario sin privilegios.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 appuser \
     && useradd --system --uid 1001 --gid 1001 --no-create-home appuser
 
 WORKDIR /app

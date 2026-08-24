@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ doc.document.title }} {{ doc.document.code }}</title>
+  <style>
+    @page {
+      size: A4 portrait;
+      margin: 14mm 14mm 16mm 14mm;
+      @bottom-right {
+        content: "Página " counter(page) " de " counter(pages);
+        font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
+        font-size: 7.5pt;
+        color: #64748b;
+      }
+      @bottom-left {
+        content: "{{ doc.company.display_name }} — {{ doc.document.title }} {{ doc.document.code }}";
+        font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
+        font-size: 7.5pt;
+        color: #94a3b8;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
+      font-size: 9pt;
+      line-height: 1.4;
+      color: #1e293b;
+      background-color: #ffffff;
+    }
+
+    /* Watermark para cotizacion cancelada / anulada */
+    {% if doc.document.is_cancelled %}
+    .watermark {
+      position: fixed;
+      top: 35%;
+      left: 10%;
+      width: 80%;
+      text-align: center;
+      font-size: 64pt;
+      font-weight: bold;
+      color: rgba(220, 38, 38, 0.12);
+      transform: rotate(-35deg);
+      text-transform: uppercase;
+      letter-spacing: 6px;
+      z-index: 9999;
+      pointer-events: none;
+    }
+    {% endif %}
+
+    /* Header */
+    .header-container {
+      display: table;
+      width: 100%;
+      margin-bottom: 12px;
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 10px;
+    }
+
+    .header-left {
+      display: table-cell;
+      vertical-align: top;
+      width: 58%;
+    }
+
+    .header-right {
+      display: table-cell;
+      vertical-align: top;
+      width: 42%;
+      text-align: right;
+    }
+
+    .logo-img {
+      max-height: 52px;
+      max-width: 180px;
+      object-fit: contain;
+      margin-bottom: 6px;
+    }
+
+    .company-name {
+      font-size: 13pt;
+      font-weight: bold;
+      color: #0f172a;
+      letter-spacing: -0.2px;
+    }
+
+    .company-details {
+      font-size: 8pt;
+      color: #475569;
+      margin-top: 2px;
+      line-height: 1.35;
+    }
+
+    .document-box {
+      background-color: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      padding: 8px 12px;
+      display: inline-block;
+      text-align: right;
+      min-width: 200px;
+    }
+
+    .document-title {
+      font-size: 13pt;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: 0.5px;
+    }
+
+    .document-code {
+      font-size: 11pt;
+      font-weight: 700;
+      color: #2563eb;
+      margin-bottom: 4px;
+    }
+
+    .status-badge-cancelled {
+      display: inline-block;
+      background-color: #fee2e2;
+      color: #991b1b;
+      font-size: 7.5pt;
+      font-weight: bold;
+      padding: 1px 6px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+      border: 1px solid #f87171;
+    }
+
+    .doc-meta-table {
+      width: 100%;
+      font-size: 8pt;
+      margin-top: 4px;
+      border-collapse: collapse;
+    }
+
+    .doc-meta-table td {
+      padding: 1px 0;
+    }
+
+    .doc-meta-label {
+      color: #64748b;
+      text-align: left;
+      padding-right: 6px;
+    }
+
+    .doc-meta-value {
+      font-weight: 600;
+      color: #1e293b;
+      text-align: right;
+    }
+
+    /* Informacion del Cliente */
+    .section-customer {
+      margin-bottom: 12px;
+      background-color: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      padding: 8px 12px;
+    }
+
+    .section-title {
+      font-size: 7.5pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #64748b;
+      margin-bottom: 4px;
+      border-bottom: 1px solid #e2e8f0;
+      padding-bottom: 2px;
+    }
+
+    .customer-grid {
+      display: table;
+      width: 100%;
+    }
+
+    .customer-col {
+      display: table-cell;
+      vertical-align: top;
+      width: 50%;
+      font-size: 8.5pt;
+      line-height: 1.4;
+    }
+
+    .customer-name {
+      font-weight: 700;
+      color: #0f172a;
+      font-size: 9.5pt;
+    }
+
+    .customer-detail {
+      color: #475569;
+    }
+
+    .customer-detail-label {
+      color: #64748b;
+      font-weight: 600;
+    }
+
+    /* Tabla de Items */
+    .table-items {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 12px;
+      page-break-inside: auto;
+    }
+
+    .table-items thead {
+      display: table-header-group;
+    }
+
+    .table-items tr {
+      page-break-inside: avoid;
+      page-break-after: auto;
+    }
+
+    .table-items th {
+      background-color: #0f172a;
+      color: #ffffff;
+      font-size: 8pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      padding: 6px 8px;
+      text-align: left;
+    }
+
+    .table-items th.col-num { width: 5%; text-align: center; }
+    .table-items th.col-desc { width: 50%; }
+    .table-items th.col-qty { width: 10%; text-align: right; }
+    .table-items th.col-uom { width: 10%; text-align: center; }
+    .table-items th.col-price { width: 12%; text-align: right; }
+    .table-items th.col-subtotal { width: 13%; text-align: right; }
+
+    .table-items td {
+      padding: 7px 8px;
+      font-size: 8.5pt;
+      border-bottom: 1px solid #e2e8f0;
+      vertical-align: top;
+    }
+
+    .table-items td.col-num { text-align: center; color: #64748b; font-size: 8pt; }
+    .table-items td.col-qty { text-align: right; font-weight: 600; }
+    .table-items td.col-uom { text-align: center; color: #64748b; font-size: 8pt; }
+    .table-items td.col-price { text-align: right; }
+    .table-items td.col-subtotal { text-align: right; font-weight: 700; color: #0f172a; }
+
+    .product-title {
+      font-weight: 700;
+      color: #0f172a;
+      font-size: 9pt;
+      margin-bottom: 2px;
+    }
+
+    .product-subinfo {
+      font-size: 7.5pt;
+      color: #64748b;
+      line-height: 1.3;
+    }
+
+    .product-subinfo span {
+      display: inline-block;
+      margin-right: 6px;
+    }
+
+    /* Seccion de Totales y Condiciones */
+    .summary-container {
+      display: table;
+      width: 100%;
+      margin-bottom: 14px;
+      page-break-inside: avoid;
+    }
+
+    .summary-left {
+      display: table-cell;
+      vertical-align: top;
+      width: 55%;
+      padding-right: 14px;
+    }
+
+    .summary-right {
+      display: table-cell;
+      vertical-align: top;
+      width: 45%;
+    }
+
+    .totals-table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .totals-table td {
+      padding: 5px 10px;
+      font-size: 8.5pt;
+    }
+
+    .totals-table .label {
+      color: #475569;
+      text-align: left;
+    }
+
+    .totals-table .amount {
+      text-align: right;
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .totals-table tr.total-row td {
+      background-color: #0f172a;
+      color: #ffffff;
+      font-size: 10pt;
+      font-weight: 800;
+      padding: 7px 10px;
+      border-top: 1px solid #0f172a;
+    }
+
+    .totals-table tr.total-row .label {
+      color: #ffffff;
+    }
+
+    .totals-table tr.total-row .amount {
+      color: #ffffff;
+    }
+
+    /* Bloques de Condiciones y Bancos */
+    .conditions-card {
+      background-color: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      page-break-inside: avoid;
+    }
+
+    .card-title {
+      font-size: 7.5pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: #0f172a;
+      margin-bottom: 4px;
+      letter-spacing: 0.3px;
+    }
+
+    .card-content {
+      font-size: 7.5pt;
+      color: #475569;
+      line-height: 1.35;
+      white-space: pre-line;
+    }
+
+    .bank-account-item {
+      font-size: 7.5pt;
+      color: #334155;
+      margin-bottom: 3px;
+      line-height: 1.35;
+    }
+
+    .bank-account-item strong {
+      color: #0f172a;
+    }
+
+    .footer-note {
+      text-align: center;
+      font-size: 7.5pt;
+      color: #94a3b8;
+      margin-top: 12px;
+      border-top: 1px solid #f1f5f9;
+      padding-top: 6px;
+      page-break-inside: avoid;
+    }
+  </style>
+</head>
+<body>
+
+  {% if doc.document.is_cancelled %}
+  <div class="watermark">ANULADA</div>
+  {% endif %}
+
+  <!-- Header -->
+  <div class="header-container">
+    <div class="header-left">
+      {% if doc.company.logo_data_uri %}
+      <img src="{{ doc.company.logo_data_uri }}" class="logo-img" alt="Logo">
+      {% endif %}
+      <div class="company-name">{{ doc.company.display_name }}</div>
+      <div class="company-details">
+        {% if doc.company.tax_id %}<div><strong>RUC:</strong> {{ doc.company.tax_id }}</div>{% endif %}
+        {% if doc.company.address %}<div>{{ doc.company.address }}</div>{% endif %}
+        {% if doc.company.phone or doc.company.email %}
+        <div>
+          {% if doc.company.phone %}<span>Tel: {{ doc.company.phone }}</span>{% endif %}
+          {% if doc.company.phone and doc.company.email %} &bull; {% endif %}
+          {% if doc.company.email %}<span>{{ doc.company.email }}</span>{% endif %}
+        </div>
+        {% endif %}
+        {% if doc.company.website %}<div>{{ doc.company.website }}</div>{% endif %}
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="document-box">
+        <div class="document-title">{{ doc.document.title }}</div>
+        <div class="document-code">{{ doc.document.code }}</div>
+        {% if doc.document.is_cancelled %}
+        <div><span class="status-badge-cancelled">COTIZACIÓN ANULADA</span></div>
+        {% endif %}
+
+        <table class="doc-meta-table">
+          <tr>
+            <td class="doc-meta-label">Fecha de emisión:</td>
+            <td class="doc-meta-value">{{ doc.document.emission_date }}</td>
+          </tr>
+          {% if doc.document.validity_date %}
+          <tr>
+            <td class="doc-meta-label">Vigencia:</td>
+            <td class="doc-meta-value">{{ doc.document.validity_date }}</td>
+          </tr>
+          {% endif %}
+          <tr>
+            <td class="doc-meta-label">Moneda:</td>
+            <td class="doc-meta-value">{{ doc.document.currency_code or "PEN" }} ({{ doc.document.currency_symbol }})</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Informacion del Cliente -->
+  <div class="section-customer">
+    <div class="section-title">Datos del Cliente</div>
+    <div class="customer-grid">
+      <div class="customer-col">
+        <div class="customer-name">{{ doc.customer.display_name }}</div>
+        {% if doc.customer.document_label %}
+        <div class="customer-detail"><span class="customer-detail-label">Doc:</span> {{ doc.customer.document_label }}</div>
+        {% endif %}
+        {% if doc.customer.address %}
+        <div class="customer-detail"><span class="customer-detail-label">Dirección:</span> {{ doc.customer.address }}</div>
+        {% endif %}
+      </div>
+      <div class="customer-col" style="padding-left: 12px;">
+        {% if doc.customer.email %}
+        <div class="customer-detail"><span class="customer-detail-label">Email:</span> {{ doc.customer.email }}</div>
+        {% endif %}
+        {% if doc.customer.phone %}
+        <div class="customer-detail"><span class="customer-detail-label">Teléfono:</span> {{ doc.customer.phone }}</div>
+        {% endif %}
+        {% if doc.document.name %}
+        <div class="customer-detail"><span class="customer-detail-label">Referencia / Nombre:</span> {{ doc.document.name }}</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabla de Items Comerciales -->
+  <table class="table-items">
+    <thead>
+      <tr>
+        <th class="col-num">#</th>
+        <th class="col-desc">Descripción del Producto</th>
+        <th class="col-qty">Cant.</th>
+        <th class="col-uom">Unidad</th>
+        <th class="col-price">P. Unitario</th>
+        <th class="col-subtotal">Subtotal</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in doc.items %}
+      <tr>
+        <td class="col-num">{{ item.item_number }}</td>
+        <td class="col-desc">
+          <div class="product-title">{{ item.product_name }}</div>
+          <div class="product-subinfo">
+            {% if item.product_reference %}
+            <span><strong>Cód:</strong> {{ item.product_reference }}</span>
+            {% endif %}
+            {% if item.material %}
+            <span><strong>Material:</strong> {{ item.material }}</span>
+            {% endif %}
+            {% if item.grammage_formatted %}
+            <span><strong>Gramaje:</strong> {{ item.grammage_formatted }}</span>
+            {% endif %}
+            {% if item.dimensions_formatted %}
+            <span><strong>Dimensiones:</strong> {{ item.dimensions_formatted }}</span>
+            {% endif %}
+          </div>
+        </td>
+        <td class="col-qty">{{ item.quantity_formatted }}</td>
+        <td class="col-uom">{{ item.unit_of_measure }}</td>
+        <td class="col-price">{{ item.unit_price_formatted }}</td>
+        <td class="col-subtotal">{{ item.subtotal_formatted }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- Seccion de Totales y Condiciones -->
+  <div class="summary-container">
+    <div class="summary-left">
+      {% if doc.conditions.general_conditions or doc.conditions.payment_notes or doc.conditions.validity_text %}
+      <div class="conditions-card">
+        <div class="card-title">Condiciones Comerciales</div>
+        <div class="card-content">
+          {% if doc.conditions.validity_text %}<div>&bull; {{ doc.conditions.validity_text }}</div>{% endif %}
+          {% if doc.conditions.payment_notes %}<div>&bull; {{ doc.conditions.payment_notes }}</div>{% endif %}
+          {% if doc.conditions.general_conditions %}<div>{{ doc.conditions.general_conditions }}</div>{% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if doc.bank_accounts %}
+      <div class="conditions-card">
+        <div class="card-title">Datos Bancarios para Pago</div>
+        <div class="card-content">
+          {% for acc in doc.bank_accounts %}
+          <div class="bank-account-item">
+            <strong>{{ acc.bank_name or "Banco" }}:</strong>
+            {% if acc.account_number %} Cta: {{ acc.account_number }}{% endif %}
+            {% if acc.cci %} | CCI: {{ acc.cci }}{% endif %}
+            {% if acc.account_holder %} (Titular: {{ acc.account_holder }}){% endif %}
+            {% if acc.notes %}<br><em>{{ acc.notes }}</em>{% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="summary-right">
+      <table class="totals-table">
+        <tr>
+          <td class="label">Subtotal</td>
+          <td class="amount">{{ doc.totals.subtotal_formatted }}</td>
+        </tr>
+        <tr>
+          <td class="label">{{ doc.totals.tax_label }}</td>
+          <td class="amount">{{ doc.totals.tax_amount_formatted }}</td>
+        </tr>
+        <tr class="total-row">
+          <td class="label">TOTAL</td>
+          <td class="amount">{{ doc.totals.total_formatted }}</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  {% if doc.conditions.document_footer %}
+  <div class="footer-note">
+    {{ doc.conditions.document_footer }}
+  </div>
+  {% endif %}
+
+</body>
+</html>
