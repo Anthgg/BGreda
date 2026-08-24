@@ -1046,3 +1046,120 @@ async def test_concurrencia_update_vs_confirm_solo_un_ganador(
             assert resp_update.json()["error"]["code"] == "FIRING_NOT_EDITABLE"
     elif resp_update.status_code == 200:
         assert final["status"] in ("DRAFT", "CONFIRMED")
+
+
+# ---------------------------------------------------------------------------
+# Lineas confirmadas para el cotizador
+# ---------------------------------------------------------------------------
+CATEGORIES = "/api/v1/categories"
+PRODUCTS = "/api/v1/products"
+FIRING_LINES = "/api/v1/firing-lines"
+
+
+async def crear_pieza(api: httpx.AsyncClient, csrf: str, nombre: str) -> int:
+    """Producto terminado minimo para poder asignarlo a una linea de quema."""
+    categoria = (
+        await api.post(CATEGORIES, json={"name": f"Piezas {nombre}"}, headers=head(csrf))
+    ).json()
+    producto = (
+        await api.post(
+            PRODUCTS,
+            json={
+                "name": nombre,
+                "product_type": "FINISHED_PRODUCT",
+                "product_category_id": categoria["id"],
+                "base_uom_code": "unit",
+                "sellable": True,
+            },
+            headers=head(csrf),
+        )
+    ).json()
+    return int(producto["id"])
+
+
+def hoja_de_una_pieza(chico: int, producto_id: int, descripcion: str) -> dict[str, Any]:
+    return {
+        "sessions": [{"kiln_id": chico, "firing_type": "LOW", "sort_order": 0}],
+        "lines": [
+            {
+                "product_id": producto_id,
+                "description": descripcion,
+                "quantity": 4,
+                "length_cm": "10",
+                "width_cm": "10",
+                "height_cm": "10",
+                "low_kiln_id": chico,
+                "sort_order": 0,
+            }
+        ],
+    }
+
+
+async def test_solo_se_listan_lineas_de_quemas_confirmadas(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Cotizar contra un borrador permitiria que el costo cambiase despues."""
+    chico, _grande = await hornos_de_referencia(api, admin_csrf, db_session)
+    pieza = await crear_pieza(api, admin_csrf, "Tazon")
+
+    confirmada = (
+        await api.post(
+            FIRINGS, json=hoja_de_una_pieza(chico, pieza, "Tazon quemado"), headers=head(admin_csrf)
+        )
+    ).json()
+    await api.post(f"{FIRINGS}/{confirmada['id']}/confirm", headers=head(admin_csrf))
+
+    # Esta se queda en borrador y no debe aparecer.
+    await api.post(
+        FIRINGS, json=hoja_de_una_pieza(chico, pieza, "Tazon en borrador"), headers=head(admin_csrf)
+    )
+
+    respuesta = await api.get(FIRING_LINES)
+    assert respuesta.status_code == 200
+    pagina = respuesta.json()
+    descripciones = [linea["description"] for linea in pagina["items"]]
+    assert "Tazon quemado" in descripciones
+    assert "Tazon en borrador" not in descripciones
+
+
+async def test_las_lineas_se_filtran_por_producto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    chico, _grande = await hornos_de_referencia(api, admin_csrf, db_session)
+    uno = await crear_pieza(api, admin_csrf, "Plato")
+    otro = await crear_pieza(api, admin_csrf, "Jarra")
+
+    for producto, descripcion in ((uno, "Plato hondo"), (otro, "Jarra alta")):
+        hoja = (
+            await api.post(
+                FIRINGS,
+                json=hoja_de_una_pieza(chico, producto, descripcion),
+                headers=head(admin_csrf),
+            )
+        ).json()
+        await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
+
+    pagina = (await api.get(FIRING_LINES, params={"product_id": uno})).json()
+    assert pagina["total"] == 1
+    assert pagina["items"][0]["description"] == "Plato hondo"
+    assert pagina["items"][0]["product_id"] == uno
+    # Trae lo que el selector necesita sin arrastrar la hoja entera.
+    assert pagina["items"][0]["firing_code"].startswith("HR-")
+    assert Decimal(pagina["items"][0]["allocated_cost"]) > Decimal(0)
+
+
+async def test_una_quema_anulada_deja_de_ofrecer_sus_lineas(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    chico, _grande = await hornos_de_referencia(api, admin_csrf, db_session)
+    pieza = await crear_pieza(api, admin_csrf, "Cuenco")
+    hoja = (
+        await api.post(
+            FIRINGS, json=hoja_de_una_pieza(chico, pieza, "Cuenco"), headers=head(admin_csrf)
+        )
+    ).json()
+    await api.post(f"{FIRINGS}/{hoja['id']}/confirm", headers=head(admin_csrf))
+    assert (await api.get(FIRING_LINES, params={"product_id": pieza})).json()["total"] == 1
+
+    await api.post(f"{FIRINGS}/{hoja['id']}/cancel", headers=head(admin_csrf))
+    assert (await api.get(FIRING_LINES, params={"product_id": pieza})).json()["total"] == 0

@@ -361,15 +361,19 @@ class QuotationService:
                 .options(selectinload(RecipeVersion.recipe))
             )
         ).scalar_one_or_none()
+        # La receta **no** tiene por que pertenecer al producto cotizado. En el
+        # taller las recetas son de materiales preparados —pastas, barnices,
+        # esmaltes— y una pieza terminada no tiene formula propia: lo que se
+        # cotiza es el material con el que se hace. Exigir que coincidieran
+        # dejaba el selector vacio para cualquier pieza.
         if (
             version is None
             or version.recipe_id != payload.recipe_id
-            or version.recipe.product_id != product.id
             or version.status is not RecipeStatus.ACTIVE
             or not version.recipe.active
         ):
             raise QuotationError(
-                "La version de receta no es activa o no corresponde al producto",
+                "La version de receta indicada no existe o no esta activa",
                 code="RECIPE_VERSION_INVALID",
             )
         result = await self._recipes.calculate(

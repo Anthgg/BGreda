@@ -11,9 +11,12 @@ Los seeds provienen de ``Propuesta para cotizar.xlsx``, hoja ``Cotizador``:
 - otros gastos: ``L27:N31``;
 - factor comercial: ``D10``.
 
-``Con ilustracion`` se conserva inactivo y sin factor porque ``O22`` esta
-vacio, mientras el caso aplicado usa 50 en ``E24``. Activarlo exige resolver
-esa contradiccion de fuente; la migracion no inventa el dato.
+``Con ilustracion`` tiene la celda de factor vacia en la tabla maestra
+(``O22``), pero el propio libro si lo declara en el caso aplicado: ``E24``
+usa 50, igual que el resto de adicionales por piezas. No son dos valores en
+conflicto sino una celda del maestro sin rellenar, asi que se siembra con ese
+50 y se anota de donde sale. La reproduccion del caso completo del Excel
+—1885 de mano de obra y 7029.4818 de total— lo confirma.
 """
 
 from __future__ import annotations
@@ -100,9 +103,9 @@ SEED_ADDITIONALS = (
         "Con ilustracion",
         "110",
         "PIECE_QUANTITY",
-        None,
-        False,
-        "SOURCE_CONFLICT: O22 vacio; el caso aplicado E24 usa 50.",
+        "50",
+        True,
+        "Factor tomado de E24 del caso aplicado: O22 del maestro esta vacia.",
     ),
 )
 

@@ -20,6 +20,7 @@ from app.api.deps import (
 )
 from app.models.firings import FiringStatus, FiringType
 from app.schemas.firings import (
+    ConfirmedFiringLinePage,
     FiringCalculateIn,
     FiringCalculateOut,
     FiringIn,
@@ -186,6 +187,27 @@ async def list_firings(
         offset=offset,
     )
     return FiringPage(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/firing-lines", response_model=ConfirmedFiringLinePage)
+async def list_confirmed_firing_lines(
+    service: FiringServiceDep,
+    _: CurrentUserDep,
+    product_id: Annotated[int | None, Query(description="Solo lineas de este producto")] = None,
+    search: Annotated[str | None, Query(description="Busqueda por codigo o pieza")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ConfirmedFiringLinePage:
+    """Lineas de quemas confirmadas, para elegir una desde una cotizacion.
+
+    Existe como ruta propia porque el cotizador necesita la **linea**, no la
+    hoja: listar las quemas y pedir el detalle de cada una para quedarse con una
+    fila obliga a traer cien documentos completos.
+    """
+    items, total = await service.list_confirmed_lines(
+        product_id=product_id, search=search, limit=limit, offset=offset
+    )
+    return ConfirmedFiringLinePage(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/firings", response_model=FiringOut, status_code=status.HTTP_201_CREATED)

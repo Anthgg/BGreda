@@ -22,9 +22,15 @@ def test_public_postgrest_roles_are_revoked() -> None:
     assert "REVOKE ALL ON TABLE" in source
 
 
-def test_excel_seed_counts_and_conflict_are_explicit() -> None:
+def test_excel_seed_counts_and_provenance_are_explicit() -> None:
+    """El seed dice de que celda sale cada dato, y no siembra nada sin fuente.
+
+    El unico valor que no estaba en la tabla maestra es el factor de «Con
+    ilustracion»: ``O22`` esta vacia. No se inventa, se toma de ``E24``, donde
+    el propio libro lo aplica, y el seed deja constancia de ello.
+    """
     source = content()
     assert "SEED_TECHNIQUES" in source
     assert "SEED_ADDITIONALS" in source
     assert "SEED_OTHER_COSTS" in source
-    assert "SOURCE_CONFLICT" in source
+    assert "E24" in source and "O22" in source
