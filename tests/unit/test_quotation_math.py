@@ -235,3 +235,70 @@ def test_negative_total_days_is_rejected() -> None:
                 commercial_factor=Decimal(1),
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("input_val", "expected"),
+    [
+        (Decimal("8.00"), Decimal("8.00")),
+        (Decimal("8.10"), Decimal("8.00")),
+        (Decimal("8.24"), Decimal("8.00")),
+        (Decimal("8.25"), Decimal("8.50")),
+        (Decimal("8.30"), Decimal("8.50")),
+        (Decimal("8.49"), Decimal("8.50")),
+        (Decimal("8.50"), Decimal("8.50")),
+        (Decimal("8.60"), Decimal("8.50")),
+        (Decimal("8.74"), Decimal("8.50")),
+        (Decimal("8.75"), Decimal("9.00")),
+        (Decimal("8.90"), Decimal("9.00")),
+        (Decimal("9.00"), Decimal("9.00")),
+    ],
+)
+def test_round_to_commercial_half_exact_cases(input_val: Decimal, expected: Decimal) -> None:
+    from app.core.quotations import round_to_commercial_half
+
+    assert round_to_commercial_half(input_val) == expected
+
+
+def test_costing_markup_and_effective_profit_calculations() -> None:
+    # 10 piezas, costo de materiales = 100, quema = 50, mano de obra = 0, espacio = 50
+    # Total costo interno = 200 -> Costo unitario = 20
+    # Markup deseado = 50%
+    # Ganancia objetivo unitaria = 20 * 50% = 10
+    # Precio calculado = 20 + 10 = 30 -> redondeo sugerido = 30.00
+    # Si usuario fija precio manual comercial en 35.00:
+    # Ganancia efectiva unit = 35 - 20 = 15
+    # Ganancia efectiva total = 15 * 10 = 150
+    # Markup efectivo = 15 / 20 * 100 = 75%
+    # Subtotal comercial = 35 * 10 = 350
+    # Con IGV 18% = 350 * 1.18 = 413
+    result = calculate_quotation(
+        QuotationInput(
+            quantity=10,
+            materials_calculated=Decimal("100"),
+            materials_applied=Decimal("100"),
+            firing_cost=Decimal("50"),
+            techniques=(),
+            additionals=(),
+            days_adjustment=0,
+            waiting_days=0,
+            other_costs=(OtherCostInput(1, "Fijo", Decimal("50"), OtherCostCalculationType.FIXED),),
+            markup_percent=Decimal("50"),
+            manual_commercial_unit_price=Decimal("35.00"),
+            tax_percentage=Decimal("18"),
+        )
+    )
+
+    assert result.final_total_cost == Decimal("200")
+    assert result.final_unit_cost == Decimal("20")
+    assert result.markup_percent == Decimal("50")
+    assert result.target_profit_unit == Decimal("10")
+    assert result.calculated_sale_unit_price == Decimal("30")
+    assert result.suggested_commercial_unit_price == Decimal("30.00")
+    assert result.commercial_sale_unit_price == Decimal("35.00")
+    assert result.effective_profit_unit == Decimal("15.00")
+    assert result.effective_profit_total == Decimal("150.00")
+    assert result.effective_markup_percent == Decimal("75")
+    assert result.commercial_subtotal == Decimal("350.00")
+    assert result.commercial_total == Decimal("413.00")
+    assert result.commercial_unit_price_with_tax == Decimal("41.30")

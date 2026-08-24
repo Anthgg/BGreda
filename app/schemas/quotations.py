@@ -188,6 +188,8 @@ class OtherCostSelectionIn(_Strict):
 
 
 class QuotationCalculateIn(_Strict):
+    name: Annotated[str | None, Field(max_length=200)] = None
+    customer_id: PositiveStrictInt | None = None
     product_id: PositiveStrictInt
     quantity: PositiveStrictInt
     recipe_id: PositiveStrictInt | None = None
@@ -209,6 +211,8 @@ class QuotationCalculateIn(_Strict):
     waiting_days: NonNegativeStrictInt = 0
     other_costs: list[OtherCostSelectionIn] | None = Field(default=None, max_length=100)
     commercial_factor: PositiveFactor | None = None
+    markup_percent: Annotated[Decimal | None, Field(ge=0, max_digits=36, decimal_places=18)] = None
+    commercial_sale_unit_price: Money | None = None
 
     @model_validator(mode="after")
     def _recipe_pair(self) -> QuotationCalculateIn:
@@ -275,9 +279,29 @@ class OtherCostCalculationOut(_Out):
 
 
 class QuotationCalculateOut(_Out):
+    name: str | None = None
+    customer_id: int | None = None
+    customer_name_snapshot: str | None = None
+    customer_trade_name_snapshot: str | None = None
+    customer_document_type_snapshot: str | None = None
+    customer_document_number_snapshot: str | None = None
+    customer_address_snapshot: str | None = None
+    customer_ubigeo_snapshot: str | None = None
+    customer_email_snapshot: str | None = None
+    customer_phone_snapshot: str | None = None
     product_id: int
     product_internal_reference: str
     product_name: str
+    product_name_snapshot: str | None = None
+    product_internal_reference_snapshot: str | None = None
+    product_type_snapshot: str | None = None
+    product_uom_snapshot: str | None = None
+    product_material_snapshot: str | None = None
+    product_grammage_snapshot: Decimal | None = None
+    product_width_snapshot: Decimal | None = None
+    product_height_snapshot: Decimal | None = None
+    product_length_snapshot: Decimal | None = None
+    product_depth_snapshot: Decimal | None = None
     quantity: int
     recipe_id: int | None
     recipe_version_id: int | None
@@ -301,6 +325,20 @@ class QuotationCalculateOut(_Out):
     base_commercial_cost: Decimal
     calculated_total: Decimal
     calculated_unit_price: Decimal
+    #: Costos internos puros, ganancia y precios comerciales
+    final_unit_cost: Decimal = Decimal(0)
+    final_total_cost: Decimal = Decimal(0)
+    markup_percent: Decimal = Decimal(100)
+    target_profit_unit: Decimal = Decimal(0)
+    calculated_sale_unit_price: Decimal = Decimal(0)
+    suggested_commercial_unit_price: Decimal = Decimal(0)
+    commercial_sale_unit_price: Decimal = Decimal(0)
+    effective_profit_unit: Decimal = Decimal(0)
+    effective_profit_total: Decimal = Decimal(0)
+    effective_markup_percent: Decimal = Decimal(0)
+    commercial_subtotal: Decimal = Decimal(0)
+    commercial_total: Decimal = Decimal(0)
+    commercial_unit_price_with_tax: Decimal = Decimal(0)
     #: Componentes de la receta sin costo unitario. Suman cero y abaratan el
     #: material sin que nada lo diga, asi que se nombran.
     materials_without_cost: list[str] = []
@@ -342,13 +380,20 @@ class QuotationOut(QuotationCalculateOut):
 class QuotationSummaryOut(_Out):
     id: int
     code: str
+    name: str | None = None
     status: QuotationStatus
+    customer_id: int | None = None
+    customer_name: str | None = None
+    customer_document_number: str | None = None
     product_id: int
     product_internal_reference: str
     product_name: str
     quantity: int
     calculated_unit_price: Decimal
     calculated_total: Decimal
+    final_unit_cost: Decimal = Decimal(0)
+    commercial_sale_unit_price: Decimal = Decimal(0)
+    commercial_total: Decimal = Decimal(0)
     total_with_tax: Decimal
     created_at: datetime
 

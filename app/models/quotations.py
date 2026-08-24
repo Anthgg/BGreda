@@ -6,7 +6,10 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.models.masters import Partner, Product
 
 from sqlalchemy import (
     Boolean,
@@ -145,16 +148,43 @@ class Quotation(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[QuotationStatus] = mapped_column(
         StrEnumType(QuotationStatus, 16),
         nullable=False,
         default=QuotationStatus.DRAFT,
         index=True,
     )
+    customer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("partners.id", ondelete="RESTRICT"), index=True
+    )
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Snapshots de cliente
+    customer_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    customer_trade_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    customer_document_type_snapshot: Mapped[str | None] = mapped_column(String(32))
+    customer_document_number_snapshot: Mapped[str | None] = mapped_column(String(32))
+    customer_address_snapshot: Mapped[str | None] = mapped_column(String(240))
+    customer_ubigeo_snapshot: Mapped[str | None] = mapped_column(String(120))
+    customer_email_snapshot: Mapped[str | None] = mapped_column(String(160))
+    customer_phone_snapshot: Mapped[str | None] = mapped_column(String(64))
+
+    # Snapshots de producto
+    product_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    product_internal_reference_snapshot: Mapped[str | None] = mapped_column(String(64))
+    product_type_snapshot: Mapped[str | None] = mapped_column(String(32))
+    product_uom_snapshot: Mapped[str | None] = mapped_column(String(32))
+    product_material_snapshot: Mapped[str | None] = mapped_column(String(200))
+    product_grammage_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_width_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_height_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_length_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_depth_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+
     recipe_id: Mapped[int | None] = mapped_column(
         ForeignKey("recipes.id", ondelete="RESTRICT"), index=True
     )
@@ -206,6 +236,48 @@ class Quotation(Base, TimestampMixin):
     calculated_unit_price: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
+
+    # Costeo interno, ganancia y precios comerciales (Fase 005.9)
+    final_unit_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    final_total_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    markup_percent: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, server_default=text("100")
+    )
+    target_profit_unit: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    calculated_sale_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    suggested_commercial_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    commercial_sale_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    effective_profit_unit: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    effective_profit_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    effective_markup_percent: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, server_default=text("0")
+    )
+    commercial_subtotal: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    commercial_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    commercial_unit_price_with_tax: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
     #: Gramos de receta que lleva **una** pieza. Nulo mientras no se indique:
     #: no hay valor por omision, porque suponer uno daria un costo de materiales
     #: creible y falso que nadie revisaria.
@@ -275,6 +347,8 @@ class Quotation(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by=lambda: (QuotationOtherCost.sort_order.asc(), QuotationOtherCost.id.asc()),
     )
+    customer: Mapped[Partner | None] = relationship("Partner", foreign_keys=[customer_id])
+    product: Mapped[Product] = relationship("Product", foreign_keys=[product_id])
 
 
 class QuotationTechnique(Base, TimestampMixin):

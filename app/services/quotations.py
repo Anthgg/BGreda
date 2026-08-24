@@ -34,7 +34,7 @@ from app.core.quotations import (
 )
 from app.models.audit import AuditAction
 from app.models.firings import Firing, FiringLine, FiringStatus
-from app.models.masters import Product, ProductType
+from app.models.masters import Partner, PartnerRole, Product, ProductType
 from app.models.quotations import (
     Additional,
     AdditionalFormulaType,
@@ -344,6 +344,28 @@ class QuotationService:
             )
         return product
 
+    async def _customer(
+        self,
+        customer_id: int | None,
+        *,
+        for_update: bool = False,
+        require_active: bool = True,
+    ) -> Partner | None:
+        if customer_id is None:
+            return None
+        stmt = select(Partner).where(Partner.id == customer_id)
+        if for_update:
+            stmt = stmt.with_for_update()
+        customer = (await self._session.execute(stmt)).scalar_one_or_none()
+        if customer is None or (require_active and not customer.active):
+            raise QuotationError("El cliente no existe o esta archivado", code="CUSTOMER_INVALID")
+        if customer.role not in (PartnerRole.CLIENT, PartnerRole.BOTH):
+            raise QuotationError(
+                "El tercero seleccionado no tiene rol de cliente",
+                code="CUSTOMER_ROLE_REQUIRED",
+            )
+        return customer
+
     async def _commercial(self) -> CommercialSettings:
         settings = (
             await self._session.execute(
@@ -535,6 +557,7 @@ class QuotationService:
 
     async def _calculate(self, payload: QuotationCalculateIn) -> _ResolvedCalculation:
         product = await self._product(payload.product_id)
+        customer = await self._customer(payload.customer_id)
         settings = await self._commercial()
         (
             materials_calculated,
@@ -649,6 +672,8 @@ class QuotationService:
                     waiting_days=payload.waiting_days,
                     other_costs=core_other,
                     commercial_factor=factor,
+                    markup_percent=payload.markup_percent,
+                    manual_commercial_unit_price=payload.commercial_sale_unit_price,
                     tax_percentage=tasa_igv,
                 )
             )
@@ -670,6 +695,7 @@ class QuotationService:
             "DISCOUNT_RULE_BLOCKED_BY_SOURCE",
         ]
         source_data: dict[str, object] = {
+            "customer": [customer.id, customer.updated_at] if customer else None,
             "product": [product.id, product.updated_at],
             "settings": [settings.id, settings.version, settings.updated_at],
             "recipe": [
@@ -746,9 +772,35 @@ class QuotationService:
         ]
         por_pieza = self._grams_per_piece(payload)
         output = QuotationCalculateOut(
+            name=payload.name,
+            customer_id=customer.id if customer else None,
+            customer_name_snapshot=customer.name if customer else None,
+            customer_trade_name_snapshot=(customer.reference or customer.name)
+            if customer
+            else None,
+            customer_document_type_snapshot=customer.document_type.value
+            if (customer and customer.document_type)
+            else None,
+            customer_document_number_snapshot=customer.document_number if customer else None,
+            customer_address_snapshot=customer.address if customer else None,
+            customer_ubigeo_snapshot=(customer.district or customer.ubigeo_code)
+            if customer
+            else None,
+            customer_email_snapshot=customer.email if customer else None,
+            customer_phone_snapshot=(customer.phone or customer.mobile) if customer else None,
             product_id=product.id,
             product_internal_reference=product.internal_reference,
             product_name=product.name,
+            product_name_snapshot=product.name,
+            product_internal_reference_snapshot=product.internal_reference,
+            product_type_snapshot=product.product_type.value,
+            product_uom_snapshot=product.base_uom_code,
+            product_material_snapshot=product.material,
+            product_grammage_snapshot=product.grammage,
+            product_width_snapshot=product.width,
+            product_height_snapshot=product.height,
+            product_length_snapshot=product.length,
+            product_depth_snapshot=product.depth,
             quantity=payload.quantity,
             recipe_id=recipe_version.recipe_id if recipe_version else None,
             recipe_version_id=recipe_version.id if recipe_version else None,
@@ -774,6 +826,19 @@ class QuotationService:
             base_commercial_cost=result.base_commercial_cost,
             calculated_total=result.calculated_total,
             calculated_unit_price=result.calculated_unit_price,
+            final_unit_cost=result.final_unit_cost,
+            final_total_cost=result.final_total_cost,
+            markup_percent=result.markup_percent,
+            target_profit_unit=result.target_profit_unit,
+            calculated_sale_unit_price=result.calculated_sale_unit_price,
+            suggested_commercial_unit_price=result.suggested_commercial_unit_price,
+            commercial_sale_unit_price=result.commercial_sale_unit_price,
+            effective_profit_unit=result.effective_profit_unit,
+            effective_profit_total=result.effective_profit_total,
+            effective_markup_percent=result.effective_markup_percent,
+            commercial_subtotal=result.commercial_subtotal,
+            commercial_total=result.commercial_total,
+            commercial_unit_price_with_tax=result.commercial_unit_price_with_tax,
             materials_without_cost=materials_without_cost,
             material_grams_per_piece=por_pieza,
             material_total_grams=(
@@ -840,6 +905,8 @@ class QuotationService:
     @staticmethod
     def _to_capture(quotation: Quotation) -> QuotationCalculateIn:
         return QuotationCalculateIn(
+            name=quotation.name,
+            customer_id=quotation.customer_id,
             product_id=quotation.product_id,
             quantity=quotation.quantity,
             recipe_id=quotation.recipe_id,
@@ -884,6 +951,8 @@ class QuotationService:
                 for line in quotation.other_costs
             ],
             commercial_factor=quotation.commercial_factor,
+            markup_percent=quotation.markup_percent,
+            commercial_sale_unit_price=quotation.commercial_sale_unit_price,
         )
 
     async def _apply(
@@ -895,7 +964,29 @@ class QuotationService:
         calculation = resolved or await self._calculate(payload)
         output = calculation.output
 
+        quotation.name = output.name
+        quotation.customer_id = output.customer_id
+        quotation.customer_name_snapshot = output.customer_name_snapshot
+        quotation.customer_trade_name_snapshot = output.customer_trade_name_snapshot
+        quotation.customer_document_type_snapshot = output.customer_document_type_snapshot
+        quotation.customer_document_number_snapshot = output.customer_document_number_snapshot
+        quotation.customer_address_snapshot = output.customer_address_snapshot
+        quotation.customer_ubigeo_snapshot = output.customer_ubigeo_snapshot
+        quotation.customer_email_snapshot = output.customer_email_snapshot
+        quotation.customer_phone_snapshot = output.customer_phone_snapshot
+
         quotation.product_id = output.product_id
+        quotation.product_name_snapshot = output.product_name_snapshot
+        quotation.product_internal_reference_snapshot = output.product_internal_reference_snapshot
+        quotation.product_type_snapshot = output.product_type_snapshot
+        quotation.product_uom_snapshot = output.product_uom_snapshot
+        quotation.product_material_snapshot = output.product_material_snapshot
+        quotation.product_grammage_snapshot = output.product_grammage_snapshot
+        quotation.product_width_snapshot = output.product_width_snapshot
+        quotation.product_height_snapshot = output.product_height_snapshot
+        quotation.product_length_snapshot = output.product_length_snapshot
+        quotation.product_depth_snapshot = output.product_depth_snapshot
+
         quotation.quantity = output.quantity
         quotation.recipe_id = output.recipe_id
         quotation.recipe_version_id = output.recipe_version_id
@@ -919,6 +1010,19 @@ class QuotationService:
         quotation.base_commercial_cost = output.base_commercial_cost
         quotation.calculated_total = output.calculated_total
         quotation.calculated_unit_price = output.calculated_unit_price
+        quotation.final_unit_cost = output.final_unit_cost
+        quotation.final_total_cost = output.final_total_cost
+        quotation.markup_percent = output.markup_percent
+        quotation.target_profit_unit = output.target_profit_unit
+        quotation.calculated_sale_unit_price = output.calculated_sale_unit_price
+        quotation.suggested_commercial_unit_price = output.suggested_commercial_unit_price
+        quotation.commercial_sale_unit_price = output.commercial_sale_unit_price
+        quotation.effective_profit_unit = output.effective_profit_unit
+        quotation.effective_profit_total = output.effective_profit_total
+        quotation.effective_markup_percent = output.effective_markup_percent
+        quotation.commercial_subtotal = output.commercial_subtotal
+        quotation.commercial_total = output.commercial_total
+        quotation.commercial_unit_price_with_tax = output.commercial_unit_price_with_tax
         quotation.material_grams_per_piece = output.material_grams_per_piece
         quotation.tax_percentage_snapshot = output.tax_percentage
         quotation.tax_rate_source_snapshot = output.tax_rate_source
@@ -1011,7 +1115,9 @@ class QuotationService:
         code = await self._sequences.issue(SequenceType.QUOTE, user_id=user.id)
         quotation = Quotation(
             code=code,
+            name=payload.name,
             status=QuotationStatus.DRAFT,
+            customer_id=payload.customer_id,
             product_id=payload.product_id,
             quantity=payload.quantity,
             commercial_factor_default_snapshot=Decimal(1),
@@ -1052,18 +1158,24 @@ class QuotationService:
             raise QuotationSourceChangedError()
 
         previous = {
+            "name": quotation.name,
+            "customer_id": quotation.customer_id,
             "materials_applied": quotation.materials_applied,
             "days_adjustment": quotation.days_adjustment,
             "waiting_days": quotation.waiting_days,
             "commercial_factor": quotation.commercial_factor,
+            "commercial_sale_unit_price": quotation.commercial_sale_unit_price,
             "calculated_total": quotation.calculated_total,
         }
         await self._apply(quotation, payload, calculation)
         current = {
+            "name": quotation.name,
+            "customer_id": quotation.customer_id,
             "materials_applied": quotation.materials_applied,
             "days_adjustment": quotation.days_adjustment,
             "waiting_days": quotation.waiting_days,
             "commercial_factor": quotation.commercial_factor,
+            "commercial_sale_unit_price": quotation.commercial_sale_unit_price,
             "calculated_total": quotation.calculated_total,
         }
         changes = {
@@ -1211,9 +1323,41 @@ class QuotationService:
     async def _stored_output(self, quotation: Quotation, product: Product) -> QuotationCalculateOut:
         gramos_guardados = quotation.material_grams_per_piece
         return QuotationCalculateOut(
+            name=quotation.name,
+            customer_id=quotation.customer_id,
+            customer_name_snapshot=quotation.customer_name_snapshot,
+            customer_trade_name_snapshot=quotation.customer_trade_name_snapshot,
+            customer_document_type_snapshot=quotation.customer_document_type_snapshot,
+            customer_document_number_snapshot=quotation.customer_document_number_snapshot,
+            customer_address_snapshot=quotation.customer_address_snapshot,
+            customer_ubigeo_snapshot=quotation.customer_ubigeo_snapshot,
+            customer_email_snapshot=quotation.customer_email_snapshot,
+            customer_phone_snapshot=quotation.customer_phone_snapshot,
             product_id=quotation.product_id,
             product_internal_reference=product.internal_reference,
             product_name=product.name,
+            product_name_snapshot=quotation.product_name_snapshot or product.name,
+            product_internal_reference_snapshot=(
+                quotation.product_internal_reference_snapshot or product.internal_reference
+            ),
+            product_type_snapshot=quotation.product_type_snapshot or product.product_type.value,
+            product_uom_snapshot=quotation.product_uom_snapshot or product.base_uom_code,
+            product_material_snapshot=quotation.product_material_snapshot or product.material,
+            product_grammage_snapshot=quotation.product_grammage_snapshot
+            if quotation.product_grammage_snapshot is not None
+            else product.grammage,
+            product_width_snapshot=quotation.product_width_snapshot
+            if quotation.product_width_snapshot is not None
+            else product.width,
+            product_height_snapshot=quotation.product_height_snapshot
+            if quotation.product_height_snapshot is not None
+            else product.height,
+            product_length_snapshot=quotation.product_length_snapshot
+            if quotation.product_length_snapshot is not None
+            else product.length,
+            product_depth_snapshot=quotation.product_depth_snapshot
+            if quotation.product_depth_snapshot is not None
+            else product.depth,
             quantity=quotation.quantity,
             recipe_id=quotation.recipe_id,
             recipe_version_id=quotation.recipe_version_id,
@@ -1237,6 +1381,19 @@ class QuotationService:
             base_commercial_cost=quotation.base_commercial_cost,
             calculated_total=quotation.calculated_total,
             calculated_unit_price=quotation.calculated_unit_price,
+            final_unit_cost=quotation.final_unit_cost,
+            final_total_cost=quotation.final_total_cost,
+            markup_percent=quotation.markup_percent,
+            target_profit_unit=quotation.target_profit_unit,
+            calculated_sale_unit_price=quotation.calculated_sale_unit_price,
+            suggested_commercial_unit_price=quotation.suggested_commercial_unit_price,
+            commercial_sale_unit_price=quotation.commercial_sale_unit_price,
+            effective_profit_unit=quotation.effective_profit_unit,
+            effective_profit_total=quotation.effective_profit_total,
+            effective_markup_percent=quotation.effective_markup_percent,
+            commercial_subtotal=quotation.commercial_subtotal,
+            commercial_total=quotation.commercial_total,
+            commercial_unit_price_with_tax=quotation.commercial_unit_price_with_tax,
             # Una cotizacion guardada no vuelve a mirar la receta: si algun
             # material perdio el precio despues, lo dira el recalculo, no esto.
             materials_without_cost=[],
@@ -1338,6 +1495,7 @@ class QuotationService:
         search: str | None = None,
         status: QuotationStatus | None = None,
         product_id: int | None = None,
+        customer_id: int | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
         limit: int = 50,
@@ -1349,6 +1507,9 @@ class QuotationService:
             stmt = stmt.where(
                 or_(
                     Quotation.code.ilike(term),
+                    Quotation.name.ilike(term),
+                    Quotation.customer_name_snapshot.ilike(term),
+                    Quotation.customer_document_number_snapshot.ilike(term),
                     Product.name.ilike(term),
                     Product.internal_reference.ilike(term),
                 )
@@ -1357,6 +1518,8 @@ class QuotationService:
             stmt = stmt.where(Quotation.status == status)
         if product_id is not None:
             stmt = stmt.where(Quotation.product_id == product_id)
+        if customer_id is not None:
+            stmt = stmt.where(Quotation.customer_id == customer_id)
         if date_from is not None:
             stmt = stmt.where(func.date(Quotation.created_at) >= date_from)
         if date_to is not None:
@@ -1376,13 +1539,20 @@ class QuotationService:
             QuotationSummaryOut(
                 id=quotation.id,
                 code=quotation.code,
+                name=quotation.name,
                 status=quotation.status,
+                customer_id=quotation.customer_id,
+                customer_name=quotation.customer_name_snapshot,
+                customer_document_number=quotation.customer_document_number_snapshot,
                 product_id=product.id,
                 product_internal_reference=product.internal_reference,
                 product_name=product.name,
                 quantity=quotation.quantity,
                 calculated_unit_price=quotation.calculated_unit_price,
                 calculated_total=quotation.calculated_total,
+                final_unit_cost=quotation.final_unit_cost,
+                commercial_sale_unit_price=quotation.commercial_sale_unit_price,
+                commercial_total=quotation.commercial_total,
                 total_with_tax=quotation.total_with_tax,
                 created_at=quotation.created_at,
             )
