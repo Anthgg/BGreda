@@ -107,6 +107,11 @@ class CommercialSettings(Base, VersionedSingletonMixin):
     #: Porcentaje, no fraccion: 18 significa 18 %. NUMERIC, nunca float.
     tax_percent: Mapped[Decimal | None] = mapped_column(percentage_numeric())
 
+    #: Factor comercial por omision del cotizador. El Excel fuente define 2.
+    default_quotation_factor: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, default=Decimal(2), server_default=text("2")
+    )
+
     #: Vigencia por defecto de una cotizacion, en dias.
     quote_validity_days: Mapped[int | None] = mapped_column(Integer)
 
@@ -128,6 +133,7 @@ class CommercialSettings(Base, VersionedSingletonMixin):
             f"tax_percent IS NULL OR (tax_percent >= 0 AND tax_percent <= {MAX_TAX_PERCENT})",
             name="tax_percent_range",
         ),
+        CheckConstraint("default_quotation_factor > 0", name="default_quotation_factor_positive"),
         CheckConstraint(
             f"quote_validity_days IS NULL OR "
             f"(quote_validity_days > 0 AND quote_validity_days <= {MAX_VALIDITY_DAYS})",

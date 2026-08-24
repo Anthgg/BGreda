@@ -172,7 +172,11 @@ class RecipeService:
         product = await self._session.get(Product, payload.product_id)
         if product is None:
             raise RecipeError("El producto seleccionado no existe")
-        if product.product_type != ProductType.PREPARED_MATERIAL:
+        # Una receta describe un material preparado —pasta, barniz, esmalte—, no
+        # una pieza. Que una cotizacion de pieza terminada pueda **elegir** una
+        # receta no significa que la pieza tenga formula propia: esa
+        # independencia se resuelve en el cotizador, no relajando el maestro.
+        if product.product_type is not ProductType.PREPARED_MATERIAL:
             msg = (
                 f"El producto '{product.name}' es de tipo {product.product_type.value}, "
                 "solo PREPARED_MATERIAL admite recetas"

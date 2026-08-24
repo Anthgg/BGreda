@@ -192,6 +192,12 @@ class CommercialSettingsBase(_StrictModel):
         Field(ge=0, le=MAX_TAX_PERCENT, max_digits=9, decimal_places=6),
     ] = None
 
+    #: Fuente configurable del factor 2 reconstruido del Excel de Fase 005.
+    default_quotation_factor: Annotated[
+        Decimal,
+        Field(gt=0, max_digits=9, decimal_places=6),
+    ] = Decimal(2)
+
     quote_validity_days: Annotated[int | None, Field(ge=1, le=MAX_VALIDITY_DAYS)] = None
 
     general_conditions: PlainText = None

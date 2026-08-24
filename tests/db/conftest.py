@@ -182,6 +182,9 @@ async def reset_database(
         await session.execute(
             text(
                 "TRUNCATE audit_events, bank_accounts, document_sequence_issues, "
+                "quotation_product_price_updates, quotation_other_costs, "
+                "quotation_additionals, quotation_techniques, quotations, "
+                "other_costs, additionals, techniques, "
                 "document_sequences, commercial_settings, company_settings, profiles, "
                 "recipe_lines, recipe_versions, recipes, "
                 "firing_lines, firing_kiln_sessions, firings, "

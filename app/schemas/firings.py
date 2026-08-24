@@ -300,6 +300,33 @@ class FiringSummaryOut(_Out):
     created_at: datetime
 
 
+class ConfirmedFiringLineOut(_Out):
+    """Linea de una quema confirmada, tal y como la elige una cotizacion.
+
+    Es una vista plana a proposito: el selector necesita el codigo de la hoja,
+    la fecha y el costo ya repartido, y no tiene por que arrastrar las sesiones
+    ni el resto de piezas de la quema.
+    """
+
+    id: int
+    firing_id: int
+    firing_code: str
+    firing_date: date | None = None
+    product_id: int | None = None
+    product_internal_reference: str | None = None
+    description: str
+    quantity: int
+    total_volume_cm3: Decimal
+    allocated_cost: Decimal
+
+
+class ConfirmedFiringLinePage(_Out):
+    items: list[ConfirmedFiringLineOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class FiringPage(_Out):
     items: list[FiringSummaryOut]
     total: int
@@ -310,6 +337,8 @@ class FiringPage(_Out):
 #: Se reexporta para que la interfaz ofrezca exactamente los tramos validos.
 __all__ = [
     "ALLOWED_BRACKETS",
+    "ConfirmedFiringLineOut",
+    "ConfirmedFiringLinePage",
     "FiringCalculateIn",
     "FiringCalculateOut",
     "FiringIn",

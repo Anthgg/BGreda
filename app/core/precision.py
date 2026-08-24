@@ -42,9 +42,19 @@ QUANTITY_SCALE = 6
 STOCK_QUANTITY_PRECISION = 24
 STOCK_QUANTITY_SCALE = 12
 
-#: Porcentajes. Se almacena 18 para "18 %", nunca la fraccion 0.18.
+#: Porcentajes. **Convencion canonica del proyecto**: se almacena 18 para
+#: "18 %", nunca la fraccion 0.18. Aplica a `commercial_settings.tax_percent`,
+#: a `products.sale_tax_rate` y a `products.purchase_tax_rate`. Los libros de
+#: origen escriben la fraccion, y la conversion ocurre en un unico punto, el
+#: importador, para que ningun consumidor tenga que adivinar la escala.
 PERCENT_PRECISION = 9
 PERCENT_SCALE = 6
+
+#: Resultados internos del cotizador. Se conserva mas precision que en los
+#: importes de presentacion porque el costo asignado de una quema puede tener
+#: muchas cifras decimales y no debe redondearse antes del precio unitario.
+CALCULATION_PRECISION = 36
+CALCULATION_SCALE = 18
 
 
 def money_numeric() -> Numeric[Decimal]:
@@ -74,3 +84,8 @@ def stock_quantity_numeric() -> Numeric[Decimal]:
 def percentage_numeric() -> Numeric[Decimal]:
     """Columna para porcentajes como el IGV."""
     return Numeric(PERCENT_PRECISION, PERCENT_SCALE, asdecimal=True)
+
+
+def calculation_numeric() -> Numeric[Decimal]:
+    """Columna para resultados intermedios y finales del cotizador."""
+    return Numeric(CALCULATION_PRECISION, CALCULATION_SCALE, asdecimal=True)

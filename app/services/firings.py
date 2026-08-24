@@ -53,6 +53,7 @@ from app.models.masters import Product
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.firings import (
+    ConfirmedFiringLineOut,
     FiringCalculateOut,
     FiringIn,
     FiringLineIn,
@@ -1009,6 +1010,78 @@ class FiringService:
         if session.capacity_snapshot <= 0:
             return Decimal(0)
         return assigned / session.capacity_snapshot * Decimal(100)
+
+    async def list_confirmed_lines(
+        self,
+        *,
+        product_id: int | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[ConfirmedFiringLineOut], int]:
+        """Lineas de quemas **confirmadas**, para que una cotizacion elija una.
+
+        Se resuelve con una sola consulta con JOIN en vez de listar las hojas y
+        pedir el detalle de cada una: el cotizador solo necesita la linea, y
+        traer cien quemas enteras para quedarse con una fila es desproporcionado.
+
+        Solo se devuelven lineas de hojas CONFIRMED: cotizar contra un borrador
+        permitiria que el costo cambiase despues de haber cotizado.
+        """
+
+        def apply(stmt: Select[_Row]) -> Select[_Row]:
+            stmt = stmt.where(Firing.status == FiringStatus.CONFIRMED)
+            if product_id is not None:
+                stmt = stmt.where(FiringLine.product_id == product_id)
+            if search:
+                pattern = f"%{search.strip()}%"
+                stmt = stmt.where(
+                    or_(Firing.code.ilike(pattern), FiringLine.description.ilike(pattern))
+                )
+            return stmt
+
+        base = select(FiringLine).join(Firing, Firing.id == FiringLine.firing_id)
+        total = (
+            await self._session.execute(
+                apply(
+                    select(func.count())
+                    .select_from(FiringLine)
+                    .join(Firing, Firing.id == FiringLine.firing_id)
+                )
+            )
+        ).scalar_one()
+
+        result = await self._session.execute(
+            apply(base)
+            .options(selectinload(FiringLine.firing))
+            .execution_options(populate_existing=True)
+            .order_by(FiringLine.firing_id.desc(), FiringLine.sort_order.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        lines = list(result.scalars().unique())
+
+        references = await self._product_references(
+            [line.product_id for line in lines if line.product_id is not None]
+        )
+        items = [
+            ConfirmedFiringLineOut(
+                id=line.id,
+                firing_id=line.firing_id,
+                firing_code=line.firing.code,
+                firing_date=line.firing.firing_date,
+                product_id=line.product_id,
+                product_internal_reference=(
+                    references.get(line.product_id) if line.product_id else None
+                ),
+                description=line.description,
+                quantity=line.quantity,
+                total_volume_cm3=line.total_volume_cm3,
+                allocated_cost=line.allocated_cost,
+            )
+            for line in lines
+        ]
+        return items, int(total)
 
     async def list_firings(
         self,
