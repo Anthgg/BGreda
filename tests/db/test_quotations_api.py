@@ -147,8 +147,17 @@ async def test_calculate_is_pure_and_uses_decimal_strings(
     assert Decimal(data["materials_calculated"]) == Decimal("9.5")
     assert Decimal(data["materials_applied"]) == Decimal("11.58")
     assert Decimal(data["firing_cost"]) == Decimal(firing_line["allocated_cost"])
-    assert data["igv_rule_source"] == "NOT_FOUND"
+    # El IGV si tiene regla: la cotizacion se emite neta y el impuesto se anade
+    # encima, de modo que el documento entregado muestre las dos cifras.
+    assert data["igv_rule_source"] == "FOUND"
     assert data["discount_rule_source"] == "NOT_FOUND"
+    neto = Decimal(data["calculated_total"])
+    tasa = Decimal(data["tax_percentage"])
+    assert Decimal(data["tax_amount"]) == neto * tasa / Decimal(100)
+    assert Decimal(data["total_with_tax"]) == neto + Decimal(data["tax_amount"])
+    assert Decimal(data["unit_price_with_tax"]) == Decimal(data["total_with_tax"]) / Decimal(
+        data["quantity"]
+    )
     assert await db_session.scalar(select(func.count()).select_from(Quotation)) == before_quotes
     assert await db_session.scalar(select(func.count()).select_from(StockMovement)) == before_stock
 
@@ -452,3 +461,81 @@ async def test_parallel_creates_keep_quote_sequence_unique_and_atomic(
     codes = [response.json()["code"] for response in responses]
     assert len(set(codes)) == len(codes)
     assert all(code.startswith("CTZ-") for code in codes)
+
+
+async def test_el_igv_se_anade_sobre_el_neto_y_no_lo_altera(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """La cotizacion se emite sin IGV; el impuesto se calcula encima.
+
+    Es la regla del negocio: el precio que se negocia es neto y el documento
+    que se entrega muestra las dos cifras. Por eso el impuesto no entra en la
+    formula comercial ni se multiplica por el factor.
+    """
+    from app.models.settings import SINGLETON_ID, CommercialSettings
+
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    sin_igv = (
+        await api.post(
+            f"{QUOTATIONS}/calculate",
+            json=_quote_payload(product, recipe, firing_line),
+            headers=head(admin_csrf),
+        )
+    ).json()
+    assert Decimal(sin_igv["tax_percentage"]) == Decimal(0)
+    assert Decimal(sin_igv["total_with_tax"]) == Decimal(sin_igv["calculated_total"])
+    assert "IGV_RATE_NOT_CONFIGURED" in sin_igv["warnings"]
+
+    settings = await db_session.get(CommercialSettings, SINGLETON_ID)
+    assert settings is not None
+    settings.tax_percent = Decimal("18")
+    await db_session.commit()
+
+    con_igv = (
+        await api.post(
+            f"{QUOTATIONS}/calculate",
+            json=_quote_payload(product, recipe, firing_line),
+            headers=head(admin_csrf),
+        )
+    ).json()
+
+    neto = Decimal(con_igv["calculated_total"])
+    # El neto no cambia al configurar el impuesto: el IGV va encima, no dentro.
+    assert neto == Decimal(sin_igv["calculated_total"])
+    assert Decimal(con_igv["tax_percentage"]) == Decimal("18")
+    assert Decimal(con_igv["tax_amount"]) == neto * Decimal("18") / Decimal(100)
+    assert Decimal(con_igv["total_with_tax"]) == neto * Decimal("1.18")
+    assert "IGV_RATE_NOT_CONFIGURED" not in con_igv["warnings"]
+
+
+async def test_los_gramos_por_pieza_escalan_el_costo_de_materiales(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Una pieza no pesa un gramo: la receta se cotiza sobre los gramos reales."""
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    base = _quote_payload(product, recipe, firing_line)
+    base.pop("materials_applied", None)
+
+    uno = (await api.post(f"{QUOTATIONS}/calculate", json=base, headers=head(admin_csrf))).json()
+
+    diez = (
+        await api.post(
+            f"{QUOTATIONS}/calculate",
+            json={**base, "material_grams_per_piece": "10"},
+            headers=head(admin_csrf),
+        )
+    ).json()
+
+    assert Decimal(uno["material_grams_per_piece"]) == Decimal(1)
+    assert Decimal(diez["material_grams_per_piece"]) == Decimal(10)
+    assert Decimal(diez["material_total_grams"]) == Decimal(10) * Decimal(diez["quantity"])
+    # Diez veces mas material, diez veces mas costo calculado.
+    assert Decimal(diez["materials_calculated"]) == Decimal(uno["materials_calculated"]) * 10

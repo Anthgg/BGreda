@@ -102,6 +102,9 @@ class QuotationInput:
     waiting_days: int
     other_costs: tuple[OtherCostInput, ...]
     commercial_factor: Decimal
+    #: Porcentaje de IGV, no fraccion: 18 significa 18 %. Cero deja el
+    #: importe con impuesto igual al neto.
+    tax_percentage: Decimal = ZERO
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,8 +123,14 @@ class QuotationResult:
     space_cost: Decimal
     commercial_factor: Decimal
     base_commercial_cost: Decimal
+    #: Precio neto. Es el de la hoja de calculo del negocio y el que manda:
+    #: el impuesto se anade encima, nunca se disuelve dentro.
     calculated_total: Decimal
     calculated_unit_price: Decimal
+    tax_percentage: Decimal
+    tax_amount: Decimal
+    total_with_tax: Decimal
+    unit_price_with_tax: Decimal
 
 
 def _require_non_negative(value: Decimal, label: str) -> None:
@@ -232,6 +241,15 @@ def calculate_quotation(payload: QuotationInput) -> QuotationResult:
     calculated_total = base_commercial_cost * payload.commercial_factor + space_cost
     calculated_unit_price = calculated_total / Decimal(payload.quantity)
 
+    # El IGV se suma sobre el precio neto: la cotizacion se emite sin impuesto y
+    # el documento que se entrega muestra las dos cifras. Por eso no entra en la
+    # formula comercial ni se multiplica por el factor.
+    if payload.tax_percentage < ZERO:
+        raise QuotationCalculationError("El porcentaje de IGV no puede ser negativo")
+    tax_amount = calculated_total * payload.tax_percentage / Decimal(100)
+    total_with_tax = calculated_total + tax_amount
+    unit_price_with_tax = total_with_tax / Decimal(payload.quantity)
+
     return QuotationResult(
         techniques=techniques,
         additionals=additionals,
@@ -249,4 +267,8 @@ def calculate_quotation(payload: QuotationInput) -> QuotationResult:
         base_commercial_cost=base_commercial_cost,
         calculated_total=calculated_total,
         calculated_unit_price=calculated_unit_price,
+        tax_percentage=payload.tax_percentage,
+        tax_amount=tax_amount,
+        total_with_tax=total_with_tax,
+        unit_price_with_tax=unit_price_with_tax,
     )

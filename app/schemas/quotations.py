@@ -194,6 +194,11 @@ class QuotationCalculateIn(_Strict):
     recipe_version_id: PositiveStrictInt | None = None
     firing_line_id: PositiveStrictInt | None = None
     materials_applied: Money | None = None
+    #: Gramos de receta por pieza. El costo de materiales se calcula sobre
+    #: `gramos_por_pieza x cantidad`; por omision, un gramo por pieza.
+    material_grams_per_piece: Annotated[
+        Decimal | None, Field(gt=Decimal(0), le=Decimal(1_000_000))
+    ] = None
     techniques: list[TechniqueSelectionIn] = Field(default_factory=list, max_length=100)
     additionals: list[AdditionalSelectionIn] = Field(default_factory=list, max_length=100)
     days_adjustment: Annotated[int, Field(strict=True, ge=-10000, le=10000)] = 0
@@ -292,9 +297,20 @@ class QuotationCalculateOut(_Out):
     base_commercial_cost: Decimal
     calculated_total: Decimal
     calculated_unit_price: Decimal
+    material_grams_per_piece: Decimal
+    #: Gramos totales de receta: `gramos_por_pieza x cantidad`.
+    material_total_grams: Decimal
+    #: IGV aplicado, en porcentaje. El total y el unitario de arriba son netos.
+    tax_percentage: Decimal
+    tax_amount: Decimal
+    total_with_tax: Decimal
+    unit_price_with_tax: Decimal
     source_fingerprint: str
     warnings: list[str]
-    igv_rule_source: Literal["NOT_FOUND"] = "NOT_FOUND"
+    #: La regla del IGV si esta definida: la cotizacion se emite sin impuesto y
+    #: el documento entregado muestra el neto y el total con IGV.
+    igv_rule_source: Literal["FOUND"] = "FOUND"
+    #: Ninguna fuente define descuento; sigue sin implementarse.
     discount_rule_source: Literal["NOT_FOUND"] = "NOT_FOUND"
     techniques: list[TechniqueCalculationOut]
     additionals: list[AdditionalCalculationOut]
@@ -322,6 +338,7 @@ class QuotationSummaryOut(_Out):
     quantity: int
     calculated_unit_price: Decimal
     calculated_total: Decimal
+    total_with_tax: Decimal
     created_at: datetime
 
 

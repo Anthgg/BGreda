@@ -23,7 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.precision import calculation_numeric, quantity_numeric
+from app.core.precision import calculation_numeric, percentage_numeric, quantity_numeric
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
 
@@ -204,6 +204,27 @@ class Quotation(Base, TimestampMixin):
         calculation_numeric(), nullable=False, server_default=text("0")
     )
     calculated_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Gramos de receta que lleva **una** pieza. Sin este dato la cantidad de
+    #: piezas se leia como gramos y el costo de materiales no significaba nada.
+    material_grams_per_piece: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("1")
+    )
+    #: IGV vigente al calcular, en porcentaje (18 significa 18 %). La cotizacion
+    #: se emite **sin** impuesto; el importe con IGV se guarda para que el
+    #: documento que se entrega pueda mostrar las dos cifras sin recalcularlas
+    #: con la tasa de manana.
+    tax_percentage_snapshot: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, server_default=text("0")
+    )
+    tax_amount: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    total_with_tax: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    unit_price_with_tax: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
     source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)

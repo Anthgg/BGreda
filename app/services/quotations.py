@@ -376,15 +376,24 @@ class QuotationService:
                 "La version de receta indicada no existe o no esta activa",
                 code="RECIPE_VERSION_INVALID",
             )
+        # La receta se cotiza en gramos y la cotizacion cuenta piezas: sin el
+        # dato de cuantos gramos lleva una pieza, pedir el costo de «19» era
+        # pedir el de 19 gramos, no el de 19 jarras.
+        gramos = self._grams_per_piece(payload) * Decimal(payload.quantity)
         result = await self._recipes.calculate(
             RecipeCalculateIn(
                 recipe_id=payload.recipe_id,
                 recipe_version_id=payload.recipe_version_id,
-                target_base_quantity=Decimal(payload.quantity),
+                target_base_quantity=gramos,
                 target_uom="g",
             )
         )
         return result.total_material_cost, version, []
+
+    @staticmethod
+    def _grams_per_piece(payload: QuotationCalculateIn) -> Decimal:
+        """Gramos de receta por pieza. Un gramo por omision."""
+        return payload.material_grams_per_piece or Decimal(1)
 
     async def _firing_source(
         self, payload: QuotationCalculateIn, product: Product
@@ -589,6 +598,7 @@ class QuotationService:
                     waiting_days=payload.waiting_days,
                     other_costs=core_other,
                     commercial_factor=factor,
+                    tax_percentage=settings.tax_percent or ZERO,
                 )
             )
         except QuotationCalculationError as exc:
@@ -597,7 +607,9 @@ class QuotationService:
         warnings = [
             *recipe_warnings,
             *firing_warnings,
-            "IGV_RULE_BLOCKED_BY_SOURCE",
+            # El IGV ya tiene regla: la cotizacion es neta y el impuesto se anade
+            # encima. Solo se avisa si no hay tasa configurada.
+            *([] if settings.tax_percent else ["IGV_RATE_NOT_CONFIGURED"]),
             "DISCOUNT_RULE_BLOCKED_BY_SOURCE",
         ]
         source_data: dict[str, object] = {
@@ -704,6 +716,12 @@ class QuotationService:
             base_commercial_cost=result.base_commercial_cost,
             calculated_total=result.calculated_total,
             calculated_unit_price=result.calculated_unit_price,
+            material_grams_per_piece=self._grams_per_piece(payload),
+            material_total_grams=self._grams_per_piece(payload) * Decimal(payload.quantity),
+            tax_percentage=result.tax_percentage,
+            tax_amount=result.tax_amount,
+            total_with_tax=result.total_with_tax,
+            unit_price_with_tax=result.unit_price_with_tax,
             source_fingerprint=fingerprint,
             warnings=warnings,
             techniques=technique_out,
@@ -836,6 +854,11 @@ class QuotationService:
         quotation.base_commercial_cost = output.base_commercial_cost
         quotation.calculated_total = output.calculated_total
         quotation.calculated_unit_price = output.calculated_unit_price
+        quotation.material_grams_per_piece = output.material_grams_per_piece
+        quotation.tax_percentage_snapshot = output.tax_percentage
+        quotation.tax_amount = output.tax_amount
+        quotation.total_with_tax = output.total_with_tax
+        quotation.unit_price_with_tax = output.unit_price_with_tax
         quotation.source_fingerprint = output.source_fingerprint
         quotation.calculation_warnings = output.warnings
 
@@ -1145,6 +1168,12 @@ class QuotationService:
             base_commercial_cost=quotation.base_commercial_cost,
             calculated_total=quotation.calculated_total,
             calculated_unit_price=quotation.calculated_unit_price,
+            material_grams_per_piece=quotation.material_grams_per_piece,
+            material_total_grams=(quotation.material_grams_per_piece * Decimal(quotation.quantity)),
+            tax_percentage=quotation.tax_percentage_snapshot,
+            tax_amount=quotation.tax_amount,
+            total_with_tax=quotation.total_with_tax,
+            unit_price_with_tax=quotation.unit_price_with_tax,
             source_fingerprint=quotation.source_fingerprint,
             warnings=list(quotation.calculation_warnings),
             techniques=[
@@ -1275,6 +1304,7 @@ class QuotationService:
                 quantity=quotation.quantity,
                 calculated_unit_price=quotation.calculated_unit_price,
                 calculated_total=quotation.calculated_total,
+                total_with_tax=quotation.total_with_tax,
                 created_at=quotation.created_at,
             )
             for quotation, product in rows
