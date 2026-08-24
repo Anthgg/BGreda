@@ -9,6 +9,7 @@ reglas.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
 from enum import StrEnum
 
@@ -16,11 +17,14 @@ from app.core.errors import APIError
 
 #: DNI peruano: exactamente ocho digitos. Ni espacios intermedios, ni letras,
 #: ni notacion cientifica: la validacion es sobre el texto tal cual, nunca
-#: sobre un ``int`` que ya habria perdido un cero inicial.
-_DNI_PATTERN = re.compile(r"^\d{8}$")
+#: sobre un ``int`` que ya habria perdido un cero inicial. ``re.ASCII`` evita
+#: que un digito Unicode no latino (arabigo-indico, ancho completo...) pase
+#: la validacion: ``\d`` sin esa bandera acepta esas variantes y la consulta
+#: gastaria cuota externa con un documento que nunca fue valido.
+_DNI_PATTERN = re.compile(r"^\d{8}$", re.ASCII)
 
 #: RUC peruano: exactamente once digitos.
-_RUC_PATTERN = re.compile(r"^\d{11}$")
+_RUC_PATTERN = re.compile(r"^\d{11}$", re.ASCII)
 
 
 class IdentityDocumentType(StrEnum):
@@ -109,12 +113,18 @@ def mask_document(document_type: IdentityDocumentType, document: str) -> str:
     return ("*" * max(oculto, 0)) + document[-visible:]
 
 
-def document_hash(document_type: IdentityDocumentType, document: str) -> str:
+def document_hash(document_type: IdentityDocumentType, document: str, *, secret: str) -> str:
     """Clave de cache y de deduplicacion, no reversible.
 
     La cache guarda este hash y no el documento en claro: no hace falta
     conservar una copia legible del numero para poder invalidarla o volver a
     consultarla, porque quien pide un refresco ya conoce el documento.
+
+    Se firma con HMAC y un secreto que solo conoce el backend, no un
+    ``sha256`` a secas: un DNI solo tiene cien millones de valores posibles,
+    asi que quien lea la tabla de cache (o un respaldo de ella) podria
+    reconstruir el hash de cada uno de esos valores y recuperar el documento
+    original en minutos. El secreto hace esa enumeracion inviable.
     """
     payload = f"{document_type.value}:{document}".encode()
-    return hashlib.sha256(payload).hexdigest()
+    return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()

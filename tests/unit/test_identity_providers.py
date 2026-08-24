@@ -129,6 +129,18 @@ async def test_peru_api_dni_cuerpo_vacio_es_not_found(peru_provider: PeruApiProv
     assert resultado.status is LookupStatus.NOT_FOUND
 
 
+@respx.mock
+async def test_peru_api_dni_json_no_es_un_objeto_es_provider_error(
+    peru_provider: PeruApiProvider,
+) -> None:
+    """Un 200 con JSON valido que no es un objeto (lista, numero, texto) no
+    debe reventar con AttributeError al llamar body.get(...): un cambio de
+    esquema o gateway en el proveedor no debe tumbar la peticion completa."""
+    respx.get(f"{PERU_BASE}/v1/dni").mock(return_value=httpx.Response(200, json=[1, 2, 3]))
+    resultado = await peru_provider.lookup_dni("12345678")
+    assert resultado.status is LookupStatus.PROVIDER_ERROR
+
+
 # ---------------------------------------------------------------------------
 # Peru API — RUC
 # ---------------------------------------------------------------------------
@@ -170,6 +182,15 @@ async def test_peru_api_ruc_sin_direccion_no_inventa_el_campo(
     assert resultado.status is LookupStatus.SUCCESS
     assert resultado.data is not None
     assert resultado.data["address"] is None
+
+
+@respx.mock
+async def test_peru_api_ruc_json_no_es_un_objeto_es_provider_error(
+    peru_provider: PeruApiProvider,
+) -> None:
+    respx.get(f"{PERU_BASE}/v1/ruc").mock(return_value=httpx.Response(200, json="inesperado"))
+    resultado = await peru_provider.lookup_ruc("20123456789")
+    assert resultado.status is LookupStatus.PROVIDER_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +238,15 @@ async def test_decolecta_dni_429_es_rate_limited(decolecta_provider: DecolectaPr
 
 
 @respx.mock
+async def test_decolecta_dni_json_no_es_un_objeto_es_provider_error(
+    decolecta_provider: DecolectaProvider,
+) -> None:
+    respx.get(f"{DECOLECTA_BASE}/v1/reniec/dni").mock(return_value=httpx.Response(200, json=None))
+    resultado = await decolecta_provider.lookup_dni("12345678")
+    assert resultado.status is LookupStatus.PROVIDER_ERROR
+
+
+@respx.mock
 async def test_decolecta_ruc_normaliza_una_respuesta_exitosa(
     decolecta_provider: DecolectaProvider,
 ) -> None:
@@ -236,6 +266,15 @@ async def test_decolecta_ruc_normaliza_una_respuesta_exitosa(
     assert resultado.status is LookupStatus.SUCCESS
     assert resultado.data is not None
     assert resultado.data["business_name"] == "Ceramica Greda SAC"
+
+
+@respx.mock
+async def test_decolecta_ruc_json_no_es_un_objeto_es_provider_error(
+    decolecta_provider: DecolectaProvider,
+) -> None:
+    respx.get(f"{DECOLECTA_BASE}/v1/sunat/ruc").mock(return_value=httpx.Response(200, json=[]))
+    resultado = await decolecta_provider.lookup_ruc("20123456789")
+    assert resultado.status is LookupStatus.PROVIDER_ERROR
 
 
 @respx.mock

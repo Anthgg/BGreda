@@ -116,6 +116,8 @@ class PeruApiProvider(IdentityProvider):
     def _parse_dni(self, response: httpx.Response) -> ProviderLookupResult:
         try:
             body = response.json()
+            if not isinstance(body, dict):
+                return ProviderLookupResult(LookupStatus.PROVIDER_ERROR, self.name)
             if not body or not body.get("nombres"):
                 return ProviderLookupResult(LookupStatus.NOT_FOUND, self.name)
             nombres = str(body["nombres"]).strip()
@@ -135,6 +137,8 @@ class PeruApiProvider(IdentityProvider):
     def _parse_ruc(self, response: httpx.Response) -> ProviderLookupResult:
         try:
             body = response.json()
+            if not isinstance(body, dict):
+                return ProviderLookupResult(LookupStatus.PROVIDER_ERROR, self.name)
             razon = body.get("razon_social")
             if not body or not razon:
                 return ProviderLookupResult(LookupStatus.NOT_FOUND, self.name)
@@ -198,6 +202,8 @@ class DecolectaProvider(IdentityProvider):
     def _parse_dni(self, response: httpx.Response) -> ProviderLookupResult:
         try:
             body = response.json()
+            if not isinstance(body, dict):
+                return ProviderLookupResult(LookupStatus.PROVIDER_ERROR, self.name)
             completo = body.get("full_name")
             if not body or not completo:
                 return ProviderLookupResult(LookupStatus.NOT_FOUND, self.name)
@@ -214,6 +220,8 @@ class DecolectaProvider(IdentityProvider):
     def _parse_ruc(self, response: httpx.Response) -> ProviderLookupResult:
         try:
             body = response.json()
+            if not isinstance(body, dict):
+                return ProviderLookupResult(LookupStatus.PROVIDER_ERROR, self.name)
             razon = body.get("razon_social")
             if not body or not razon:
                 return ProviderLookupResult(LookupStatus.NOT_FOUND, self.name)

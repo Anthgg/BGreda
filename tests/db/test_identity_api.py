@@ -31,6 +31,7 @@ from tests.conftest import TEST_EMAIL, TEST_PASSWORD
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
 
 IDENTITY = "/api/v1/identity"
+TEST_HASH_SECRET = "clave-de-prueba-no-es-la-real"
 
 DNI_ACTIVE = {
     "full_name": "Ana Torres Diaz",
@@ -152,6 +153,7 @@ def override_service(
             ruc_ttl_days=7,
             fallback_on_not_found=fallback_on_not_found,
             rate_limiter=limiter,
+            hash_secret=TEST_HASH_SECRET,
         )
 
     app.dependency_overrides[get_identity_lookup_service] = _override
@@ -268,6 +270,24 @@ async def test_una_segunda_consulta_sirve_desde_cache_sin_llamar_al_proveedor(
     assert segunda.json()["cache_hit"] is True
     assert segunda.json()["full_name"] == "Ana Torres Diaz"
     assert primary.dni_calls == 1  # no crecio: la segunda no toco la red
+
+
+async def test_la_fila_de_cache_nunca_guarda_el_documento_en_claro(
+    api: httpx.AsyncClient, primary: FakeProvider, db_session: AsyncSession
+) -> None:
+    """La cache indexa por hash: guardar tambien el numero en el payload
+    anularia esa proteccion. El numero de la respuesta se repone en cada
+    lectura a partir de lo que pidio esa peticion, no de lo guardado."""
+    primary.dni_queue.append(ok(ProviderName.PERU_API, DNI_ACTIVE))
+    respuesta = await api.get(f"{IDENTITY}/dni/10000014")
+    assert respuesta.status_code == 200
+    assert respuesta.json()["document_number"] == "10000014"
+
+    fila = (
+        await db_session.execute(text("SELECT payload FROM identity_lookup_cache"))
+    ).scalar_one()
+    assert "document_number" not in fila
+    assert "10000014" not in str(fila)
 
 
 async def test_refresh_ignora_la_cache_y_vuelve_a_llamar_al_proveedor(
@@ -415,6 +435,7 @@ async def test_el_limite_interno_bloquea_tras_demasiadas_consultas_del_mismo_doc
             ruc_ttl_days=7,
             fallback_on_not_found=False,
             rate_limiter=limiter,
+            hash_secret=TEST_HASH_SECRET,
         )
 
     identity_app.dependency_overrides[get_identity_lookup_service] = _override

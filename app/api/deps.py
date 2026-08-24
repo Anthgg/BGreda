@@ -352,6 +352,7 @@ async def get_identity_lookup_service(
         ruc_ttl_days=settings.IDENTITY_RUC_CACHE_TTL_DAYS,
         fallback_on_not_found=settings.IDENTITY_FALLBACK_ON_NOT_FOUND,
         rate_limiter=_get_rate_limiter(settings),
+        hash_secret=settings.IDENTITY_HASH_SECRET.get_secret_value(),
     )
 
 

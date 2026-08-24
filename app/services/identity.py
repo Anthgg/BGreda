@@ -149,6 +149,7 @@ class IdentityLookupService:
         ruc_ttl_days: int,
         fallback_on_not_found: bool,
         rate_limiter: _InMemoryRateLimiter,
+        hash_secret: str,
     ) -> None:
         self._session = session
         self._primary = primary
@@ -157,6 +158,7 @@ class IdentityLookupService:
         self._ruc_ttl = timedelta(days=ruc_ttl_days)
         self._fallback_on_not_found = fallback_on_not_found
         self._rate_limiter = rate_limiter
+        self._hash_secret = hash_secret
 
     async def lookup_dni(
         self, raw_document: str, *, user: AuthenticatedUser, refresh: bool
@@ -205,10 +207,10 @@ class IdentityLookupService:
                 "Ha alcanzado el limite de consultas para este documento. Intente en unos minutos."
             )
 
-        the_hash = document_hash(document_type, document)
+        the_hash = document_hash(document_type, document, secret=self._hash_secret)
 
         if not refresh:
-            cached = await self._read_cache(document_type, the_hash)
+            cached = await self._read_cache(document_type, the_hash, document)
             if cached is not None:
                 await self._record_daily(cache_hit=True)
                 self._log(
@@ -338,7 +340,7 @@ class IdentityLookupService:
 
     # -- Cache ------------------------------------------------------------
     async def _read_cache(
-        self, document_type: IdentityDocumentType, the_hash: str
+        self, document_type: IdentityDocumentType, the_hash: str, document: str
     ) -> dict[str, Any] | None:
         row = (
             await self._session.execute(
@@ -352,6 +354,11 @@ class IdentityLookupService:
             return None
         return {
             **row.payload,
+            # El numero no se guarda en la fila (ver _write_cache): se
+            # repone aqui con el mismo documento que trajo esta peticion,
+            # que por construccion es el unico que puede haber producido
+            # este hash.
+            "document_number": document,
             "provider": row.provider.value,
             "cache_hit": True,
             "freshness": row.fetched_at,
@@ -368,11 +375,14 @@ class IdentityLookupService:
     ) -> None:
         # Solo los campos normalizados del contrato publico: nunca la
         # respuesta cruda del proveedor, y nunca mas de lo que hace falta
-        # para volver a servir la misma respuesta.
+        # para volver a servir la misma respuesta. `document_number` se
+        # excluye a proposito: la cache indexa por hash precisamente para no
+        # tener que guardar el documento en claro en ningun lado, y guardarlo
+        # tambien en el payload anulaba esa garantia.
         payload = {
             k: v
             for k, v in record.items()
-            if k not in {"document_type", "provider", "cache_hit", "freshness"}
+            if k not in {"document_type", "document_number", "provider", "cache_hit", "freshness"}
         }
         stmt = (
             pg_insert(IdentityLookupCache)
