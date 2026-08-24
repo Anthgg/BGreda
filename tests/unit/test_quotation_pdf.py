@@ -247,3 +247,192 @@ def test_missing_optional_fields_render_cleanly() -> None:
     # PDF generation must succeed
     pdf_bytes = service.render_pdf_from_html(html)
     assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_commercial_tax_amount_consistency_when_calculated_differs_from_commercial() -> None:
+    """HALLAZGO P1: Cuando el precio comercial difiere del calculado por redondeo,
+
+    el impuesto en el PDF debe derivarse de commercial_total - commercial_subtotal
+    para que subtotal + IGV == total se cumpla estrictamente.
+    """
+    dummy_product = Product(
+        id=1,
+        internal_reference="PRD-CALC",
+        name="Taza Redondeada",
+        product_type=ProductType.FINISHED_PRODUCT,
+        base_uom_code="NIU",
+    )
+    # Calculado: 8.347658 -> total calculado 834.77, tax_amount calculado 150.26
+    # Comercial: 8.50 -> subtotal comercial 850.00, total comercial 1003.00
+    # Impuesto comercial oficial = 1003.00 - 850.00 = 153.00 (NO 150.26)
+    quotation = Quotation(
+        id=40,
+        code="CTZ-000040",
+        status=QuotationStatus.CONFIRMED,
+        quantity=100,
+        product_id=1,
+        product=dummy_product,
+        product_name_snapshot="Taza Redondeada",
+        calculated_unit_price=Decimal("8.347658"),
+        calculated_total=Decimal("834.765800"),
+        tax_amount=Decimal("150.257844"),  # Impuesto interno derivado del calculado
+        commercial_sale_unit_price=Decimal("8.50"),
+        commercial_subtotal=Decimal("850.00"),
+        tax_percentage_snapshot=Decimal("18.00"),
+        commercial_total=Decimal("1003.00"),
+        commercial_unit_price_with_tax=Decimal("10.03"),
+        currency_code_snapshot="PEN",
+        currency_symbol_snapshot="S/",
+    )
+
+    doc = build_quotation_pdf_document(quotation=quotation)
+    assert doc.totals.subtotal_formatted == "S/ 850.00"
+    assert doc.totals.tax_label == "IGV (18%)"
+    assert doc.totals.tax_amount_formatted == "S/ 153.00"
+    assert doc.totals.total_formatted == "S/ 1,003.00"
+
+    service = QuotationPdfService(session=None)  # type: ignore[arg-type]
+    html = service.render_html(doc)
+    assert "S/ 850.00" in html
+    assert "S/ 153.00" in html
+    assert "S/ 1,003.00" in html
+    assert "150.25" not in html
+
+
+def test_commercial_tax_amount_consistency_with_manual_override() -> None:
+    """HALLAZGO P1: Override manual (ej. precio sugerido 8.50 -> manual 9.00)."""
+    dummy_product = Product(
+        id=2,
+        internal_reference="PRD-OVERRIDE",
+        name="Plato Negociado",
+        product_type=ProductType.FINISHED_PRODUCT,
+        base_uom_code="NIU",
+    )
+    # Cantidad: 50, Precio: 9.00 -> Subtotal: 450.00, IGV: 18% -> Total: 531.00
+    quotation = Quotation(
+        id=50,
+        code="CTZ-000050",
+        status=QuotationStatus.CONFIRMED,
+        quantity=50,
+        product_id=2,
+        product=dummy_product,
+        product_name_snapshot="Plato Negociado",
+        suggested_commercial_unit_price=Decimal("8.50"),
+        commercial_sale_unit_price=Decimal("9.00"),
+        commercial_subtotal=Decimal("450.00"),
+        tax_percentage_snapshot=Decimal("18.00"),
+        tax_amount=Decimal("76.50"),  # Si viniera de un calculo viejo
+        commercial_total=Decimal("531.00"),
+        commercial_unit_price_with_tax=Decimal("10.62"),
+        currency_code_snapshot="PEN",
+        currency_symbol_snapshot="S/",
+    )
+
+    doc = build_quotation_pdf_document(quotation=quotation)
+    assert doc.items[0].unit_price_formatted == "S/ 9.00"
+    assert doc.items[0].subtotal_formatted == "S/ 450.00"
+    assert doc.totals.subtotal_formatted == "S/ 450.00"
+    assert doc.totals.tax_amount_formatted == "S/ 81.00"  # 531 - 450 = 81.00
+    assert doc.totals.total_formatted == "S/ 531.00"
+
+
+def test_currency_snapshot_immutability_in_viewmodel() -> None:
+    """HALLAZGO P1: La moneda congelada en la cotizacion no muta aunque
+
+    CommercialSettings cambie.
+    """
+    dummy_product = Product(
+        id=3,
+        internal_reference="PRD-CURR",
+        name="Jarra",
+        product_type=ProductType.FINISHED_PRODUCT,
+        base_uom_code="NIU",
+    )
+    quotation = Quotation(
+        id=60,
+        code="CTZ-000060",
+        status=QuotationStatus.CONFIRMED,
+        quantity=10,
+        product_id=3,
+        product=dummy_product,
+        product_name_snapshot="Jarra Greda",
+        commercial_sale_unit_price=Decimal("8.50"),
+        commercial_subtotal=Decimal("85.00"),
+        tax_percentage_snapshot=Decimal("18.00"),
+        commercial_total=Decimal("100.30"),
+        currency_code_snapshot="PEN",
+        currency_symbol_snapshot="S/",
+    )
+
+    # Configuracion comercial actual mutada a Dolares (USD / US$)
+    mutated_commercial_settings = CommercialSettings(
+        id=1,
+        currency_code="USD",
+        currency_symbol="US$",
+        tax_percent=Decimal("18.00"),
+    )
+
+    doc = build_quotation_pdf_document(
+        quotation=quotation,
+        commercial_settings=mutated_commercial_settings,
+    )
+
+    # Debe conservar PEN y S/
+    assert doc.document.currency_code == "PEN"
+    assert doc.document.currency_symbol == "S/"
+    assert doc.items[0].unit_price_formatted == "S/ 8.50"
+    assert doc.totals.subtotal_formatted == "S/ 85.00"
+    assert "US$" not in doc.items[0].unit_price_formatted
+    assert "US$" not in doc.totals.subtotal_formatted
+
+
+async def test_pdf_service_offloads_render_to_thread(monkeypatch: object) -> None:
+    """HALLAZGO P2: get_quotation_pdf debe offloadear render_pdf_from_html a un worker thread."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    dummy_product = Product(
+        id=4,
+        internal_reference="PRD-TH",
+        name="Vaso",
+        product_type=ProductType.FINISHED_PRODUCT,
+        base_uom_code="NIU",
+    )
+    quotation = Quotation(
+        id=70,
+        code="CTZ-000070",
+        status=QuotationStatus.CONFIRMED,
+        quantity=1,
+        product_id=4,
+        product=dummy_product,
+        customer_name_snapshot="Restaurante Sol",
+        product_name_snapshot="Vaso",
+        commercial_sale_unit_price=Decimal("10.00"),
+        commercial_subtotal=Decimal("10.00"),
+        tax_percentage_snapshot=Decimal("0.00"),
+        commercial_total=Decimal("10.00"),
+        currency_code_snapshot="PEN",
+        currency_symbol_snapshot="S/",
+    )
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = quotation
+    mock_session.execute.return_value = mock_result
+
+    service = QuotationPdfService(session=mock_session)
+    service._get_company_settings = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    service._get_commercial_settings = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    called_in_thread = False
+
+    def fake_render(html: str) -> bytes:
+        nonlocal called_in_thread
+        called_in_thread = True
+        return b"%PDF-1.4 mock"
+
+    service.render_pdf_from_html = fake_render  # type: ignore[method-assign]
+
+    pdf_bytes, filename = await service.get_quotation_pdf(70)
+    assert called_in_thread is True
+    assert pdf_bytes == b"%PDF-1.4 mock"
+    assert filename == "CTZ-000070_Restaurante_Sol.pdf"

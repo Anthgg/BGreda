@@ -297,7 +297,7 @@ async def test_historical_snapshot_immutability_in_pdf(
     admin_csrf: str,
     db_session: AsyncSession,
 ) -> None:
-    """TEST OBLIGATORIO: Modificar los registros maestros despues de confirmar
+    """TEST HISTORICO FINAL: Modificar cliente, producto, IGV y moneda despues de confirmar
 
     NO altera la informacion reproducida en el PDF de la cotizacion emitida.
     """
@@ -305,9 +305,9 @@ async def test_historical_snapshot_immutability_in_pdf(
         api,
         admin_csrf,
         db_session,
-        customer_name="Cliente Alfa SAC",
+        customer_name="Alfa SAC",
         customer_doc="20111111111",
-        product_name="Taza Alfa Original",
+        product_name="Bolsa Delivery",
         product_material="Greda negra",
         product_width="7.5",
         product_height="9.0",
@@ -320,21 +320,23 @@ async def test_historical_snapshot_immutability_in_pdf(
     # 1. Modificar el cliente en el maestro de Partners
     partner_stmt = select(Partner).where(Partner.document_number == "20111111111")
     partner = (await db_session.execute(partner_stmt)).scalar_one()
-    partner.name = "Cliente Beta Modificado"
+    partner.name = "Beta SAC"
     partner.document_number = "20999999999"
 
     # 2. Modificar el producto en el maestro de Products
     prod_stmt = select(Product).where(Product.id == confirmed["product_id"])
     product = (await db_session.execute(prod_stmt)).scalar_one()
-    product.name = "Taza Beta Modificada"
+    product.name = "Otro Producto"
     product.material = "Porcelana importada"
     product.width = Decimal("15.00")
     product.height = Decimal("20.00")
 
-    # 3. Modificar la configuracion comercial (IGV a 18%)
+    # 3. Modificar la configuracion comercial (IGV a 18% y Moneda a USD / US$)
     comm_settings_stmt = select(CommercialSettings).where(CommercialSettings.id == 1)
     comm_settings = (await db_session.execute(comm_settings_stmt)).scalar_one()
     comm_settings.tax_percent = Decimal("18.00")
+    comm_settings.currency_code = "USD"
+    comm_settings.currency_symbol = "US$"
 
     await db_session.commit()
 
@@ -343,8 +345,7 @@ async def test_historical_snapshot_immutability_in_pdf(
     assert pdf_res.status_code == 200
     assert pdf_res.content.startswith(b"%PDF")
 
-    # Verificar que el PDF renderizado mantuvo los snapshots
-    # (podemos instanciar el servicio para auditar el ViewModel y el HTML exactos)
+    # Verificar que el ViewModel mantuvo los snapshots
     from app.services.quotation_pdf import QuotationPdfService
 
     pdf_service = QuotationPdfService(db_session)
@@ -369,15 +370,30 @@ async def test_historical_snapshot_immutability_in_pdf(
     )
 
     # Afirmar que el ViewModel contiene la data congelada original y no los maestros alterados
-    assert doc_model.customer.name == "Cliente Alfa SAC"
+    assert doc_model.customer.name == "Alfa SAC"
     assert doc_model.customer.document_number == "20111111111"
-    assert doc_model.items[0].product_name == "Taza Alfa Original"
+    assert doc_model.items[0].product_name == "Bolsa Delivery"
     assert doc_model.items[0].material == "Greda negra"
     assert doc_model.items[0].dimensions_formatted == "Ancho: 7.5 cm | Alto: 9 cm"
     assert doc_model.totals.tax_label == "IGV (10%)"
+    assert doc_model.document.currency_code == "PEN"
+    assert doc_model.document.currency_symbol == "S/"
     assert doc_model.items[0].unit_price_formatted == "S/ 8.50"
     assert doc_model.totals.subtotal_formatted == "S/ 1,700.00"
+    assert doc_model.totals.tax_amount_formatted == "S/ 170.00"
     assert doc_model.totals.total_formatted == "S/ 1,870.00"
+
+    html = pdf_service.render_html(doc_model)
+    assert "Alfa SAC" in html
+    assert "Bolsa Delivery" in html
+    assert "S/ 8.50" in html
+    assert "IGV (10%)" in html
+    assert "S/ 170.00" in html
+    assert "S/ 1,870.00" in html
+    assert "Beta SAC" not in html
+    assert "Otro Producto" not in html
+    assert "US$" not in html
+    assert "IGV (18%)" not in html
 
 
 async def test_idempotent_pdf_generation(

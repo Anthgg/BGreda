@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from pathlib import Path
@@ -133,7 +134,7 @@ class QuotationPdfService:
         )
 
         html_content = self.render_html(doc_model)
-        pdf_bytes = self.render_pdf_from_html(html_content)
+        pdf_bytes = await asyncio.to_thread(self.render_pdf_from_html, html_content)
 
         customer_name = quotation.customer_name_snapshot or quotation.customer_trade_name_snapshot
         filename = sanitize_pdf_filename(quotation.code, customer_name)

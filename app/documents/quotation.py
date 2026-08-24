@@ -192,8 +192,17 @@ def build_quotation_pdf_document(
     logo_data_uri: str | None = None,
 ) -> QuotationPdfDocument:
     """Construye el ViewModel del PDF comercial a partir de snapshots congelados."""
-    currency_symbol = (commercial_settings.currency_symbol if commercial_settings else None) or "S/"
-    currency_code = (commercial_settings.currency_code if commercial_settings else None) or "PEN"
+    # 0. Moneda comercial (Prioridad: snapshot congelado de la cotizacion)
+    currency_symbol = (
+        quotation.currency_symbol_snapshot
+        or (commercial_settings.currency_symbol if commercial_settings else None)
+        or "S/"
+    )
+    currency_code = (
+        quotation.currency_code_snapshot
+        or (commercial_settings.currency_code if commercial_settings else None)
+        or "PEN"
+    )
 
     # 1. Informacion de empresa
     address_parts = []
@@ -289,13 +298,15 @@ def build_quotation_pdf_document(
         subtotal_formatted=format_currency(subtotal, currency_symbol),
     )
 
-    # 5. Totales e impuestos dinamicos (EXCLUSIVAMENTE DESDE SNAPSHOTS)
+    # 5. Totales e impuestos comerciales (EXCLUSIVAMENTE DESDE SNAPSHOTS)
     tax_percent = quotation.tax_percentage_snapshot
+    # REGLA: commercial_subtotal + commercial_tax_amount == commercial_total
+    commercial_tax_amount = quotation.commercial_total - quotation.commercial_subtotal
     totals_doc = QuotationDocTotals(
         subtotal_formatted=format_currency(quotation.commercial_subtotal, currency_symbol),
         tax_percentage=tax_percent,
         tax_label=format_tax_label(tax_percent),
-        tax_amount_formatted=format_currency(quotation.tax_amount, currency_symbol),
+        tax_amount_formatted=format_currency(commercial_tax_amount, currency_symbol),
         total_formatted=format_currency(quotation.commercial_total, currency_symbol),
         unit_price_with_tax_formatted=format_currency(
             quotation.commercial_unit_price_with_tax, currency_symbol
