@@ -83,13 +83,9 @@ def upgrade() -> None:
             "provider IN ('PERU_API', 'DECOLECTA')", name="ck_identity_lookup_cache_provider"
         ),
         sa.PrimaryKeyConstraint("id", name="pk_identity_lookup_cache"),
-        sa.UniqueConstraint(
-            "document_type", "document_hash", name="uq_identity_lookup_cache_hash"
-        ),
+        sa.UniqueConstraint("document_type", "document_hash", name="uq_identity_lookup_cache_hash"),
     )
-    op.create_index(
-        "ix_identity_lookup_cache_expires_at", "identity_lookup_cache", ["expires_at"]
-    )
+    op.create_index("ix_identity_lookup_cache_expires_at", "identity_lookup_cache", ["expires_at"])
 
     # ------------------------------------------------------------------
     # 2. identity_lookup_provider_metrics
@@ -104,9 +100,7 @@ def upgrade() -> None:
         sa.Column("not_found", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("rate_limited", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("timeouts", sa.Integer(), server_default=sa.text("0"), nullable=False),
-        sa.Column(
-            "provider_errors", sa.Integer(), server_default=sa.text("0"), nullable=False
-        ),
+        sa.Column("provider_errors", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -127,9 +121,7 @@ def upgrade() -> None:
             "requests >= 0", name="ck_identity_lookup_provider_metrics_requests_not_negative"
         ),
         sa.PrimaryKeyConstraint("id", name="pk_identity_lookup_provider_metrics"),
-        sa.UniqueConstraint(
-            "provider", "event_date", name="uq_identity_provider_metrics_day"
-        ),
+        sa.UniqueConstraint("provider", "event_date", name="uq_identity_provider_metrics_day"),
     )
 
     # ------------------------------------------------------------------
