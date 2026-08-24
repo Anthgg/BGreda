@@ -195,7 +195,11 @@ class QuotationCalculateIn(_Strict):
     firing_line_id: PositiveStrictInt | None = None
     materials_applied: Money | None = None
     #: Gramos de receta por pieza. El costo de materiales se calcula sobre
-    #: `gramos_por_pieza x cantidad`; por omision, un gramo por pieza.
+    #: `gramos_por_pieza x cantidad`.
+    #:
+    #: **No hay valor por omision.** Ausente significa «todavia no indicado»:
+    #: el calculo devuelve cero y avisa, y si hay receta seleccionada hay que
+    #: informarlo antes de poder confirmar.
     material_grams_per_piece: Annotated[
         Decimal | None, Field(gt=Decimal(0), le=Decimal(1_000_000))
     ] = None

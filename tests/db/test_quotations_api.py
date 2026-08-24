@@ -735,3 +735,48 @@ async def test_actualizar_precio_usa_el_unitario_neto_y_no_el_de_con_igv(
     await db_session.refresh(fila)
     assert fila.sale_price == neto
     assert fila.sale_price != con_igv
+
+
+async def test_un_cero_configurado_es_una_tasa_no_una_ausencia(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """IGV 0 % declarado a proposito no es «sin configurar».
+
+    La comprobacion anterior miraba la veracidad del valor, de modo que un
+    cero puesto adrede provocaba el aviso de tasa sin configurar: avisar de
+    que falta algo que si esta decidido enseña al usuario a ignorar los avisos.
+    """
+    from app.models.masters import Product
+    from app.models.settings import SINGLETON_ID, CommercialSettings
+
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+    cuerpo = _quote_payload(product, recipe, firing_line)
+
+    fila = await db_session.get(Product, product["id"])
+    assert fila is not None
+    fila.sale_tax_rate = None
+    settings = await db_session.get(CommercialSettings, SINGLETON_ID)
+    assert settings is not None
+    settings.tax_percent = Decimal("0")
+    await db_session.commit()
+
+    resultado = (
+        await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
+    ).json()
+
+    assert resultado["tax_rate_source"] == "COMMERCIAL_SETTINGS"
+    assert Decimal(resultado["tax_percentage"]) == Decimal(0)
+    assert Decimal(resultado["tax_amount"]) == Decimal(0)
+    assert Decimal(resultado["total_with_tax"]) == Decimal(resultado["calculated_total"])
+    assert "IGV_RATE_NOT_CONFIGURED" not in resultado["warnings"]
+
+    # Y sin ninguna de las dos, el aviso si aparece.
+    settings.tax_percent = None
+    await db_session.commit()
+    sin_ninguna = (
+        await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
+    ).json()
+    assert "IGV_RATE_NOT_CONFIGURED" in sin_ninguna["warnings"]

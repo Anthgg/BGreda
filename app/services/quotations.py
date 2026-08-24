@@ -426,7 +426,10 @@ class QuotationService:
         """
         if product.sale_tax_rate is not None:
             return product.sale_tax_rate, "PRODUCT"
-        return settings.tax_percent or ZERO, "COMMERCIAL_SETTINGS"
+        # Tambien aqui se compara contra None y no por veracidad: si la
+        # configuracion declara 0, esa es la tasa, no una ausencia.
+        tasa = settings.tax_percent if settings.tax_percent is not None else ZERO
+        return tasa, "COMMERCIAL_SETTINGS"
 
     @staticmethod
     def _grams_per_piece(payload: QuotationCalculateIn) -> Decimal | None:
@@ -656,10 +659,12 @@ class QuotationService:
             *recipe_warnings,
             *firing_warnings,
             # El IGV ya tiene regla: la cotizacion es neta y el impuesto se anade
-            # encima. Solo se avisa si no hay tasa en ningun sitio.
+            # encima. Solo se avisa cuando no hay tasa en ningun sitio, y se
+            # compara contra None: un 0 configurado a proposito es una tasa
+            # —exento— y avisar de que «falta» seria mentir.
             *(
                 []
-                if product.sale_tax_rate is not None or settings.tax_percent
+                if product.sale_tax_rate is not None or settings.tax_percent is not None
                 else ["IGV_RATE_NOT_CONFIGURED"]
             ),
             "DISCOUNT_RULE_BLOCKED_BY_SOURCE",
