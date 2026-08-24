@@ -124,10 +124,23 @@ def _decimal_or_error(builder: _RowBuilder, value: Any, field_name: str) -> Deci
 
 
 def _tax_percent(value: Decimal | None) -> Decimal | None:
-    """El maestro guarda 0.18; el proyecto almacena 18 como porcentaje."""
+    """Convierte la tasa del libro a la convencion del proyecto.
+
+    El libro escribe la **fraccion** (0.18) y el proyecto almacena el
+    **porcentaje** (18). La conversion es siempre la misma multiplicacion, sin
+    mirar la magnitud: la regla anterior —multiplicar solo si el valor era
+    menor o igual que uno— convertia un 1 % legitimo, escrito como 0.01, en
+    1 %, pero dejaba pasar un 1 escrito como "1" creyendo que ya era un
+    porcentaje. Con dos convenciones posibles para el mismo numero, adivinar
+    es equivocarse la mitad de las veces.
+
+    Si el resultado se sale del rango razonable se deja pasar el valor: la
+    validacion del maestro lo rechaza con un mensaje claro, que es mejor que
+    corregirlo en silencio.
+    """
     if value is None:
         return None
-    return value * 100 if value <= 1 else value
+    return value * 100
 
 
 class StagingBuilder:

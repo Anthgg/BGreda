@@ -573,3 +573,40 @@ async def test_recipe_tables_security_rls_not_forced(
         assert relforcerowsecurity is False, (
             f"Tabla {table} no debe tener FORCE ROW LEVEL SECURITY (relforcerowsecurity=False)"
         )
+
+
+async def test_solo_un_material_preparado_puede_tener_receta(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """Una pieza terminada no tiene formula propia.
+
+    Que el cotizador pueda elegir cualquier receta para una pieza no convierte
+    a la pieza en algo con receta: esa independencia se resuelve al cotizar,
+    no relajando el maestro.
+    """
+    cat = (
+        await api.post(
+            CATEGORIES, json={"name": "Piezas sin receta"}, headers={"X-CSRF-Token": admin_csrf}
+        )
+    ).json()
+    pieza = (
+        await api.post(
+            PRODUCTS,
+            json={
+                "name": "Jarra terminada",
+                "product_type": "FINISHED_PRODUCT",
+                "product_category_id": cat["id"],
+                "base_uom_code": "unit",
+                "sellable": True,
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+    ).json()
+
+    respuesta = await api.post(
+        RECIPES,
+        json={"product_id": pieza["id"], "name": "Receta de la jarra", "lines": []},
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code in (409, 422)
+    assert respuesta.json()["error"]["code"] == "RECIPE_INVALID_TARGET_PRODUCT"

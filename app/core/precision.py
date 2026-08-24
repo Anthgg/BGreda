@@ -42,7 +42,11 @@ QUANTITY_SCALE = 6
 STOCK_QUANTITY_PRECISION = 24
 STOCK_QUANTITY_SCALE = 12
 
-#: Porcentajes. Se almacena 18 para "18 %", nunca la fraccion 0.18.
+#: Porcentajes. **Convencion canonica del proyecto**: se almacena 18 para
+#: "18 %", nunca la fraccion 0.18. Aplica a `commercial_settings.tax_percent`,
+#: a `products.sale_tax_rate` y a `products.purchase_tax_rate`. Los libros de
+#: origen escriben la fraccion, y la conversion ocurre en un unico punto, el
+#: importador, para que ningun consumidor tenga que adivinar la escala.
 PERCENT_PRECISION = 9
 PERCENT_SCALE = 6
 

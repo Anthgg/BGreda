@@ -300,11 +300,15 @@ class QuotationCalculateOut(_Out):
     #: Componentes de la receta sin costo unitario. Suman cero y abaratan el
     #: material sin que nada lo diga, asi que se nombran.
     materials_without_cost: list[str] = []
-    material_grams_per_piece: Decimal
+    #: Nulo mientras no se indique: no existe un valor por omision.
+    material_grams_per_piece: Decimal | None
     #: Gramos totales de receta: `gramos_por_pieza x cantidad`.
-    material_total_grams: Decimal
+    material_total_grams: Decimal | None
     #: IGV aplicado, en porcentaje. El total y el unitario de arriba son netos.
     tax_percentage: Decimal
+    #: PRODUCT si el producto define su propia tasa; COMMERCIAL_SETTINGS si
+    #: se hereda de la configuracion.
+    tax_rate_source: Literal["PRODUCT", "COMMERCIAL_SETTINGS"]
     tax_amount: Decimal
     total_with_tax: Decimal
     unit_price_with_tax: Decimal

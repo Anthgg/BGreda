@@ -268,16 +268,22 @@ def upgrade() -> None:
         sa.Column("base_commercial_cost", CALC, server_default=sa.text("0"), nullable=False),
         sa.Column("calculated_total", CALC, server_default=sa.text("0"), nullable=False),
         sa.Column("calculated_unit_price", CALC, server_default=sa.text("0"), nullable=False),
-        # Gramos de receta por pieza. Sin este dato la cantidad de piezas se leia
-        # como gramos y el costo de materiales salia sin sentido.
+        # Gramos de receta por pieza. Nulo significa «todavia no se ha
+        # indicado»: no hay valor por omision, porque suponer uno convertiria un
+        # dato ausente en un costo de materiales creible pero falso.
         sa.Column(
             "material_grams_per_piece",
             sa.Numeric(precision=18, scale=6),
-            server_default=sa.text("1"),
-            nullable=False,
+            nullable=True,
         ),
         # El IGV se anade sobre el precio neto; el neto no lo incluye nunca.
         sa.Column("tax_percentage_snapshot", PCT, server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "tax_rate_source_snapshot",
+            sa.String(length=32),
+            server_default=sa.text("'COMMERCIAL_SETTINGS'"),
+            nullable=False,
+        ),
         sa.Column("tax_amount", CALC, server_default=sa.text("0"), nullable=False),
         sa.Column("total_with_tax", CALC, server_default=sa.text("0"), nullable=False),
         sa.Column("unit_price_with_tax", CALC, server_default=sa.text("0"), nullable=False),
@@ -294,10 +300,15 @@ def upgrade() -> None:
         *_timestamps(),
         sa.CheckConstraint("quantity > 0", name="ck_quotations_quantity_positive"),
         sa.CheckConstraint(
-            "material_grams_per_piece > 0", name="ck_quotations_material_grams_positive"
+            "material_grams_per_piece IS NULL OR material_grams_per_piece > 0",
+            name="ck_quotations_material_grams_positive",
         ),
         sa.CheckConstraint(
             "tax_percentage_snapshot >= 0", name="ck_quotations_tax_percentage_not_negative"
+        ),
+        sa.CheckConstraint(
+            "tax_rate_source_snapshot IN ('PRODUCT', 'COMMERCIAL_SETTINGS')",
+            name="ck_quotations_tax_rate_source_allowed",
         ),
         sa.CheckConstraint(
             "materials_calculated >= 0", name="ck_quotations_materials_calculated_non_negative"

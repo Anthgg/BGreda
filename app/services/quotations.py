@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import TypeVar
+from typing import Literal, TypeVar, cast
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -127,6 +127,12 @@ class RecipeRequiredError(APIError):
     status_code = 409
     code = "RECIPE_REQUIRED"
     message = "Se necesita una version de receta aplicable para confirmar"
+
+
+class MaterialGramsRequiredError(APIError):
+    status_code = 409
+    code = "MATERIAL_GRAMS_PER_PIECE_REQUIRED"
+    message = "Indique cuantos gramos de receta lleva una pieza para confirmar"
 
 
 class FiringLineRequiredError(APIError):
@@ -377,10 +383,13 @@ class QuotationService:
                 "La version de receta indicada no existe o no esta activa",
                 code="RECIPE_VERSION_INVALID",
             )
-        # La receta se cotiza en gramos y la cotizacion cuenta piezas: sin el
-        # dato de cuantos gramos lleva una pieza, pedir el costo de «19» era
-        # pedir el de 19 gramos, no el de 19 jarras.
-        gramos = self._grams_per_piece(payload) * Decimal(payload.quantity)
+        # La receta se cotiza en gramos y la cotizacion cuenta piezas. Sin saber
+        # cuantos gramos lleva una pieza no hay costo que calcular: se avisa y se
+        # devuelve cero, y confirmar queda bloqueado.
+        por_pieza = self._grams_per_piece(payload)
+        if por_pieza is None or por_pieza <= ZERO:
+            return ZERO, version, ["MATERIAL_GRAMS_PER_PIECE_REQUIRED"], []
+        gramos = por_pieza * Decimal(payload.quantity)
         result = await self._recipes.calculate(
             RecipeCalculateIn(
                 recipe_id=payload.recipe_id,
@@ -402,9 +411,33 @@ class QuotationService:
         return result.total_material_cost, version, avisos, sin_precio
 
     @staticmethod
-    def _grams_per_piece(payload: QuotationCalculateIn) -> Decimal:
-        """Gramos de receta por pieza. Un gramo por omision."""
-        return payload.material_grams_per_piece or Decimal(1)
+    def _resolve_tax(
+        product: Product, settings: CommercialSettings
+    ) -> tuple[Decimal, Literal["PRODUCT", "COMMERCIAL_SETTINGS"]]:
+        """Tasa de IGV aplicable y de donde sale.
+
+        Manda la del producto cuando la define, y «define» incluye el cero: un
+        producto exento declara `0`, y tratarlo como ausencia le aplicaria el
+        18 % de la configuracion. Por eso se compara contra ``None`` y no por
+        veracidad.
+
+        Ambas se guardan ya en porcentaje (18 = 18 %), la convencion unica del
+        proyecto.
+        """
+        if product.sale_tax_rate is not None:
+            return product.sale_tax_rate, "PRODUCT"
+        return settings.tax_percent or ZERO, "COMMERCIAL_SETTINGS"
+
+    @staticmethod
+    def _grams_per_piece(payload: QuotationCalculateIn) -> Decimal | None:
+        """Gramos de receta por pieza, o ``None`` si todavia no se han indicado.
+
+        **No** hay valor por omision. Suponer un gramo convertiria un dato que
+        falta en un costo de materiales creible pero falso, y nadie lo notaria:
+        una cotizacion de 450 g/pieza recalculada a 1 g/pieza sigue pareciendo
+        correcta hasta que alguien compara los importes.
+        """
+        return payload.material_grams_per_piece
 
     async def _firing_source(
         self, payload: QuotationCalculateIn, product: Product
@@ -592,6 +625,7 @@ class QuotationService:
             for item in other_inputs
         )
 
+        tasa_igv, origen_igv = self._resolve_tax(product, settings)
         default_factor = settings.default_quotation_factor
         factor = payload.commercial_factor or default_factor
         materials_applied = (
@@ -612,7 +646,7 @@ class QuotationService:
                     waiting_days=payload.waiting_days,
                     other_costs=core_other,
                     commercial_factor=factor,
-                    tax_percentage=settings.tax_percent or ZERO,
+                    tax_percentage=tasa_igv,
                 )
             )
         except QuotationCalculationError as exc:
@@ -622,8 +656,12 @@ class QuotationService:
             *recipe_warnings,
             *firing_warnings,
             # El IGV ya tiene regla: la cotizacion es neta y el impuesto se anade
-            # encima. Solo se avisa si no hay tasa configurada.
-            *([] if settings.tax_percent else ["IGV_RATE_NOT_CONFIGURED"]),
+            # encima. Solo se avisa si no hay tasa en ningun sitio.
+            *(
+                []
+                if product.sale_tax_rate is not None or settings.tax_percent
+                else ["IGV_RATE_NOT_CONFIGURED"]
+            ),
             "DISCOUNT_RULE_BLOCKED_BY_SOURCE",
         ]
         source_data: dict[str, object] = {
@@ -701,6 +739,7 @@ class QuotationService:
             )
             for index, calc in enumerate(result.other_costs)
         ]
+        por_pieza = self._grams_per_piece(payload)
         output = QuotationCalculateOut(
             product_id=product.id,
             product_internal_reference=product.internal_reference,
@@ -731,9 +770,12 @@ class QuotationService:
             calculated_total=result.calculated_total,
             calculated_unit_price=result.calculated_unit_price,
             materials_without_cost=materials_without_cost,
-            material_grams_per_piece=self._grams_per_piece(payload),
-            material_total_grams=self._grams_per_piece(payload) * Decimal(payload.quantity),
+            material_grams_per_piece=por_pieza,
+            material_total_grams=(
+                por_pieza * Decimal(payload.quantity) if por_pieza is not None else None
+            ),
             tax_percentage=result.tax_percentage,
+            tax_rate_source=origen_igv,
             tax_amount=result.tax_amount,
             total_with_tax=result.total_with_tax,
             unit_price_with_tax=result.unit_price_with_tax,
@@ -799,6 +841,9 @@ class QuotationService:
             recipe_version_id=quotation.recipe_version_id,
             firing_line_id=quotation.firing_line_id,
             materials_applied=quotation.materials_applied,
+            # Sin esto, confirmar recalculaba con los gramos por omision y
+            # convertia una hoja de 450 g/pieza en otra de 1 g/pieza.
+            material_grams_per_piece=quotation.material_grams_per_piece,
             techniques=[
                 TechniqueSelectionIn(
                     technique_id=line.technique_id,
@@ -871,6 +916,7 @@ class QuotationService:
         quotation.calculated_unit_price = output.calculated_unit_price
         quotation.material_grams_per_piece = output.material_grams_per_piece
         quotation.tax_percentage_snapshot = output.tax_percentage
+        quotation.tax_rate_source_snapshot = output.tax_rate_source
         quotation.tax_amount = output.tax_amount
         quotation.total_with_tax = output.total_with_tax
         quotation.unit_price_with_tax = output.unit_price_with_tax
@@ -1049,6 +1095,8 @@ class QuotationService:
             raise QuotationSourceChangedError()
         if "RECIPE_REQUIRED" in calculation.output.warnings:
             raise RecipeRequiredError()
+        if "MATERIAL_GRAMS_PER_PIECE_REQUIRED" in calculation.output.warnings:
+            raise MaterialGramsRequiredError()
         if "FIRING_LINE_REQUIRED" in calculation.output.warnings:
             raise FiringLineRequiredError()
 
@@ -1156,6 +1204,7 @@ class QuotationService:
 
     # -- Lectura -----------------------------------------------------------
     async def _stored_output(self, quotation: Quotation, product: Product) -> QuotationCalculateOut:
+        gramos_guardados = quotation.material_grams_per_piece
         return QuotationCalculateOut(
             product_id=quotation.product_id,
             product_internal_reference=product.internal_reference,
@@ -1186,9 +1235,16 @@ class QuotationService:
             # Una cotizacion guardada no vuelve a mirar la receta: si algun
             # material perdio el precio despues, lo dira el recalculo, no esto.
             materials_without_cost=[],
-            material_grams_per_piece=quotation.material_grams_per_piece,
-            material_total_grams=(quotation.material_grams_per_piece * Decimal(quotation.quantity)),
+            material_grams_per_piece=gramos_guardados,
+            material_total_grams=(
+                gramos_guardados * Decimal(quotation.quantity)
+                if gramos_guardados is not None
+                else None
+            ),
             tax_percentage=quotation.tax_percentage_snapshot,
+            tax_rate_source=cast(
+                Literal["PRODUCT", "COMMERCIAL_SETTINGS"], quotation.tax_rate_source_snapshot
+            ),
             tax_amount=quotation.tax_amount,
             total_with_tax=quotation.total_with_tax,
             unit_price_with_tax=quotation.unit_price_with_tax,

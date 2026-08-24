@@ -60,11 +60,25 @@ async def _finished_product_and_recipe(
     assert material_response.status_code == 201, material_response.text
     material = material_response.json()
 
+    # La receta describe un **material preparado**, no la pieza. Que la
+    # cotizacion de una pieza terminada pueda elegirla es justamente lo que se
+    # comprueba: son dominios independientes.
+    prepared_response = await create_product(
+        api,
+        csrf,
+        product_category_id=category["id"],
+        name=f"Barniz local QA{suffix}",
+        product_type="PREPARED_MATERIAL",
+        base_uom_code="g",
+    )
+    assert prepared_response.status_code == 201, prepared_response.text
+    prepared = prepared_response.json()
+
     recipe_response = await api.post(
         RECIPES,
         json={
-            "product_id": finished["id"],
-            "name": f"Formula Plato palta QA{suffix}",
+            "product_id": prepared["id"],
+            "name": f"Formula barniz QA{suffix}",
             "lines": [
                 {
                     "component_product_id": material["id"],
@@ -116,6 +130,8 @@ def _quote_payload(
         "recipe_id": recipe["id"],
         "recipe_version_id": current_version["id"],
         "firing_line_id": firing_line["id"],
+        # Explicito: ya no existe un valor por omision de un gramo.
+        "material_grams_per_piece": "1",
         "materials_applied": "11.58",
         "techniques": techniques,
         "additionals": [],
@@ -539,3 +555,183 @@ async def test_los_gramos_por_pieza_escalan_el_costo_de_materiales(
     assert Decimal(diez["material_total_grams"]) == Decimal(10) * Decimal(diez["quantity"])
     # Diez veces mas material, diez veces mas costo calculado.
     assert Decimal(diez["materials_calculated"]) == Decimal(uno["materials_calculated"]) * 10
+
+
+async def test_los_gramos_por_pieza_sobreviven_a_guardar_editar_y_confirmar(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Confirmar no puede cambiar en silencio los gramos capturados.
+
+    El fallo que cubre esta prueba era real: la reconstruccion del cuerpo a
+    partir de la cotizacion guardada no incluia los gramos, de modo que
+    confirmar recalculaba con el valor por omision y una hoja de 450 g/pieza
+    pasaba a valer lo que valdria a 1 g/pieza.
+    """
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    cuerpo = _quote_payload(product, recipe, firing_line)
+    cuerpo["material_grams_per_piece"] = "450"
+    cuerpo.pop("materials_applied", None)
+
+    creada = (await api.post(QUOTATIONS, json=cuerpo, headers=head(admin_csrf))).json()
+    assert Decimal(creada["material_grams_per_piece"]) == Decimal(450)
+    assert Decimal(creada["material_total_grams"]) == Decimal(450) * Decimal(creada["quantity"])
+
+    antes = {
+        "grams": Decimal(creada["material_grams_per_piece"]),
+        "total_grams": Decimal(creada["material_total_grams"]),
+        "calculado": Decimal(creada["materials_calculated"]),
+        "aplicado": Decimal(creada["materials_applied"]),
+        "total": Decimal(creada["calculated_total"]),
+    }
+
+    releida = (await api.get(f"{QUOTATIONS}/{creada['id']}")).json()
+    assert Decimal(releida["material_grams_per_piece"]) == Decimal(450)
+
+    editada = (
+        await api.put(
+            f"{QUOTATIONS}/{creada['id']}",
+            json={**cuerpo, "expected_source_fingerprint": releida["source_fingerprint"]},
+            headers=head(admin_csrf),
+        )
+    ).json()
+    assert Decimal(editada["material_grams_per_piece"]) == Decimal(450)
+
+    confirmada = (
+        await api.post(
+            f"{QUOTATIONS}/{creada['id']}/confirm",
+            json={"accept_source_changes": True},
+            headers=head(admin_csrf),
+        )
+    ).json()
+
+    assert confirmada["status"] == "CONFIRMED"
+    assert Decimal(confirmada["material_grams_per_piece"]) == antes["grams"]
+    assert Decimal(confirmada["material_total_grams"]) == antes["total_grams"]
+    # Confirmar congela, no recalcula a otra escala.
+    assert Decimal(confirmada["materials_calculated"]) == antes["calculado"]
+    assert Decimal(confirmada["materials_applied"]) == antes["aplicado"]
+    assert Decimal(confirmada["calculated_total"]) == antes["total"]
+
+    final = (await api.get(f"{QUOTATIONS}/{creada['id']}")).json()
+    assert Decimal(final["material_grams_per_piece"]) == Decimal(450)
+
+
+async def test_sin_gramos_no_se_supone_uno_y_no_se_puede_confirmar(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Un dato ausente no se convierte en un costo creible."""
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    cuerpo = _quote_payload(product, recipe, firing_line)
+    cuerpo.pop("material_grams_per_piece", None)
+    cuerpo.pop("materials_applied", None)
+
+    calculo = (
+        await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
+    ).json()
+    assert calculo["material_grams_per_piece"] is None
+    assert calculo["material_total_grams"] is None
+    assert Decimal(calculo["materials_calculated"]) == Decimal(0)
+    assert "MATERIAL_GRAMS_PER_PIECE_REQUIRED" in calculo["warnings"]
+
+    borrador = (await api.post(QUOTATIONS, json=cuerpo, headers=head(admin_csrf))).json()
+    respuesta = await api.post(
+        f"{QUOTATIONS}/{borrador['id']}/confirm",
+        json={"accept_source_changes": True},
+        headers=head(admin_csrf),
+    )
+    assert respuesta.status_code == 409
+    assert respuesta.json()["error"]["code"] == "MATERIAL_GRAMS_PER_PIECE_REQUIRED"
+
+
+async def test_la_tasa_del_producto_manda_sobre_la_configuracion(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Y un cero explicito significa exento, no «sin definir»."""
+    from app.models.masters import Product
+    from app.models.settings import SINGLETON_ID, CommercialSettings
+
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+    cuerpo = _quote_payload(product, recipe, firing_line)
+
+    settings = await db_session.get(CommercialSettings, SINGLETON_ID)
+    assert settings is not None
+    settings.tax_percent = Decimal("18")
+    fila = await db_session.get(Product, product["id"])
+    assert fila is not None
+    fila.sale_tax_rate = None
+    await db_session.commit()
+
+    heredada = (
+        await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
+    ).json()
+    assert Decimal(heredada["tax_percentage"]) == Decimal("18")
+    assert heredada["tax_rate_source"] == "COMMERCIAL_SETTINGS"
+
+    fila.sale_tax_rate = Decimal("10")
+    await db_session.commit()
+    propia = (
+        await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
+    ).json()
+    assert Decimal(propia["tax_percentage"]) == Decimal("10")
+    assert propia["tax_rate_source"] == "PRODUCT"
+
+    # Exento: cero es un valor, no una ausencia.
+    fila.sale_tax_rate = Decimal("0")
+    await db_session.commit()
+    exento = (
+        await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
+    ).json()
+    assert Decimal(exento["tax_percentage"]) == Decimal(0)
+    assert exento["tax_rate_source"] == "PRODUCT"
+    assert Decimal(exento["total_with_tax"]) == Decimal(exento["calculated_total"])
+
+
+async def test_actualizar_precio_usa_el_unitario_neto_y_no_el_de_con_igv(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """`sale_price` y `sale_tax_rate` son conceptos separados."""
+    from app.models.masters import Product
+    from app.models.settings import SINGLETON_ID, CommercialSettings
+
+    settings = await db_session.get(CommercialSettings, SINGLETON_ID)
+    assert settings is not None
+    settings.tax_percent = Decimal("18")
+    await db_session.commit()
+
+    product, recipe = await _finished_product_and_recipe(api, admin_csrf)
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+    cuerpo = _quote_payload(product, recipe, firing_line)
+    cuerpo["material_grams_per_piece"] = "5"
+
+    creada = (await api.post(QUOTATIONS, json=cuerpo, headers=head(admin_csrf))).json()
+    confirmada = (
+        await api.post(
+            f"{QUOTATIONS}/{creada['id']}/confirm",
+            json={"accept_source_changes": True},
+            headers=head(admin_csrf),
+        )
+    ).json()
+    neto = Decimal(confirmada["calculated_unit_price"])
+    con_igv = Decimal(confirmada["unit_price_with_tax"])
+    assert con_igv > neto
+
+    await api.post(f"{QUOTATIONS}/{creada['id']}/update-product-price", headers=head(admin_csrf))
+    await db_session.commit()
+    fila = await db_session.get(Product, product["id"])
+    assert fila is not None
+    await db_session.refresh(fila)
+    assert fila.sale_price == neto
+    assert fila.sale_price != con_igv
