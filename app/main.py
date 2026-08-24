@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,6 +19,7 @@ from app.core.errors import ServiceUnavailableError
 from app.core.handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.db.session import dispose_engine
+from app.services.identity_providers import DecolectaProvider, PeruApiProvider
 from app.services.storage import StorageUnavailableError, SupabaseObjectStorage
 from app.services.supabase_auth import HttpSupabaseAuthClient
 
@@ -72,6 +74,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except StorageUnavailableError:
             logger.error("No se pudo inicializar el almacenamiento de archivos")
 
+    # Proveedores de identidad (DNI/RUC). Un cliente httpx por proveedor,
+    # creado una vez para reutilizar el pool de conexiones — nunca uno nuevo
+    # por peticion. Sin token configurado el proveedor queda en None y el
+    # servicio de identidad responde 503 en vez de fallar el arranque: la
+    # funcionalidad es opcional para cualquier entorno que no la use.
+    timeout = httpx.Timeout(settings.IDENTITY_PROVIDER_TIMEOUT_SECONDS)
+    app.state.peru_api_provider = None
+    app.state.peru_api_http_client = None
+    if settings.PERU_API_TOKEN.get_secret_value():
+        app.state.peru_api_http_client = httpx.AsyncClient(
+            base_url=settings.PERU_API_BASE_URL, timeout=timeout
+        )
+        app.state.peru_api_provider = PeruApiProvider(
+            app.state.peru_api_http_client, settings.PERU_API_TOKEN.get_secret_value()
+        )
+
+    app.state.decolecta_provider = None
+    app.state.decolecta_http_client = None
+    if settings.DECOLECTA_API_TOKEN.get_secret_value():
+        app.state.decolecta_http_client = httpx.AsyncClient(
+            base_url=settings.DECOLECTA_API_BASE_URL, timeout=timeout
+        )
+        app.state.decolecta_provider = DecolectaProvider(
+            app.state.decolecta_http_client, settings.DECOLECTA_API_TOKEN.get_secret_value()
+        )
+
     try:
         yield
     finally:
@@ -81,6 +109,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         storage = getattr(app.state, "object_storage", None)
         if isinstance(storage, SupabaseObjectStorage):
             await storage.aclose()
+        for attr in ("peru_api_http_client", "decolecta_http_client"):
+            http_client = getattr(app.state, attr, None)
+            if isinstance(http_client, httpx.AsyncClient):
+                await http_client.aclose()
         await dispose_engine()
 
 

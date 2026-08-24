@@ -29,6 +29,8 @@ from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.catalogs import CatalogService
 from app.services.firings import FiringService, KilnService
+from app.services.identity import IdentityLookupService, _InMemoryRateLimiter
+from app.services.identity_providers import IdentityProvider
 from app.services.importing import ImportService
 from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
@@ -304,3 +306,53 @@ async def get_quotation_service(
 
 
 QuotationServiceDep = Annotated[QuotationService, Depends(get_quotation_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 5.5: consulta de identidad (DNI/RUC)
+# ---------------------------------------------------------------------------
+def get_peru_api_provider(request: Request) -> IdentityProvider | None:
+    return getattr(request.app.state, "peru_api_provider", None)
+
+
+def get_decolecta_provider(request: Request) -> IdentityProvider | None:
+    return getattr(request.app.state, "decolecta_provider", None)
+
+
+PeruApiProviderDep = Annotated[IdentityProvider | None, Depends(get_peru_api_provider)]
+DecolectaProviderDep = Annotated[IdentityProvider | None, Depends(get_decolecta_provider)]
+
+#: Un unico limitador de proceso, no uno por peticion: la ventana deslizante
+#: solo tiene sentido si sobrevive entre peticiones. Se crea perezosamente con
+#: la configuracion vigente en el primer uso.
+_rate_limiter: _InMemoryRateLimiter | None = None
+
+
+def _get_rate_limiter(settings: Settings) -> _InMemoryRateLimiter:
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = _InMemoryRateLimiter(
+            settings.IDENTITY_RATE_LIMIT_MAX_REQUESTS,
+            settings.IDENTITY_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    return _rate_limiter
+
+
+async def get_identity_lookup_service(
+    session: DbSessionDep,
+    settings: SettingsDep,
+    primary: PeruApiProviderDep,
+    secondary: DecolectaProviderDep,
+) -> IdentityLookupService:
+    return IdentityLookupService(
+        session,
+        primary=primary,
+        secondary=secondary,
+        dni_ttl_days=settings.IDENTITY_DNI_CACHE_TTL_DAYS,
+        ruc_ttl_days=settings.IDENTITY_RUC_CACHE_TTL_DAYS,
+        fallback_on_not_found=settings.IDENTITY_FALLBACK_ON_NOT_FOUND,
+        rate_limiter=_get_rate_limiter(settings),
+    )
+
+
+IdentityLookupServiceDep = Annotated[IdentityLookupService, Depends(get_identity_lookup_service)]
