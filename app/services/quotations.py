@@ -459,12 +459,18 @@ class QuotationService:
 
     @staticmethod
     def _formula_explanation(formula: AdditionalFormulaType, factor: Decimal | None) -> str:
+        """Explica la formula en el lenguaje del taller, no en el del contrato.
+
+        El factor se imprime sin la cola de ceros de la columna NUMERIC: quien
+        lee la cotizacion espera «cada 50 piezas», no «cada 50.000000 piezas».
+        """
         if formula is AdditionalFormulaType.SIMPLE_QUANTITY:
-            return "Precio por cantidad adicional"
-        cadence = f"1 aplicacion cada {factor} piezas"
+            return "Una unidad por cada cantidad indicada"
+        cada = format(factor.normalize(), "f") if factor is not None else "?"
+        cadencia = f"1 aplicacion cada {cada} piezas"
         if formula is AdditionalFormulaType.PIECE_X_ADDITIONAL:
-            return f"Cantidad adicional por precio por {cadence}"
-        return cadence
+            return f"{cadencia}, multiplicado por la cantidad indicada"
+        return cadencia
 
     @staticmethod
     def _source_hash(data: dict[str, object]) -> str:
