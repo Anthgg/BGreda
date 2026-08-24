@@ -77,7 +77,7 @@ def test_sanitize_pdf_filename() -> None:
     )
     # Header injection prevention
     assert (
-        sanitize_pdf_filename("CTZ-001\r\nSet-Cookie: evil=1", "Client\n\r\"")
+        sanitize_pdf_filename("CTZ-001\r\nSet-Cookie: evil=1", 'Client\n\r"')
         == "CTZ-001Set-Cookieevil1_Client.pdf"
     )
     # Path traversal prevention

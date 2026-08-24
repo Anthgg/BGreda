@@ -438,4 +438,3 @@ async def test_logo_storage_resilience_in_pdf(
     res_storage_failed = await api.get(f"{QUOTATIONS}/{quote_id}/pdf", headers=head(admin_csrf))
     assert res_storage_failed.status_code == 200
     assert res_storage_failed.content.startswith(b"%PDF")
-

@@ -192,12 +192,8 @@ def build_quotation_pdf_document(
     logo_data_uri: str | None = None,
 ) -> QuotationPdfDocument:
     """Construye el ViewModel del PDF comercial a partir de snapshots congelados."""
-    currency_symbol = (
-        (commercial_settings.currency_symbol if commercial_settings else None) or "S/"
-    )
-    currency_code = (
-        (commercial_settings.currency_code if commercial_settings else None) or "PEN"
-    )
+    currency_symbol = (commercial_settings.currency_symbol if commercial_settings else None) or "S/"
+    currency_code = (commercial_settings.currency_code if commercial_settings else None) or "PEN"
 
     # 1. Informacion de empresa
     address_parts = []

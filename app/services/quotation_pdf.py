@@ -74,9 +74,7 @@ class QuotationPdfService:
             if not logo_bytes:
                 return None
             content_type = (
-                sniff_content_type(logo_bytes)
-                or company_settings.logo_content_type
-                or "image/png"
+                sniff_content_type(logo_bytes) or company_settings.logo_content_type or "image/png"
             )
             b64_data = base64.b64encode(logo_bytes).decode("ascii")
             return f"data:{content_type};base64,{b64_data}"
@@ -137,9 +135,7 @@ class QuotationPdfService:
         html_content = self.render_html(doc_model)
         pdf_bytes = self.render_pdf_from_html(html_content)
 
-        customer_name = (
-            quotation.customer_name_snapshot or quotation.customer_trade_name_snapshot
-        )
+        customer_name = quotation.customer_name_snapshot or quotation.customer_trade_name_snapshot
         filename = sanitize_pdf_filename(quotation.code, customer_name)
 
         return pdf_bytes, filename
