@@ -1281,7 +1281,7 @@ class QuotationService:
 
         product = await self._product(quotation.product_id, for_update=True)
         old_price = product.sale_price
-        new_price = quotation.calculated_unit_price
+        new_price = quotation.commercial_sale_unit_price or quotation.calculated_unit_price
         product.sale_price = new_price
         event = QuotationProductPriceUpdate(
             quotation_id=quotation.id,

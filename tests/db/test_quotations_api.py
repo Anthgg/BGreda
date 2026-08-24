@@ -967,3 +967,144 @@ async def test_quotation_commercial_pricing_and_confirm_flow(
         headers=head(admin_csrf),
     )
     assert fail_edit.status_code == 409
+
+
+async def test_dynamic_igv_configuration_and_snapshot_immutability(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Auditoria IGV: El IGV no esta hardcodeado y proviene de commercial_settings.
+
+    Al cambiar la configuracion comercial (ej. a 10%), las cotizaciones nuevas
+    utilizan la nueva tasa. Al emitir/confirmar la cotizacion, la tasa queda
+    congelada inmutablemente.
+    """
+    category = await create_category(api, admin_csrf, "Piezas IGV")
+    product_res = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=category["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Pieza IGV Dinamico",
+        base_uom_code="unit",
+    )
+    product = product_res.json()
+    _, recipe = await _finished_product_and_recipe(api, admin_csrf, suffix="_igv")
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    # 1. Cambiar tasa comercial de IGV a 10%
+    set_res = await api.put(
+        "/api/v1/settings/commercial",
+        json={"tax_percent": "10.00"},
+        headers=head(admin_csrf),
+    )
+    assert set_res.status_code == 200, set_res.text
+
+    payload = _quote_payload(product, recipe, firing_line)
+    payload["material_grams_per_piece"] = "300"
+    payload["quantity"] = 10
+
+    # 2. Calcular y verificar que usa 10%
+    calc_res = await api.post(f"{QUOTATIONS}/calculate", json=payload, headers=head(admin_csrf))
+    assert calc_res.status_code == 200, calc_res.text
+    calc = calc_res.json()
+    assert Decimal(calc["tax_percentage"]) == Decimal("10.00")
+    assert calc["tax_rate_source"] == "COMMERCIAL_SETTINGS"
+    expected_tax = Decimal(calc["commercial_subtotal"]) * Decimal("0.10")
+    assert Decimal(calc["tax_amount"]) == expected_tax.quantize(Decimal("0.01"))
+
+    # 3. Crear y confirmar cotizacion con tasa 10%
+    create_res = await api.post(f"{QUOTATIONS}", json=payload, headers=head(admin_csrf))
+    assert create_res.status_code == 201, create_res.text
+    quote = create_res.json()
+
+    confirm_res = await api.post(
+        f"{QUOTATIONS}/{quote['id']}/confirm",
+        json={"accept_source_changes": True},
+        headers=head(admin_csrf),
+    )
+    assert confirm_res.status_code == 200, confirm_res.text
+    confirmed = confirm_res.json()
+    assert Decimal(confirmed["tax_percentage"]) == Decimal("10.00")
+
+    # 4. Modificar la configuracion comercial a 0% (exento)
+    set_res_0 = await api.put(
+        "/api/v1/settings/commercial",
+        json={"tax_percent": "0.00"},
+        headers=head(admin_csrf),
+    )
+    assert set_res_0.status_code == 200, set_res_0.text
+
+    # 5. La cotizacion ya emitida NO cambia: su snapshot de IGV se mantiene en 10%
+    get_res = await api.get(f"{QUOTATIONS}/{quote['id']}", headers=head(admin_csrf))
+    assert get_res.status_code == 200, get_res.text
+    persisted = get_res.json()
+    assert Decimal(persisted["tax_percentage"]) == Decimal("10.00")
+    assert Decimal(persisted["tax_amount"]) == expected_tax.quantize(Decimal("0.01"))
+
+    # Restaurar configuracion comercial al 18% estandar
+    await api.put(
+        "/api/v1/settings/commercial",
+        json={"tax_percent": "18.00"},
+        headers=head(admin_csrf),
+    )
+
+
+async def test_product_list_price_no_auto_update_on_confirmation(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Auditoria Precio: Confirmar cotizacion NO altera el precio de lista del maestro.
+
+    Solo una llamada explicita al endpoint de actualizacion modifica el maestro.
+    """
+    category = await create_category(api, admin_csrf, "Piezas Precio")
+    product_res = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=category["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Pieza Precio Fijo",
+        base_uom_code="unit",
+        sale_price="50.00",
+    )
+    product = product_res.json()
+    assert Decimal(product["sale_price"]) == Decimal("50.00")
+
+    _, recipe = await _finished_product_and_recipe(api, admin_csrf, suffix="_prec")
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    payload = _quote_payload(product, recipe, firing_line)
+    payload["material_grams_per_piece"] = "250"
+    payload["quantity"] = 10
+    payload["commercial_sale_unit_price"] = "85.50"
+
+    # Crear y confirmar
+    create_res = await api.post(f"{QUOTATIONS}", json=payload, headers=head(admin_csrf))
+    quote = create_res.json()
+
+    confirm_res = await api.post(
+        f"{QUOTATIONS}/{quote['id']}/confirm",
+        json={"accept_source_changes": True},
+        headers=head(admin_csrf),
+    )
+    assert confirm_res.status_code == 200
+
+    # Verificar que el producto maestro SIGUE en S/ 50.00 (sin alteracion automatica)
+    prod_check = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
+    assert prod_check.status_code == 200
+    assert Decimal(prod_check.json()["sale_price"]) == Decimal("50.00")
+
+    # Actualizacion manual explicita
+    update_price_res = await api.post(
+        f"{QUOTATIONS}/{quote['id']}/update-product-price",
+        headers=head(admin_csrf),
+    )
+    assert update_price_res.status_code == 200
+    assert Decimal(update_price_res.json()["new_price"]) == Decimal("85.50")
+
+    # Ahora si se actualizo el producto maestro
+    prod_updated = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
+    assert Decimal(prod_updated.json()["sale_price"]) == Decimal("85.50")
