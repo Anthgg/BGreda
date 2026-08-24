@@ -350,9 +350,10 @@ class QuotationService:
 
     async def _recipe_materials(
         self, payload: QuotationCalculateIn, product: Product
-    ) -> tuple[Decimal, RecipeVersion | None, list[str]]:
+    ) -> tuple[Decimal, RecipeVersion | None, list[str], list[str]]:
+        """Costo de materiales, version usada, avisos y materiales sin precio."""
         if payload.recipe_id is None or payload.recipe_version_id is None:
-            return ZERO, None, ["RECIPE_REQUIRED"]
+            return ZERO, None, ["RECIPE_REQUIRED"], []
         version = (
             await self._session.execute(
                 select(RecipeVersion)
@@ -388,7 +389,17 @@ class QuotationService:
                 target_uom="g",
             )
         )
-        return result.total_material_cost, version, []
+
+        # Un componente sin costo no rompe el calculo: suma cero y el material
+        # sale barato sin que nada lo diga. Se avisa con nombre y referencia,
+        # porque el usuario no tiene forma de adivinar cual falta.
+        sin_precio = [
+            f"{line.component_internal_reference} · {line.component_name}"
+            for line in result.components
+            if line.unit_cost_in_grams <= ZERO
+        ]
+        avisos = ["MATERIAL_WITHOUT_COST"] if sin_precio else []
+        return result.total_material_cost, version, avisos, sin_precio
 
     @staticmethod
     def _grams_per_piece(payload: QuotationCalculateIn) -> Decimal:
@@ -489,9 +500,12 @@ class QuotationService:
     async def _calculate(self, payload: QuotationCalculateIn) -> _ResolvedCalculation:
         product = await self._product(payload.product_id)
         settings = await self._commercial()
-        materials_calculated, recipe_version, recipe_warnings = await self._recipe_materials(
-            payload, product
-        )
+        (
+            materials_calculated,
+            recipe_version,
+            recipe_warnings,
+            materials_without_cost,
+        ) = await self._recipe_materials(payload, product)
         firing_line, firing_cost, firing_snapshot, firing_warnings = await self._firing_source(
             payload, product
         )
@@ -716,6 +730,7 @@ class QuotationService:
             base_commercial_cost=result.base_commercial_cost,
             calculated_total=result.calculated_total,
             calculated_unit_price=result.calculated_unit_price,
+            materials_without_cost=materials_without_cost,
             material_grams_per_piece=self._grams_per_piece(payload),
             material_total_grams=self._grams_per_piece(payload) * Decimal(payload.quantity),
             tax_percentage=result.tax_percentage,
@@ -1168,6 +1183,9 @@ class QuotationService:
             base_commercial_cost=quotation.base_commercial_cost,
             calculated_total=quotation.calculated_total,
             calculated_unit_price=quotation.calculated_unit_price,
+            # Una cotizacion guardada no vuelve a mirar la receta: si algun
+            # material perdio el precio despues, lo dira el recalculo, no esto.
+            materials_without_cost=[],
             material_grams_per_piece=quotation.material_grams_per_piece,
             material_total_grams=(quotation.material_grams_per_piece * Decimal(quotation.quantity)),
             tax_percentage=quotation.tax_percentage_snapshot,

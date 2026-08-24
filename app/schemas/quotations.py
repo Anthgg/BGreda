@@ -297,6 +297,9 @@ class QuotationCalculateOut(_Out):
     base_commercial_cost: Decimal
     calculated_total: Decimal
     calculated_unit_price: Decimal
+    #: Componentes de la receta sin costo unitario. Suman cero y abaratan el
+    #: material sin que nada lo diga, asi que se nombran.
+    materials_without_cost: list[str] = []
     material_grams_per_piece: Decimal
     #: Gramos totales de receta: `gramos_por_pieza x cantidad`.
     material_total_grams: Decimal
