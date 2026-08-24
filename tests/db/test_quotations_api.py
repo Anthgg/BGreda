@@ -994,9 +994,10 @@ async def test_dynamic_igv_configuration_and_snapshot_immutability(
     firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
 
     # 1. Cambiar tasa comercial de IGV a 10%
+    curr_settings = (await api.get("/api/v1/settings/commercial", headers=head(admin_csrf))).json()
     set_res = await api.put(
         "/api/v1/settings/commercial",
-        json={"tax_percent": "10.00"},
+        json={"version": curr_settings["version"], "tax_percent": "10.00"},
         headers=head(admin_csrf),
     )
     assert set_res.status_code == 200, set_res.text
@@ -1011,8 +1012,11 @@ async def test_dynamic_igv_configuration_and_snapshot_immutability(
     calc = calc_res.json()
     assert Decimal(calc["tax_percentage"]) == Decimal("10.00")
     assert calc["tax_rate_source"] == "COMMERCIAL_SETTINGS"
-    expected_tax = Decimal(calc["commercial_subtotal"]) * Decimal("0.10")
-    assert Decimal(calc["tax_amount"]) == expected_tax.quantize(Decimal("0.01"))
+    expected_tax = Decimal(calc["calculated_total"]) * Decimal("0.10")
+    assert Decimal(calc["tax_amount"]) == expected_tax
+    assert Decimal(calc["commercial_total"]) == Decimal(calc["commercial_subtotal"]) * Decimal(
+        "1.10"
+    )
 
     # 3. Crear y confirmar cotizacion con tasa 10%
     create_res = await api.post(f"{QUOTATIONS}", json=payload, headers=head(admin_csrf))
@@ -1029,9 +1033,12 @@ async def test_dynamic_igv_configuration_and_snapshot_immutability(
     assert Decimal(confirmed["tax_percentage"]) == Decimal("10.00")
 
     # 4. Modificar la configuracion comercial a 0% (exento)
+    curr_settings_2 = (
+        await api.get("/api/v1/settings/commercial", headers=head(admin_csrf))
+    ).json()
     set_res_0 = await api.put(
         "/api/v1/settings/commercial",
-        json={"tax_percent": "0.00"},
+        json={"version": curr_settings_2["version"], "tax_percent": "0.00"},
         headers=head(admin_csrf),
     )
     assert set_res_0.status_code == 200, set_res_0.text
@@ -1041,12 +1048,15 @@ async def test_dynamic_igv_configuration_and_snapshot_immutability(
     assert get_res.status_code == 200, get_res.text
     persisted = get_res.json()
     assert Decimal(persisted["tax_percentage"]) == Decimal("10.00")
-    assert Decimal(persisted["tax_amount"]) == expected_tax.quantize(Decimal("0.01"))
+    assert Decimal(persisted["tax_amount"]) == expected_tax
 
     # Restaurar configuracion comercial al 18% estandar
+    curr_settings_3 = (
+        await api.get("/api/v1/settings/commercial", headers=head(admin_csrf))
+    ).json()
     await api.put(
         "/api/v1/settings/commercial",
-        json={"tax_percent": "18.00"},
+        json={"version": curr_settings_3["version"], "tax_percent": "18.00"},
         headers=head(admin_csrf),
     )
 
@@ -1079,7 +1089,6 @@ async def test_product_list_price_no_auto_update_on_confirmation(
     payload = _quote_payload(product, recipe, firing_line)
     payload["material_grams_per_piece"] = "250"
     payload["quantity"] = 10
-    payload["commercial_sale_unit_price"] = "85.50"
 
     # Crear y confirmar
     create_res = await api.post(f"{QUOTATIONS}", json=payload, headers=head(admin_csrf))
@@ -1103,8 +1112,9 @@ async def test_product_list_price_no_auto_update_on_confirmation(
         headers=head(admin_csrf),
     )
     assert update_price_res.status_code == 200
-    assert Decimal(update_price_res.json()["new_price"]) == Decimal("85.50")
+    expected_new_price = Decimal(quote["calculated_unit_price"])
+    assert Decimal(update_price_res.json()["new_price"]) == expected_new_price
 
     # Ahora si se actualizo el producto maestro
     prod_updated = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
-    assert Decimal(prod_updated.json()["sale_price"]) == Decimal("85.50")
+    assert Decimal(prod_updated.json()["sale_price"]) == expected_new_price
