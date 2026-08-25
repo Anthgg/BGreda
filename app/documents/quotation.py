@@ -342,10 +342,15 @@ def build_quotation_pdf_document(
     tax_percent = quotation.tax_percentage_snapshot
     # REGLA: commercial_subtotal + commercial_tax_amount == commercial_total
     commercial_tax_amount = quotation.commercial_total - quotation.commercial_subtotal
+    tax_label = (
+        f"IGV (tasa efectiva {format_quantity(tax_percent)}%)"
+        if quotation.tax_rate_source_snapshot == "MIXED"
+        else format_tax_label(tax_percent)
+    )
     totals_doc = QuotationDocTotals(
         subtotal_formatted=format_currency(quotation.commercial_subtotal, currency_symbol),
         tax_percentage=tax_percent,
-        tax_label=format_tax_label(tax_percent),
+        tax_label=tax_label,
         tax_amount_formatted=format_currency(commercial_tax_amount, currency_symbol),
         total_formatted=format_currency(quotation.commercial_total, currency_symbol),
         unit_price_with_tax_formatted=format_currency(

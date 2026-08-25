@@ -99,11 +99,14 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
     db_session: AsyncSession,
 ) -> None:
     payload, products = await _complete_payload(api, admin_csrf, db_session)
+    for item in payload["items"]:
+        item.pop("sort_order")
 
     preview_response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
     assert preview_response.status_code == 200, preview_response.text
     preview = preview_response.json()
     assert preview["item_count"] == 2
+    assert [item["sort_order"] for item in preview["items"]] == [0, 1]
     assert Decimal(preview["commercial_subtotal"]) == Decimal("3250")
     assert preview["production_summary"]["estimated"] is True
     assert int((await db_session.execute(select(func.count(Firing.id)))).scalar_one()) == 0
@@ -233,3 +236,47 @@ async def test_incomplete_draft_can_be_saved_but_not_confirmed(
 async def test_builder_requires_authentication(api: httpx.AsyncClient) -> None:
     response = await api.post(f"{BUILDER}/preview", json={"items": []})
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_mixed_tax_rates_use_an_effective_header_rate_and_explicit_pdf_label(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    payload, products = await _complete_payload(api, admin_csrf, db_session)
+    await db_session.execute(
+        update(Product).where(Product.id == products[0]["id"]).values(sale_tax_rate=Decimal(18))
+    )
+    await db_session.execute(
+        update(Product).where(Product.id == products[1]["id"]).values(sale_tax_rate=Decimal(0))
+    )
+    await db_session.commit()
+
+    preview_response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert preview_response.status_code == 200, preview_response.text
+    preview = preview_response.json()
+    assert preview["complete"] is True
+    assert preview["tax_rate_source_snapshot"] == "MIXED"
+    assert "MIXED_TAX_RATES" in preview["warnings"]
+    assert Decimal(0) < Decimal(preview["tax_percentage_snapshot"]) < Decimal(18)
+
+    create_response = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert create_response.status_code == 201, create_response.text
+    draft = create_response.json()
+    confirm_response = await api.post(
+        f"{BUILDER}/{draft['id']}/confirm",
+        json={"expected_updated_at": draft["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert confirm_response.status_code == 200, confirm_response.text
+
+    row = (
+        await db_session.execute(
+            select(Quotation)
+            .where(Quotation.id == draft["id"])
+            .options(selectinload(Quotation.items), selectinload(Quotation.product))
+        )
+    ).scalar_one()
+    document = build_quotation_pdf_document(row)
+    assert document.totals.tax_label.startswith("IGV (tasa efectiva ")

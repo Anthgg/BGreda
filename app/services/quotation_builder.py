@@ -316,7 +316,10 @@ class QuotationBuilderService:
         ) = await self._simulate_production(payload.kiln_id, resolved)
 
         item_outputs: list[QuotationBuilderItemOut] = []
-        for item, product, dimensions, recipe in resolved:
+        # El orden de la lista es la autoridad del builder. Normalizarlo evita
+        # que dos items que omiten ``sort_order`` colisionen con la restriccion
+        # unica (quotation_id, sort_order) al guardar el borrador.
+        for position, (item, product, dimensions, recipe) in enumerate(resolved):
             recipe_id, version_id, version_fingerprint, auto_selected = recipe
             warnings: list[str] = []
             if item.quantity is None:
@@ -482,7 +485,7 @@ class QuotationBuilderService:
                             "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
                         )
                     ),
-                    sort_order=item.sort_order,
+                    sort_order=position,
                 )
             )
 
@@ -523,6 +526,18 @@ class QuotationBuilderService:
                 "items": [item.source_fingerprint for item in item_outputs],
             }
         )
+        if len(tax_rates) == 1:
+            header_tax_percentage = next(iter(tax_rates))
+        elif subtotal:
+            # Una cotizacion puede combinar productos gravados y exentos. El
+            # encabezado conserva una tasa efectiva representativa mientras
+            # cada item mantiene su tasa exacta y el origen queda como MIXED.
+            header_tax_percentage = (tax_amount * Decimal(100) / subtotal).quantize(
+                Decimal("0.000001")
+            )
+        else:
+            header_tax_percentage = ZERO
+
         return QuotationBuilderOut(
             name=payload.name,
             customer_id=customer.id if customer else None,
@@ -533,9 +548,11 @@ class QuotationBuilderService:
             items=item_outputs,
             item_count=len(item_outputs),
             commercial_subtotal=subtotal,
-            tax_percentage_snapshot=next(iter(tax_rates)) if len(tax_rates) == 1 else ZERO,
+            tax_percentage_snapshot=header_tax_percentage,
             tax_rate_source_snapshot=(
-                next(iter(tax_sources)) if len(tax_sources) == 1 else "MIXED"
+                next(iter(tax_sources))
+                if len(tax_rates) == 1 and len(tax_sources) == 1
+                else "MIXED"
             ),
             tax_amount=tax_amount,
             total_with_tax=total,

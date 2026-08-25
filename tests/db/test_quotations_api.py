@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockMovement
 from app.models.masters import Product
-from app.models.quotations import Quotation, QuotationProductPriceUpdate
+from app.models.quotations import Quotation, QuotationItem, QuotationProductPriceUpdate
 from tests.db.conftest import (
     OPERATOR_EMAIL,
     OPERATOR_PASSWORD,
@@ -956,6 +956,20 @@ async def test_quotation_commercial_pricing_and_confirm_flow(
     confirmed = confirm_res.json()
     assert confirmed["status"] == "CONFIRMED"
     assert confirmed["confirmed_at"] is not None
+
+    legacy_item = (
+        await db_session.execute(
+            select(QuotationItem).where(QuotationItem.quotation_id == quotation["id"])
+        )
+    ).scalar_one()
+    assert legacy_item.quantity == 20
+    assert legacy_item.commercial_sale_unit_price == manual_price
+
+    list_res = await api.get(QUOTATIONS)
+    assert list_res.status_code == 200, list_res.text
+    listed = next(item for item in list_res.json()["items"] if item["id"] == quotation["id"])
+    assert listed["workflow"] == "LEGACY"
+    assert listed["item_count"] == 1
 
     # Ya confirmada es inmutable: intentar editar da 409
     fail_edit = await api.put(

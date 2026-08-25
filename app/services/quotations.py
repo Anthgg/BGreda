@@ -1115,6 +1115,9 @@ class QuotationService:
         await self._session.execute(
             delete(QuotationOtherCost).where(QuotationOtherCost.quotation_id == quotation.id)
         )
+        await self._session.execute(
+            delete(QuotationItem).where(QuotationItem.quotation_id == quotation.id)
+        )
         await self._session.flush()
 
         for index, technique_line in enumerate(output.techniques):
@@ -1181,8 +1184,70 @@ class QuotationService:
                     sort_order=other_cost_line.sort_order,
                 )
             )
+        # La ruta legacy mantiene una sola linea sincronizada con su cabecera.
+        # Asi los registros migrados por 0012 y los creados despues de la
+        # migracion producen el mismo item_count y el PDF usa el snapshot
+        # vigente tras editar o confirmar.
+        self._session.add(
+            QuotationItem(
+                quotation_id=quotation.id,
+                product_id=output.product_id,
+                sort_order=0,
+                quantity=output.quantity,
+                product_name_snapshot=output.product_name_snapshot,
+                product_internal_reference_snapshot=output.product_internal_reference_snapshot,
+                product_type_snapshot=output.product_type_snapshot,
+                product_uom_snapshot=output.product_uom_snapshot,
+                product_material_snapshot=output.product_material_snapshot,
+                product_grammage_snapshot=output.product_grammage_snapshot,
+                product_width_snapshot=output.product_width_snapshot,
+                product_height_snapshot=output.product_height_snapshot,
+                product_length_snapshot=output.product_length_snapshot,
+                product_depth_snapshot=output.product_depth_snapshot,
+                recipe_id=output.recipe_id,
+                recipe_version_id=output.recipe_version_id,
+                recipe_version_fingerprint_snapshot=(
+                    output.recipe_version_fingerprint_snapshot
+                ),
+                material_grams_per_piece=output.material_grams_per_piece,
+                kiln_id=None,
+                kiln_snapshot={},
+                production_snapshot=output.firing_snapshot,
+                techniques_snapshot=[value.model_dump(mode="json") for value in output.techniques],
+                additionals_snapshot=[
+                    value.model_dump(mode="json") for value in output.additionals
+                ],
+                other_costs_snapshot=[
+                    value.model_dump(mode="json") for value in output.other_costs
+                ],
+                materials_calculated=output.materials_calculated,
+                materials_applied=output.materials_applied,
+                firing_cost=output.firing_cost,
+                labor_cost=output.labor_cost,
+                calculated_days=output.calculated_days,
+                days_adjustment=output.days_adjustment,
+                waiting_days=output.waiting_days,
+                total_days=output.total_days,
+                space_cost=output.space_cost,
+                final_unit_cost=output.final_unit_cost,
+                final_total_cost=output.final_total_cost,
+                markup_percent=output.markup_percent,
+                calculated_sale_unit_price=output.calculated_sale_unit_price,
+                suggested_commercial_unit_price=output.suggested_commercial_unit_price,
+                commercial_sale_unit_price=output.commercial_sale_unit_price,
+                effective_profit_unit=output.effective_profit_unit,
+                effective_profit_total=output.effective_profit_total,
+                effective_markup_percent=output.effective_markup_percent,
+                commercial_subtotal=output.commercial_subtotal,
+                tax_percentage_snapshot=output.tax_percentage,
+                tax_rate_source_snapshot=output.tax_rate_source,
+                tax_amount=output.tax_amount,
+                source_fingerprint=output.source_fingerprint,
+                calculation_warnings=output.warnings,
+            )
+        )
         await self._session.flush()
-        self._session.expire(quotation, ["techniques", "additionals", "other_costs"])
+        self._session.expire(quotation, ["techniques", "additionals", "other_costs", "items"])
         return output
 
     async def create(self, payload: QuotationCreateIn, *, user: AuthenticatedUser) -> QuotationOut:
