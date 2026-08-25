@@ -112,7 +112,10 @@ class QuotationPdfService:
         stmt = (
             select(Quotation)
             .where(Quotation.id == quotation_id)
-            .options(selectinload(Quotation.product))
+            .options(
+                selectinload(Quotation.product),
+                selectinload(Quotation.items),
+            )
         )
         quotation = (await self._session.execute(stmt)).scalar_one_or_none()
         if quotation is None:

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
+from sqlalchemy import inspect as sa_inspect
+
 from app.models.quotations import Quotation, QuotationStatus
 from app.models.settings import CommercialSettings, CompanySettings
 
@@ -268,35 +270,73 @@ def build_quotation_pdf_document(
         currency_code=currency_code,
     )
 
-    # 4. Item de producto (EXCLUSIVAMENTE DESDE SNAPSHOTS)
-    grammage_str = None
-    if quotation.product_grammage_snapshot is not None and quotation.product_grammage_snapshot > 0:
-        grammage_str = f"{format_quantity(quotation.product_grammage_snapshot)} g"
-
-    dimensions_str = format_dimensions(
-        width=quotation.product_width_snapshot,
-        height=quotation.product_height_snapshot,
-        length=quotation.product_length_snapshot,
-        depth=quotation.product_depth_snapshot,
-    )
-
-    unit_price = quotation.commercial_sale_unit_price
-    subtotal = quotation.commercial_subtotal
-
-    item = QuotationDocItem(
-        item_number=1,
-        product_name=quotation.product_name_snapshot
-        or (quotation.product.name if quotation.product else "Producto"),
-        product_reference=quotation.product_internal_reference_snapshot,
-        material=quotation.product_material_snapshot,
-        grammage_formatted=grammage_str,
-        dimensions_formatted=dimensions_str,
-        quantity=quotation.quantity,
-        quantity_formatted=format_quantity(quotation.quantity),
-        unit_of_measure=quotation.product_uom_snapshot or "NIU",
-        unit_price_formatted=format_currency(unit_price, currency_symbol),
-        subtotal_formatted=format_currency(subtotal, currency_symbol),
-    )
+    # 4. Items comerciales (EXCLUSIVAMENTE DESDE SNAPSHOTS)
+    items: list[QuotationDocItem] = []
+    quotation_items = [] if "items" in sa_inspect(quotation).unloaded else quotation.items
+    if quotation_items:
+        for index, line in enumerate(quotation_items, start=1):
+            grammage_str = (
+                f"{format_quantity(line.product_grammage_snapshot)} g"
+                if line.product_grammage_snapshot is not None and line.product_grammage_snapshot > 0
+                else None
+            )
+            quantity = line.quantity or 0
+            items.append(
+                QuotationDocItem(
+                    item_number=index,
+                    product_name=line.product_name_snapshot,
+                    product_reference=line.product_internal_reference_snapshot,
+                    material=line.product_material_snapshot,
+                    grammage_formatted=grammage_str,
+                    dimensions_formatted=format_dimensions(
+                        width=line.product_width_snapshot,
+                        height=line.product_height_snapshot,
+                        length=line.product_length_snapshot,
+                        depth=line.product_depth_snapshot,
+                    ),
+                    quantity=quantity,
+                    quantity_formatted=format_quantity(quantity),
+                    unit_of_measure=line.product_uom_snapshot or "NIU",
+                    unit_price_formatted=format_currency(
+                        line.commercial_sale_unit_price, currency_symbol
+                    ),
+                    subtotal_formatted=format_currency(line.commercial_subtotal, currency_symbol),
+                )
+            )
+    else:
+        # Compatibilidad con objetos legacy/transitorios de pruebas. En base de
+        # datos 0012 migra cada cabecera historica a una linea equivalente.
+        if quotation.quantity is None:
+            raise ValueError("La cotizacion no contiene productos")
+        grammage_str = (
+            f"{format_quantity(quotation.product_grammage_snapshot)} g"
+            if quotation.product_grammage_snapshot is not None
+            and quotation.product_grammage_snapshot > 0
+            else None
+        )
+        items.append(
+            QuotationDocItem(
+                item_number=1,
+                product_name=quotation.product_name_snapshot
+                or (quotation.product.name if quotation.product else "Producto"),
+                product_reference=quotation.product_internal_reference_snapshot,
+                material=quotation.product_material_snapshot,
+                grammage_formatted=grammage_str,
+                dimensions_formatted=format_dimensions(
+                    width=quotation.product_width_snapshot,
+                    height=quotation.product_height_snapshot,
+                    length=quotation.product_length_snapshot,
+                    depth=quotation.product_depth_snapshot,
+                ),
+                quantity=quotation.quantity,
+                quantity_formatted=format_quantity(quotation.quantity),
+                unit_of_measure=quotation.product_uom_snapshot or "NIU",
+                unit_price_formatted=format_currency(
+                    quotation.commercial_sale_unit_price, currency_symbol
+                ),
+                subtotal_formatted=format_currency(quotation.commercial_subtotal, currency_symbol),
+            )
+        )
 
     # 5. Totales e impuestos comerciales (EXCLUSIVAMENTE DESDE SNAPSHOTS)
     tax_percent = quotation.tax_percentage_snapshot
@@ -344,7 +384,7 @@ def build_quotation_pdf_document(
         company=company_doc,
         customer=customer_doc,
         document=document_header,
-        items=[item],
+        items=items,
         totals=totals_doc,
         conditions=conditions_doc,
         bank_accounts=bank_accounts_doc,
