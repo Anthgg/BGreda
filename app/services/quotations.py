@@ -1206,9 +1206,7 @@ class QuotationService:
                 product_depth_snapshot=output.product_depth_snapshot,
                 recipe_id=output.recipe_id,
                 recipe_version_id=output.recipe_version_id,
-                recipe_version_fingerprint_snapshot=(
-                    output.recipe_version_fingerprint_snapshot
-                ),
+                recipe_version_fingerprint_snapshot=(output.recipe_version_fingerprint_snapshot),
                 material_grams_per_piece=output.material_grams_per_piece,
                 kiln_id=None,
                 kiln_snapshot={},
