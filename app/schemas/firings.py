@@ -257,6 +257,11 @@ class FiringCalculateOut(_Out):
     total_volume_cm3: Decimal
     subtotal: Decimal
     total_cost: Decimal
+    tax_percentage: Decimal = Decimal(0)
+    tax_amount: Decimal = Decimal(0)
+    total_with_tax: Decimal = Decimal(0)
+    currency_code: str = "PEN"
+    currency_symbol: str = "S/"
     occupancy_percentage: Decimal
     occupancy_factor: Decimal
     capacity_exceeded: bool
@@ -276,6 +281,11 @@ class FiringOut(_Out):
     occupancy_factor: Decimal
     subtotal: Decimal
     total_cost: Decimal
+    tax_percentage: Decimal = Decimal(0)
+    tax_amount: Decimal = Decimal(0)
+    total_with_tax: Decimal = Decimal(0)
+    currency_code: str = "PEN"
+    currency_symbol: str = "S/"
     created_by_id: uuid.UUID | None = None
     confirmed_at: datetime | None = None
     cancelled_at: datetime | None = None

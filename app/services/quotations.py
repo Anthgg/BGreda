@@ -422,7 +422,16 @@ class QuotationService:
     ) -> tuple[Decimal, RecipeVersion | None, list[str], list[str]]:
         """Costo de materiales, version usada, avisos y materiales sin precio."""
         if payload.recipe_id is None or payload.recipe_version_id is None:
-            return ZERO, None, ["RECIPE_REQUIRED"], []
+            return (
+                ZERO,
+                None,
+                (
+                    []
+                    if payload.materials_applied is not None and payload.materials_applied > ZERO
+                    else ["RECIPE_REQUIRED"]
+                ),
+                [],
+            )
         version = (
             await self._session.execute(
                 select(RecipeVersion)
@@ -547,14 +556,35 @@ class QuotationService:
             "firing_code": line.firing.code,
             "product_id": line.product_id,
             "description": line.description,
-            "quantity": line.quantity,
-            "total_volume_cm3": str(line.total_volume_cm3),
-            "base_cost": str(line.base_cost),
-            "allocated_cost": str(line.allocated_cost),
+            "source_quantity": line.quantity,
+            "quantity": payload.quantity,
+            "unit_volume_cm3": str(line.unit_volume_cm3),
+            "source_total_volume_cm3": str(line.total_volume_cm3),
+            "total_volume_cm3": str(line.unit_volume_cm3 * Decimal(payload.quantity)),
+            "source_base_cost": str(line.base_cost),
+            "base_cost": str(line.base_cost / Decimal(line.quantity) * Decimal(payload.quantity)),
+            "source_allocated_cost": str(line.allocated_cost),
+            "allocated_cost": str(
+                line.allocated_cost / Decimal(line.quantity) * Decimal(payload.quantity)
+            ),
+            "occupancy_percentage": str(line.occupancy_percentage),
+            "occupancy_bracket": line.occupancy_bracket,
             "occupancy_factor": str(line.occupancy_factor),
+            "low_kiln_id": (
+                sessions[line.low_session_id].kiln_id
+                if line.low_session_id is not None and line.low_session_id in sessions
+                else None
+            ),
+            "high_kiln_id": (
+                sessions[line.high_session_id].kiln_id
+                if line.high_session_id is not None and line.high_session_id in sessions
+                else None
+            ),
+            "factor_kiln_id": line.factor_kiln_id,
             "sessions": snapshot_sessions,
         }
-        return line, line.allocated_cost, snapshot, []
+        firing_cost = line.allocated_cost / Decimal(line.quantity) * Decimal(payload.quantity)
+        return line, firing_cost, snapshot, []
 
     async def _load_sources(self, model: type[MasterT], ids: list[int]) -> dict[int, MasterT]:
         if not ids:
@@ -750,7 +780,6 @@ class QuotationService:
                 if product.sale_tax_rate is not None or settings.tax_percent is not None
                 else ["IGV_RATE_NOT_CONFIGURED"]
             ),
-            "DISCOUNT_RULE_BLOCKED_BY_SOURCE",
         ]
         source_data: dict[str, object] = {
             "customer": [customer.id, customer.updated_at] if customer else None,
@@ -1718,12 +1747,21 @@ class QuotationService:
                     if quotation.product
                     else f"{len(quotation.items)} productos"
                 ),
-                quantity=quotation.quantity,
+                quantity=(
+                    sum(item.quantity or 0 for item in quotation.items)
+                    if quotation.items
+                    else quotation.quantity
+                ),
                 item_count=len(quotation.items),
                 calculated_unit_price=quotation.calculated_unit_price,
                 calculated_total=quotation.calculated_total,
                 final_unit_cost=quotation.final_unit_cost,
-                commercial_sale_unit_price=quotation.commercial_sale_unit_price,
+                commercial_sale_unit_price=(
+                    quotation.commercial_subtotal
+                    / Decimal(sum(item.quantity or 0 for item in quotation.items))
+                    if quotation.items and sum(item.quantity or 0 for item in quotation.items) > 0
+                    else quotation.commercial_sale_unit_price
+                ),
                 commercial_total=quotation.commercial_total,
                 total_with_tax=quotation.total_with_tax,
                 created_at=quotation.created_at,

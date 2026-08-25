@@ -7,7 +7,6 @@ import base64
 import logging
 from pathlib import Path
 
-import weasyprint
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,6 +104,8 @@ class QuotationPdfService:
 
     def render_pdf_from_html(self, html_content: str) -> bytes:
         """Genera los bytes del binario PDF a partir de HTML/CSS con WeasyPrint."""
+        import weasyprint
+
         return weasyprint.HTML(string=html_content).write_pdf()
 
     async def get_quotation_pdf(self, quotation_id: int) -> tuple[bytes, str]:

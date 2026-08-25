@@ -302,3 +302,38 @@ def test_costing_markup_and_effective_profit_calculations() -> None:
     assert result.commercial_subtotal == Decimal("350.00")
     assert result.commercial_total == Decimal("413.00")
     assert result.commercial_unit_price_with_tax == Decimal("41.30")
+
+
+def test_control_case_validated_20_pieces() -> None:
+    """Caso manual validado CTZ-2026-000010:
+
+    20 piezas, costo total S/ 3886.24 (costo unitario S/ 194.312),
+    markup 100%, precio calculado S/ 388.624 -> precio comercial S/ 388.50,
+    subtotal S/ 7770.00, IGV 18% S/ 1398.60, total S/ 9168.60,
+    precio unitario con IGV S/ 458.43.
+    """
+    result = calculate_quotation(
+        QuotationInput(
+            quantity=20,
+            materials_calculated=Decimal("0"),
+            materials_applied=Decimal("0"),
+            firing_cost=Decimal("3886.24"),
+            techniques=(),
+            additionals=(),
+            days_adjustment=0,
+            waiting_days=0,
+            other_costs=(),
+            markup_percent=Decimal("100"),
+            tax_percentage=Decimal("18"),
+        )
+    )
+
+    assert result.final_total_cost == Decimal("3886.24")
+    assert result.final_unit_cost.quantize(Decimal("0.01")) == Decimal("194.31")
+    assert result.markup_percent == Decimal("100")
+    assert result.suggested_commercial_unit_price == Decimal("388.50")
+    assert result.commercial_sale_unit_price == Decimal("388.50")
+    assert result.commercial_subtotal == Decimal("7770.00")
+    assert result.commercial_total - result.commercial_subtotal == Decimal("1398.60")
+    assert result.commercial_total == Decimal("9168.60")
+    assert result.commercial_unit_price_with_tax == Decimal("458.43")

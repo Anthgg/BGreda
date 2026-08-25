@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.audit import AuditEvent
 from app.models.inventory import StockMovement
 from app.models.sequence import DocumentSequenceIssue
+from app.models.settings import SINGLETON_ID, CommercialSettings
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
 
 KILNS = "/api/v1/kilns"
@@ -313,6 +314,12 @@ async def test_el_simulador_reproduce_el_caso_de_referencia(
 ) -> None:
     """§18: 12960 cm3 de 26010, 1041.38 de base y 1249.66 tras el factor 1.20."""
     chico, grande = await hornos_de_referencia(api, admin_csrf, db_session)
+    commercial = await db_session.get(CommercialSettings, SINGLETON_ID)
+    assert commercial is not None
+    commercial.tax_percent = Decimal(18)
+    commercial.currency_code = "PEN"
+    commercial.currency_symbol = "S/"
+    await db_session.commit()
 
     respuesta = await api.post(
         f"{FIRINGS}/calculate",
@@ -330,6 +337,17 @@ async def test_el_simulador_reproduce_el_caso_de_referencia(
     assert palta["occupancy_bracket"] == 80
     assert Decimal(palta["occupancy_factor"]) == Decimal("1.2")
     assert Decimal(palta["allocated_cost"]).quantize(Decimal("0.01")) == Decimal("1249.66")
+    assert Decimal(resultado["lines"][1]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
+        "70.07"
+    )
+    assert Decimal(resultado["lines"][2]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
+        "336.33"
+    )
+    assert Decimal(resultado["total_cost"]).quantize(Decimal("0.01")) == Decimal("1656.06")
+    assert Decimal(resultado["tax_percentage"]) == Decimal(18)
+    assert Decimal(resultado["tax_amount"]).quantize(Decimal("0.01")) == Decimal("298.09")
+    assert Decimal(resultado["total_with_tax"]).quantize(Decimal("0.01")) == Decimal("1954.15")
+    assert resultado["currency_symbol"] == "S/"
 
 
 async def test_el_simulador_no_toca_inventario_ni_gasta_correlativo(

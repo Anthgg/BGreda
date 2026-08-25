@@ -209,6 +209,174 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
 
 
 @pytest.mark.asyncio
+async def test_builder_preserva_ruta_de_quema_por_producto(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    kiln_small = payload.pop("kiln_id")
+    kiln_large = await crear_horno(
+        api,
+        admin_csrf,
+        db_session,
+        nombre="Horno Ruta Grande QA",
+        capacidad="20000000",
+        baja="1000",
+        alta="2000",
+        factores=FACTORES_CHICO,
+    )
+    payload["items"][0].update(
+        low_kiln_id=kiln_small,
+        high_kiln_id=kiln_large["id"],
+        factor_kiln_id=kiln_small,
+    )
+    payload["items"][1].update(
+        low_kiln_id=kiln_small,
+        high_kiln_id=kiln_small,
+        factor_kiln_id=kiln_large["id"],
+    )
+
+    preview_response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert preview_response.status_code == 200, preview_response.text
+    preview = preview_response.json()
+    assert preview["complete"] is True
+    assert {
+        (session["kiln_id"], session["firing_type"])
+        for session in preview["production_summary"]["sessions"]
+    } == {
+        (kiln_small, "LOW"),
+        (kiln_small, "HIGH"),
+        (kiln_large["id"], "HIGH"),
+    }
+    assert preview["items"][0]["low_kiln_id"] == kiln_small
+    assert preview["items"][0]["high_kiln_id"] == kiln_large["id"]
+    assert preview["items"][1]["factor_kiln_id"] == kiln_large["id"]
+
+    created_response = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert created_response.status_code == 201, created_response.text
+    created = created_response.json()
+    reopened = (await api.get(f"{BUILDER}/{created['id']}")).json()
+    assert reopened["items"][0]["high_kiln_id"] == kiln_large["id"]
+    assert reopened["items"][1]["factor_kiln_id"] == kiln_large["id"]
+
+
+@pytest.mark.asyncio
+async def test_builder_usa_una_linea_confirmada_como_fuente_del_costo(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    payload, products = await _complete_payload(api, admin_csrf, db_session)
+    kiln_id = payload.pop("kiln_id")
+    payload["items"] = [payload["items"][0]]
+    firing_payload = {
+        "sessions": [
+            {"kiln_id": kiln_id, "firing_type": "LOW", "sort_order": 0},
+            {"kiln_id": kiln_id, "firing_type": "HIGH", "sort_order": 1},
+        ],
+        "lines": [
+            {
+                "product_id": products[0]["id"],
+                "description": products[0]["name"],
+                "quantity": 100,
+                "length_cm": "24",
+                "width_cm": "24",
+                "height_cm": "2",
+                "low_kiln_id": kiln_id,
+                "high_kiln_id": kiln_id,
+                "factor_kiln_id": kiln_id,
+                "sort_order": 0,
+            }
+        ],
+    }
+    firing = (
+        await api.post("/api/v1/firings", json=firing_payload, headers=head(admin_csrf))
+    ).json()
+    confirmed = (
+        await api.post(f"/api/v1/firings/{firing['id']}/confirm", headers=head(admin_csrf))
+    ).json()
+    firing_line = confirmed["lines"][0]
+    payload["items"][0].pop("recipe_id", None)
+    payload["items"][0].pop("recipe_version_id", None)
+    payload["items"][0].pop("material_grams_per_piece", None)
+    payload["items"][0].pop("commercial_sale_unit_price", None)
+    payload["items"][0]["firing_line_id"] = firing_line["id"]
+    payload["items"][0]["materials_applied"] = "11.58"
+
+    preview_response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert preview_response.status_code == 200, preview_response.text
+    preview = preview_response.json()
+    assert preview["complete"] is True
+    assert preview["production_summary"]["source"] == "CONFIRMED_FIRING_LINES"
+    quoted_quantity = Decimal(str(payload["items"][0]["quantity"]))
+    source_quantity = Decimal(str(firing_line["quantity"]))
+    assert Decimal(preview["production_summary"]["total_volume_cm3"]) == (
+        Decimal(firing_line["unit_volume_cm3"]) * quoted_quantity
+    )
+    assert Decimal(preview["production_summary"]["occupancy_percentage"]) == Decimal(
+        firing_line["occupancy_percentage"]
+    )
+    assert Decimal(preview["production_summary"]["occupancy_factor"]) == Decimal(
+        firing_line["occupancy_factor"]
+    )
+    assert Decimal(preview["production_summary"]["subtotal"]) == (
+        Decimal(firing_line["base_cost"]) / source_quantity * quoted_quantity
+    )
+    assert preview["items"][0]["firing_line_id"] == firing_line["id"]
+    assert Decimal(preview["items"][0]["materials_applied"]) == Decimal("11.58")
+    assert preview["items"][0]["materials_applied_input"] == "11.58"
+    assert preview["items"][0]["commercial_sale_unit_price_input"] is None
+    assert Decimal(preview["items"][0]["commercial_sale_unit_price"]) == Decimal(
+        preview["items"][0]["suggested_commercial_unit_price"]
+    )
+    assert "RECIPE_REQUIRED" not in preview["items"][0]["warnings"]
+    assert "MATERIAL_GRAMS_PER_PIECE_REQUIRED" not in preview["items"][0]["warnings"]
+    assert "DISCOUNT_RULE_BLOCKED_BY_SOURCE" not in preview["items"][0]["warnings"]
+    assert Decimal(preview["items"][0]["firing_cost"]) == (
+        Decimal(firing_line["allocated_cost"]) / source_quantity * quoted_quantity
+    )
+
+    created = (await api.post(BUILDER, json=payload, headers=head(admin_csrf))).json()
+    reopened = (await api.get(f"{BUILDER}/{created['id']}")).json()
+    assert reopened["items"][0]["firing_line_id"] == firing_line["id"]
+    assert reopened["items"][0]["firing_code_snapshot"] == confirmed["code"]
+    assert reopened["items"][0]["materials_applied_input"] == "11.58"
+    assert reopened["items"][0]["commercial_sale_unit_price_input"] is None
+    assert Decimal(reopened["items"][0]["commercial_unit_price_with_tax"]) == (
+        Decimal(reopened["items"][0]["commercial_total"])
+        / Decimal(str(reopened["items"][0]["quantity"]))
+    )
+    assert Decimal(reopened["production_summary"]["occupancy_percentage"]) == Decimal(
+        firing_line["occupancy_percentage"]
+    )
+
+    listed = (await api.get("/api/v1/quotations")).json()["items"]
+    listed_row = next(item for item in listed if item["id"] == created["id"])
+    quantity = Decimal(str(payload["items"][0]["quantity"]))
+    assert Decimal(str(listed_row["quantity"])) == quantity
+    assert Decimal(listed_row["commercial_sale_unit_price"]) == (
+        Decimal(reopened["commercial_subtotal"]) / quantity
+    )
+
+    duplicated = (
+        await api.post(f"{BUILDER}/{created['id']}/duplicate", headers=head(admin_csrf))
+    ).json()
+    assert duplicated["items"][0]["commercial_sale_unit_price_input"] is None
+    assert Decimal(duplicated["items"][0]["commercial_sale_unit_price"]) == Decimal(
+        duplicated["items"][0]["suggested_commercial_unit_price"]
+    )
+
+    # Inmutabilidad de la quema fuente
+    firing_after = (await api.get(f"/api/v1/firings/{firing['id']}")).json()
+    assert firing_after["status"] == confirmed["status"]
+    assert firing_after["total_cost"] == confirmed["total_cost"]
+    assert len(firing_after["lines"]) == len(confirmed["lines"])
+    assert firing_after["lines"][0]["quantity"] == confirmed["lines"][0]["quantity"]
+    assert firing_after["lines"][0]["allocated_cost"] == confirmed["lines"][0]["allocated_cost"]
+
+
+@pytest.mark.asyncio
 async def test_incomplete_draft_can_be_saved_but_not_confirmed(
     api: httpx.AsyncClient,
     admin_csrf: str,

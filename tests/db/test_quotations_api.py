@@ -162,7 +162,11 @@ async def test_calculate_is_pure_and_uses_decimal_strings(
     data = response.json()
     assert Decimal(data["materials_calculated"]) == Decimal("9.5")
     assert Decimal(data["materials_applied"]) == Decimal("11.58")
-    assert Decimal(data["firing_cost"]) == Decimal(firing_line["allocated_cost"])
+    assert Decimal(data["firing_cost"]) == (
+        Decimal(firing_line["allocated_cost"])
+        / Decimal(firing_line["quantity"])
+        * Decimal(data["quantity"])
+    )
     # El IGV si tiene regla: la cotizacion se emite neta y el impuesto se anade
     # encima, de modo que el documento entregado muestre las dos cifras.
     assert data["igv_rule_source"] == "FOUND"
@@ -733,7 +737,7 @@ async def test_actualizar_precio_usa_el_unitario_neto_y_no_el_de_con_igv(
     fila = await db_session.get(Product, product["id"])
     assert fila is not None
     await db_session.refresh(fila)
-    assert fila.sale_price == neto
+    assert fila.sale_price == neto.quantize(Decimal("0.000001"))
     assert fila.sale_price != con_igv
 
 

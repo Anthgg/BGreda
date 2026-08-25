@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -49,6 +50,7 @@ ZERO = Decimal(0)
 BUILDER_ENTITY = "quotation_builder"
 PRODUCTION_DIMENSIONS = ("length", "width", "height")
 ALL_DIMENSIONS = ("width", "height", "length", "depth")
+HIDDEN_WARNING_CODES = {"DISCOUNT_RULE_BLOCKED_BY_SOURCE"}
 
 
 class QuotationBuilderNotFoundError(APIError):
@@ -94,6 +96,113 @@ def _fingerprint(value: object) -> str:
 
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _output_warnings(values: list[str]) -> list[str]:
+    return [value for value in _unique(values) if value not in HIDDEN_WARNING_CODES]
+
+
+def _snapshot_decimal(value: object) -> Decimal:
+    if value is None:
+        return ZERO
+    try:
+        return Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return ZERO
+
+
+def _confirmed_item_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if (
+        snapshot.get("source") != "CONFIRMED_FIRING_LINE"
+        or snapshot.get("occupancy_percentage") is not None
+    ):
+        return snapshot
+    volume = _snapshot_decimal(snapshot.get("total_volume_cm3"))
+    capacities = {
+        _snapshot_decimal(session.get("capacity_snapshot"))
+        for session in snapshot.get("sessions", [])
+        if isinstance(session, dict) and session.get("capacity_snapshot") is not None
+    }
+    capacities.discard(ZERO)
+    if not volume or not capacities:
+        return snapshot
+    enriched = dict(snapshot)
+    enriched["occupancy_percentage"] = str(volume / min(capacities) * Decimal(100))
+    return enriched
+
+
+def _confirmed_production_summary(
+    summary: dict[str, object], items: list[QuotationBuilderItemOut]
+) -> dict[str, object]:
+    """Completa las metricas de lineas confirmadas, incluso para snapshots antiguos."""
+    confirmed = [
+        item for item in items if item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
+    ]
+    if not confirmed:
+        return summary
+
+    total_volume = sum(
+        (_snapshot_decimal(item.production_snapshot.get("total_volume_cm3")) for item in confirmed),
+        ZERO,
+    )
+    base_total = sum(
+        (_snapshot_decimal(item.production_snapshot.get("base_cost")) for item in confirmed),
+        ZERO,
+    )
+    firing_total = sum((item.firing_cost for item in confirmed), ZERO)
+    weighted_factor = sum(
+        (
+            _snapshot_decimal(item.production_snapshot.get("base_cost"))
+            * _snapshot_decimal(item.production_snapshot.get("occupancy_factor"))
+            for item in confirmed
+        ),
+        ZERO,
+    )
+    weighted_occupancy = ZERO
+    weighted_volume = ZERO
+    for item in confirmed:
+        snapshot = item.production_snapshot
+        volume = _snapshot_decimal(snapshot.get("total_volume_cm3"))
+        occupancy_value = snapshot.get("occupancy_percentage")
+        occupancy = _snapshot_decimal(occupancy_value)
+        if occupancy_value is None:
+            capacities = {
+                _snapshot_decimal(session.get("capacity_snapshot"))
+                for session in snapshot.get("sessions", [])
+                if isinstance(session, dict) and session.get("capacity_snapshot") is not None
+            }
+            capacities.discard(ZERO)
+            if capacities:
+                # Los snapshots anteriores a Fase 005.11 no guardaban el horno
+                # de factor. El de menor capacidad es el que gobernaba el tramo
+                # comercial en las hojas existentes y permite reconstruirlas.
+                occupancy = volume / min(capacities) * Decimal(100)
+            else:
+                continue
+        weighted_occupancy += occupancy * volume
+        weighted_volume += volume
+
+    enriched = dict(summary)
+    enriched.update(
+        {
+            "source": "CONFIRMED_FIRING_LINES",
+            "estimated": False,
+            "complete": True,
+            "total_volume_cm3": str(total_volume),
+            "subtotal": str(base_total),
+            "total_cost": str(firing_total),
+            "occupancy_factor": (
+                str(weighted_factor / base_total)
+                if base_total and weighted_factor
+                else str(firing_total / base_total)
+                if base_total
+                else "0"
+            ),
+        }
+    )
+    if weighted_volume:
+        enriched["occupancy_percentage"] = str(weighted_occupancy / weighted_volume)
+    return enriched
 
 
 class QuotationBuilderService:
@@ -251,28 +360,53 @@ class QuotationBuilderService:
         ],
     ) -> tuple[dict[str, Any], dict[int, dict[str, Any]], dict[str, Any], list[str]]:
         warnings: list[str] = []
-        if kiln_id is None:
-            warnings.append("KILN_REQUIRED")
+        simulated = [entry for entry in resolved if entry[0].firing_line_id is None]
         if not resolved:
             warnings.append("ITEM_REQUIRED")
-        for item, _product, dimensions, _recipe in resolved:
+        for item, _product, dimensions, _recipe in simulated:
             if item.quantity is None:
                 warnings.append("QUANTITY_REQUIRED")
             if any(dimensions[field] is None for field in PRODUCTION_DIMENSIONS):
                 warnings.append("PRODUCTION_DIMENSIONS_REQUIRED")
+            if item.low_kiln_id is None and kiln_id is None:
+                warnings.append("LOW_KILN_REQUIRED")
+            if item.high_kiln_id is None and kiln_id is None:
+                warnings.append("HIGH_KILN_REQUIRED")
 
         if warnings:
             summary = {"estimated": True, "complete": False, "warnings": _unique(warnings)}
             return summary, {}, {}, _unique(warnings)
 
-        assert kiln_id is not None
-        for item, _product, dimensions, _recipe in resolved:
+        if not simulated:
+            summary = {
+                "estimated": False,
+                "source": "CONFIRMED_FIRING_LINES",
+                "complete": True,
+                "warnings": [],
+                "sessions": [],
+                "lines": [],
+            }
+            return summary, {}, {}, []
+
+        for item, _product, dimensions, _recipe in simulated:
             assert item.quantity is not None
             assert all(dimensions[field] is not None for field in PRODUCTION_DIMENSIONS)
+        session_routes: list[tuple[int, FiringType]] = []
+        for item, _product, _dimensions, _recipe in simulated:
+            low_kiln_id = item.low_kiln_id or kiln_id
+            high_kiln_id = item.high_kiln_id or kiln_id
+            assert low_kiln_id is not None
+            assert high_kiln_id is not None
+            for route in (
+                (low_kiln_id, FiringType.LOW),
+                (high_kiln_id, FiringType.HIGH),
+            ):
+                if route not in session_routes:
+                    session_routes.append(route)
         firing_payload = FiringIn(
             sessions=[
-                FiringSessionIn(kiln_id=kiln_id, firing_type=FiringType.LOW, sort_order=0),
-                FiringSessionIn(kiln_id=kiln_id, firing_type=FiringType.HIGH, sort_order=1),
+                FiringSessionIn(kiln_id=route[0], firing_type=route[1], sort_order=index)
+                for index, route in enumerate(session_routes)
             ],
             lines=[
                 FiringLineIn(
@@ -282,12 +416,12 @@ class QuotationBuilderService:
                     length_cm=cast(Decimal, dimensions["length"]),
                     width_cm=cast(Decimal, dimensions["width"]),
                     height_cm=cast(Decimal, dimensions["height"]),
-                    low_kiln_id=kiln_id,
-                    high_kiln_id=kiln_id,
-                    factor_kiln_id=kiln_id,
+                    low_kiln_id=item.low_kiln_id or kiln_id,
+                    high_kiln_id=item.high_kiln_id or kiln_id,
+                    factor_kiln_id=item.factor_kiln_id or kiln_id,
                     sort_order=index,
                 )
-                for index, (item, product, dimensions, _recipe) in enumerate(resolved)
+                for index, (item, product, dimensions, _recipe) in enumerate(simulated)
             ],
         )
         result = await self._firings.calculate(firing_payload)
@@ -329,11 +463,17 @@ class QuotationBuilderService:
             ]
             if missing_dimensions:
                 warnings.append("PRODUCTION_DIMENSIONS_REQUIRED")
-            if payload.kiln_id is None:
-                warnings.append("KILN_REQUIRED")
-            if recipe_id is None or version_id is None:
+            if item.firing_line_id is None and item.low_kiln_id is None and payload.kiln_id is None:
+                warnings.append("LOW_KILN_REQUIRED")
+            if (
+                item.firing_line_id is None
+                and item.high_kiln_id is None
+                and payload.kiln_id is None
+            ):
+                warnings.append("HIGH_KILN_REQUIRED")
+            if item.materials_applied is None and (recipe_id is None or version_id is None):
                 warnings.append("RECIPE_REQUIRED")
-            if item.material_grams_per_piece is None:
+            if item.materials_applied is None and item.material_grams_per_piece is None:
                 warnings.append("MATERIAL_GRAMS_PER_PIECE_REQUIRED")
             if "KILN_CAPACITY_EXCEEDED" in production_warnings:
                 warnings.append("KILN_CAPACITY_EXCEEDED")
@@ -358,24 +498,30 @@ class QuotationBuilderService:
 
             calculation = None
             if item.quantity is not None:
-                calculation = await self._quotations.calculate_with_firing_estimate(
-                    QuotationCalculateIn(
-                        name=payload.name,
-                        customer_id=payload.customer_id,
-                        product_id=product.id,
-                        quantity=item.quantity,
-                        recipe_id=recipe_id,
-                        recipe_version_id=version_id,
-                        material_grams_per_piece=item.material_grams_per_piece,
-                        techniques=item.techniques,
-                        additionals=item.additionals,
-                        days_adjustment=item.days_adjustment,
-                        waiting_days=item.waiting_days,
-                        other_costs=item.other_costs,
-                        markup_percent=item.markup_percent,
-                        commercial_sale_unit_price=item.commercial_sale_unit_price,
-                    ),
-                    estimate,
+                quotation_input = QuotationCalculateIn(
+                    name=payload.name,
+                    customer_id=payload.customer_id,
+                    product_id=product.id,
+                    quantity=item.quantity,
+                    recipe_id=recipe_id,
+                    recipe_version_id=version_id,
+                    firing_line_id=item.firing_line_id,
+                    materials_applied=item.materials_applied,
+                    material_grams_per_piece=item.material_grams_per_piece,
+                    techniques=item.techniques,
+                    additionals=item.additionals,
+                    days_adjustment=item.days_adjustment,
+                    waiting_days=item.waiting_days,
+                    other_costs=item.other_costs,
+                    markup_percent=item.markup_percent,
+                    commercial_sale_unit_price=item.commercial_sale_unit_price,
+                )
+                calculation = (
+                    await self._quotations.calculate(quotation_input)
+                    if item.firing_line_id is not None
+                    else await self._quotations.calculate_with_firing_estimate(
+                        quotation_input, estimate
+                    )
                 )
                 warnings.extend(calculation.warnings)
 
@@ -414,9 +560,40 @@ class QuotationBuilderService:
                     recipe_version_id=version_id,
                     recipe_version_fingerprint_snapshot=version_fingerprint,
                     recipe_auto_selected=auto_selected,
+                    materials_applied_input=item.materials_applied,
                     material_grams_per_piece=item.material_grams_per_piece,
-                    kiln_id=payload.kiln_id,
-                    production_snapshot=line_snapshot,
+                    firing_id=calculation.firing_id if calculation else None,
+                    firing_line_id=calculation.firing_line_id if calculation else None,
+                    firing_code_snapshot=(
+                        calculation.firing_code_snapshot if calculation else None
+                    ),
+                    kiln_id=item.factor_kiln_id or item.low_kiln_id or payload.kiln_id,
+                    low_kiln_id=(
+                        line_snapshot.get("low_kiln_id") if line_snapshot else item.low_kiln_id
+                    )
+                    or payload.kiln_id,
+                    high_kiln_id=(
+                        line_snapshot.get("high_kiln_id") if line_snapshot else item.high_kiln_id
+                    )
+                    or payload.kiln_id,
+                    factor_kiln_id=(
+                        line_snapshot.get("factor_kiln_id")
+                        if line_snapshot
+                        else item.factor_kiln_id
+                    )
+                    or payload.kiln_id,
+                    production_snapshot={
+                        **(
+                            {
+                                "source": "CONFIRMED_FIRING_LINE",
+                                **calculation.firing_snapshot,
+                            }
+                            if calculation and item.firing_line_id is not None
+                            else line_snapshot
+                        ),
+                        "materials_applied_input": item.materials_applied,
+                        "commercial_sale_unit_price_input": item.commercial_sale_unit_price,
+                    },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
                         if calculation
@@ -450,6 +627,7 @@ class QuotationBuilderService:
                     suggested_commercial_unit_price=(
                         calculation.suggested_commercial_unit_price if calculation else ZERO
                     ),
+                    commercial_sale_unit_price_input=item.commercial_sale_unit_price,
                     commercial_sale_unit_price=(
                         calculation.commercial_sale_unit_price if calculation else ZERO
                     ),
@@ -463,6 +641,10 @@ class QuotationBuilderService:
                         calculation.effective_markup_percent if calculation else ZERO
                     ),
                     commercial_subtotal=(calculation.commercial_subtotal if calculation else ZERO),
+                    commercial_unit_price_with_tax=(
+                        calculation.commercial_unit_price_with_tax if calculation else ZERO
+                    ),
+                    commercial_total=(calculation.commercial_total if calculation else ZERO),
                     tax_percentage_snapshot=(calculation.tax_percentage if calculation else ZERO),
                     tax_rate_source_snapshot=(
                         calculation.tax_rate_source if calculation else "COMMERCIAL_SETTINGS"
@@ -473,13 +655,15 @@ class QuotationBuilderService:
                         else ZERO
                     ),
                     source_fingerprint=item_fingerprint,
-                    warnings=_unique(warnings),
+                    warnings=_output_warnings(warnings),
                     complete=not any(
                         code in warnings
                         for code in (
                             "QUANTITY_REQUIRED",
                             "PRODUCTION_DIMENSIONS_REQUIRED",
                             "KILN_REQUIRED",
+                            "LOW_KILN_REQUIRED",
+                            "HIGH_KILN_REQUIRED",
                             "KILN_CAPACITY_EXCEEDED",
                             "RECIPE_REQUIRED",
                             "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
@@ -492,6 +676,21 @@ class QuotationBuilderService:
         subtotal = sum((item.commercial_subtotal for item in item_outputs), ZERO)
         tax_amount = sum((item.tax_amount for item in item_outputs), ZERO)
         total = subtotal + tax_amount
+        if production.get("source") == "CONFIRMED_FIRING_LINES":
+            production = _confirmed_production_summary(production, item_outputs)
+            firing_total = sum((item.firing_cost for item in item_outputs), ZERO)
+            firing_tax_percentage = settings.tax_percent or ZERO
+            firing_tax_amount = firing_total * firing_tax_percentage / Decimal(100)
+            production.update(
+                {
+                    "total_cost": firing_total,
+                    "tax_percentage": firing_tax_percentage,
+                    "tax_amount": firing_tax_amount,
+                    "total_with_tax": firing_total + firing_tax_amount,
+                    "currency_code": settings.currency_code or "PEN",
+                    "currency_symbol": settings.currency_symbol or "S/",
+                }
+            )
         tax_rates = {item.tax_percentage_snapshot for item in item_outputs}
         tax_sources = {item.tax_rate_source_snapshot for item in item_outputs}
         header_warnings = list(production_warnings)
@@ -590,7 +789,7 @@ class QuotationBuilderService:
         row.firing_id = None
         row.firing_line_id = None
         row.firing_code_snapshot = None
-        row.firing_snapshot = preview.production_summary
+        row.firing_snapshot = jsonable_encoder(preview.production_summary)
         row.materials_calculated = sum((item.materials_calculated for item in preview.items), ZERO)
         row.materials_applied = sum((item.materials_applied for item in preview.items), ZERO)
         row.firing_cost = sum((item.firing_cost for item in preview.items), ZERO)
@@ -657,7 +856,7 @@ class QuotationBuilderService:
                     material_grams_per_piece=item.material_grams_per_piece,
                     kiln_id=item.kiln_id,
                     kiln_snapshot=preview.kiln_snapshot,
-                    production_snapshot=item.production_snapshot,
+                    production_snapshot=jsonable_encoder(item.production_snapshot),
                     techniques_snapshot=item.techniques,
                     additionals_snapshot=item.additionals,
                     other_costs_snapshot=item.other_costs,
@@ -838,7 +1037,16 @@ class QuotationBuilderService:
                     quantity=item.quantity,
                     recipe_id=item.recipe_id,
                     recipe_version_id=item.recipe_version_id,
+                    materials_applied=item.production_snapshot.get("materials_applied_input"),
                     material_grams_per_piece=item.material_grams_per_piece,
+                    firing_line_id=(
+                        item.production_snapshot.get("firing_line_id")
+                        if item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
+                        else None
+                    ),
+                    low_kiln_id=item.production_snapshot.get("low_kiln_id") or item.kiln_id,
+                    high_kiln_id=item.production_snapshot.get("high_kiln_id") or item.kiln_id,
+                    factor_kiln_id=item.production_snapshot.get("factor_kiln_id") or item.kiln_id,
                     techniques=[self._technique_input(value) for value in item.techniques_snapshot],
                     additionals=[
                         self._additional_input(value) for value in item.additionals_snapshot
@@ -849,7 +1057,10 @@ class QuotationBuilderService:
                     days_adjustment=item.days_adjustment,
                     waiting_days=item.waiting_days,
                     markup_percent=item.markup_percent,
-                    commercial_sale_unit_price=item.commercial_sale_unit_price,
+                    commercial_sale_unit_price=item.production_snapshot.get(
+                        "commercial_sale_unit_price_input",
+                        item.commercial_sale_unit_price,
+                    ),
                     sort_order=item.sort_order,
                 )
                 for item in row.items
@@ -867,10 +1078,6 @@ class QuotationBuilderService:
             item.product_length_snapshot,
             item.product_width_snapshot,
             item.product_height_snapshot,
-            item.kiln_id,
-            item.recipe_id,
-            item.recipe_version_id,
-            item.material_grams_per_piece,
         )
         blocked = {
             "KILN_CAPACITY_EXCEEDED",
@@ -879,9 +1086,25 @@ class QuotationBuilderService:
             "PRODUCTION_DIMENSIONS_REQUIRED",
             "QUANTITY_REQUIRED",
             "KILN_REQUIRED",
+            "LOW_KILN_REQUIRED",
+            "HIGH_KILN_REQUIRED",
         }
-        return all(value is not None for value in required) and not blocked.intersection(
-            item.calculation_warnings
+        firing_complete = bool(
+            item.kiln_id or item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
+        )
+        materials_complete = bool(
+            item.production_snapshot.get("materials_applied_input") is not None
+            or (
+                item.recipe_id is not None
+                and item.recipe_version_id is not None
+                and item.material_grams_per_piece is not None
+            )
+        )
+        return (
+            all(value is not None for value in required)
+            and firing_complete
+            and materials_complete
+            and not blocked.intersection(item.calculation_warnings)
         )
 
     def _stored_output(self, row: Quotation) -> QuotationBuilderOut:
@@ -912,9 +1135,16 @@ class QuotationBuilderService:
                 recipe_id=item.recipe_id,
                 recipe_version_id=item.recipe_version_id,
                 recipe_version_fingerprint_snapshot=(item.recipe_version_fingerprint_snapshot),
+                materials_applied_input=item.production_snapshot.get("materials_applied_input"),
                 material_grams_per_piece=item.material_grams_per_piece,
+                firing_id=item.production_snapshot.get("firing_id"),
+                firing_line_id=item.production_snapshot.get("firing_line_id"),
+                firing_code_snapshot=item.production_snapshot.get("firing_code"),
                 kiln_id=item.kiln_id,
-                production_snapshot=item.production_snapshot,
+                low_kiln_id=item.production_snapshot.get("low_kiln_id") or item.kiln_id,
+                high_kiln_id=item.production_snapshot.get("high_kiln_id") or item.kiln_id,
+                factor_kiln_id=item.production_snapshot.get("factor_kiln_id") or item.kiln_id,
+                production_snapshot=_confirmed_item_snapshot(item.production_snapshot),
                 techniques=item.techniques_snapshot,
                 additionals=item.additionals_snapshot,
                 other_costs=item.other_costs_snapshot,
@@ -932,16 +1162,26 @@ class QuotationBuilderService:
                 markup_percent=item.markup_percent,
                 calculated_sale_unit_price=item.calculated_sale_unit_price,
                 suggested_commercial_unit_price=item.suggested_commercial_unit_price,
+                commercial_sale_unit_price_input=item.production_snapshot.get(
+                    "commercial_sale_unit_price_input",
+                    item.commercial_sale_unit_price,
+                ),
                 commercial_sale_unit_price=item.commercial_sale_unit_price,
                 effective_profit_unit=item.effective_profit_unit,
                 effective_profit_total=item.effective_profit_total,
                 effective_markup_percent=item.effective_markup_percent,
                 commercial_subtotal=item.commercial_subtotal,
+                commercial_unit_price_with_tax=(
+                    (item.commercial_subtotal + item.tax_amount) / Decimal(item.quantity)
+                    if item.quantity
+                    else ZERO
+                ),
+                commercial_total=item.commercial_subtotal + item.tax_amount,
                 tax_percentage_snapshot=item.tax_percentage_snapshot,
                 tax_rate_source_snapshot=item.tax_rate_source_snapshot,
                 tax_amount=item.tax_amount,
                 source_fingerprint=item.source_fingerprint,
-                warnings=item.calculation_warnings,
+                warnings=_output_warnings(item.calculation_warnings),
                 complete=self._item_complete(item),
                 sort_order=item.sort_order,
             )
@@ -975,7 +1215,7 @@ class QuotationBuilderService:
             kiln_snapshot=next(
                 (item.kiln_snapshot for item in row.items if item.kiln_snapshot), {}
             ),
-            production_summary=row.firing_snapshot,
+            production_summary=_confirmed_production_summary(row.firing_snapshot, item_outputs),
             items=item_outputs,
             item_count=len(item_outputs),
             commercial_subtotal=row.commercial_subtotal,
@@ -985,7 +1225,7 @@ class QuotationBuilderService:
             total_with_tax=row.total_with_tax,
             currency_code_snapshot=row.currency_code_snapshot,
             currency_symbol_snapshot=row.currency_symbol_snapshot,
-            warnings=row.calculation_warnings,
+            warnings=_output_warnings(row.calculation_warnings),
             complete=complete,
             next_step=next_step,
             source_fingerprint=row.source_fingerprint,

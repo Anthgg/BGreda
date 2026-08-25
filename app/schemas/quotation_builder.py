@@ -42,9 +42,14 @@ class QuotationBuilderItemIn(_Strict):
     dimensions: ProductDimensionCompletionIn = Field(default_factory=ProductDimensionCompletionIn)
     recipe_id: PositiveInt | None = None
     recipe_version_id: PositiveInt | None = None
+    firing_line_id: PositiveInt | None = None
+    materials_applied: Money | None = None
     material_grams_per_piece: Annotated[
         Decimal | None, Field(gt=0, le=1_000_000, max_digits=18, decimal_places=6)
     ] = None
+    low_kiln_id: PositiveInt | None = None
+    high_kiln_id: PositiveInt | None = None
+    factor_kiln_id: PositiveInt | None = None
     techniques: list[TechniqueSelectionIn] = Field(default_factory=list, max_length=100)
     additionals: list[AdditionalSelectionIn] = Field(default_factory=list, max_length=100)
     days_adjustment: Annotated[int, Field(strict=True, ge=-10_000, le=10_000)] = 0
@@ -108,8 +113,15 @@ class QuotationBuilderItemOut(BaseModel):
     recipe_version_id: int | None = None
     recipe_version_fingerprint_snapshot: str | None = None
     recipe_auto_selected: bool = False
+    materials_applied_input: Decimal | None = None
     material_grams_per_piece: Decimal | None = None
+    firing_id: int | None = None
+    firing_line_id: int | None = None
+    firing_code_snapshot: str | None = None
     kiln_id: int | None = None
+    low_kiln_id: int | None = None
+    high_kiln_id: int | None = None
+    factor_kiln_id: int | None = None
     production_snapshot: dict[str, Any] = Field(default_factory=dict)
     techniques: list[dict[str, Any]] = Field(default_factory=list)
     additionals: list[dict[str, Any]] = Field(default_factory=list)
@@ -128,11 +140,14 @@ class QuotationBuilderItemOut(BaseModel):
     markup_percent: Decimal = Decimal(100)
     calculated_sale_unit_price: Decimal = Decimal(0)
     suggested_commercial_unit_price: Decimal = Decimal(0)
+    commercial_sale_unit_price_input: Decimal | None = None
     commercial_sale_unit_price: Decimal = Decimal(0)
     effective_profit_unit: Decimal = Decimal(0)
     effective_profit_total: Decimal = Decimal(0)
     effective_markup_percent: Decimal = Decimal(0)
     commercial_subtotal: Decimal = Decimal(0)
+    commercial_unit_price_with_tax: Decimal = Decimal(0)
+    commercial_total: Decimal = Decimal(0)
     tax_percentage_snapshot: Decimal = Decimal(0)
     tax_rate_source_snapshot: str = "COMMERCIAL_SETTINGS"
     tax_amount: Decimal = Decimal(0)
