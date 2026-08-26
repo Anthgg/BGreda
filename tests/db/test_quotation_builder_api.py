@@ -448,3 +448,85 @@ async def test_mixed_tax_rates_use_an_effective_header_rate_and_explicit_pdf_lab
     ).scalar_one()
     document = build_quotation_pdf_document(row)
     assert document.totals.tax_label.startswith("IGV (tasa efectiva ")
+
+
+@pytest.mark.asyncio
+async def test_pdf_preview_in_memory_and_saved_draft_and_no_mutation(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.quotation_pdf import QuotationPdfService
+
+    # Mock de render WeasyPrint para garantizar ejecucion sin dependencia de binarios C del OS
+    monkeypatch.setattr(
+        QuotationPdfService,
+        "render_pdf_from_html",
+        lambda self, html: b"%PDF-1.4 mock preview",
+    )
+
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+
+    # 1. Contar registros iniciales
+    initial_quotes = (await db_session.execute(select(func.count(Quotation.id)))).scalar_one()
+    initial_firings = (await db_session.execute(select(func.count(Firing.id)))).scalar_one()
+
+    # 2. Preview en memoria POST
+    preview_pdf_res = await api.post(
+        f"{BUILDER}/pdf-preview",
+        json=payload,
+        headers=head(admin_csrf),
+    )
+    assert preview_pdf_res.status_code == 200, preview_pdf_res.text
+    assert preview_pdf_res.headers["content-type"] == "application/pdf"
+    assert preview_pdf_res.content == b"%PDF-1.4 mock preview"
+    assert "BORRADOR" in preview_pdf_res.headers.get("content-disposition", "")
+
+    # 3. Verificar NINGUNA mutacion en base de datos
+    after_quotes = (await db_session.execute(select(func.count(Quotation.id)))).scalar_one()
+    after_firings = (await db_session.execute(select(func.count(Firing.id)))).scalar_one()
+    assert initial_quotes == after_quotes
+    assert initial_firings == after_firings
+
+    # 4. Crear borrador persistido
+    create_res = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert create_res.status_code == 201, create_res.text
+    draft = create_res.json()
+    draft_id = draft["id"]
+
+    # 5. Preview GET del borrador guardado
+    get_preview_res = await api.get(f"{BUILDER}/{draft_id}/pdf-preview")
+    assert get_preview_res.status_code == 200
+    assert get_preview_res.headers["content-type"] == "application/pdf"
+
+    # 6. El endpoint oficial GET /quotations/{id}/pdf SIGUE BLOQUEADO en 409
+    official_pdf_draft = await api.get(f"{QUOTATIONS}/{draft_id}/pdf")
+    assert official_pdf_draft.status_code == 409
+    assert official_pdf_draft.json()["error"]["code"] == "QUOTATION_DRAFT_PDF_BLOCKED"
+
+    # 7. Confirmar y verificar que el endpoint oficial funciona con 200
+    confirm_res = await api.post(
+        f"{BUILDER}/{draft_id}/confirm",
+        json={"expected_updated_at": draft["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert confirm_res.status_code == 200
+
+    official_pdf_confirmed = await api.get(f"{QUOTATIONS}/{draft_id}/pdf")
+    assert official_pdf_confirmed.status_code == 200
+    assert official_pdf_confirmed.headers["content-type"] == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_pdf_preview_empty_blocked(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+) -> None:
+    empty_res = await api.post(
+        f"{BUILDER}/pdf-preview",
+        json={"items": []},
+        headers=head(admin_csrf),
+    )
+    assert empty_res.status_code == 409
+    assert empty_res.json()["error"]["code"] == "QUOTATION_BUILDER_INCOMPLETE"

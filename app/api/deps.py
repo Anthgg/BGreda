@@ -316,8 +316,9 @@ async def get_quotation_builder_service(
     sequences: SequenceServiceDep,
     firings: FiringServiceDep,
     quotations: QuotationServiceDep,
+    pdf: QuotationPdfServiceDep,
 ) -> QuotationBuilderService:
-    return QuotationBuilderService(session, audit, sequences, firings, quotations)
+    return QuotationBuilderService(session, audit, sequences, firings, quotations, pdf=pdf)
 
 
 QuotationBuilderServiceDep = Annotated[

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.core.errors import APIError
 from app.documents.quotation import (
     QuotationPdfDocument,
+    build_draft_quotation_pdf_document,
     build_quotation_pdf_document,
     sanitize_pdf_filename,
 )
@@ -22,6 +24,10 @@ from app.models.quotations import Quotation, QuotationStatus
 from app.models.settings import SINGLETON_ID, CommercialSettings, CompanySettings
 from app.services.quotations import QuotationNotFoundError
 from app.services.storage import ObjectStorage, sniff_content_type
+
+if TYPE_CHECKING:
+    from app.models.masters import Partner
+    from app.schemas.quotation_builder import QuotationBuilderOut
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +104,23 @@ class QuotationPdfService:
             logo_data_uri=logo_data_uri,
         )
 
+    def build_draft_document_model(
+        self,
+        quotation_out: QuotationBuilderOut,
+        customer: Partner | None = None,
+        company_settings: CompanySettings | None = None,
+        commercial_settings: CommercialSettings | None = None,
+        logo_data_uri: str | None = None,
+    ) -> QuotationPdfDocument:
+        """Construye el ViewModel segregado del documento de previsualizacion DRAFT."""
+        return build_draft_quotation_pdf_document(
+            quotation_out=quotation_out,
+            customer=customer,
+            company_settings=company_settings,
+            commercial_settings=commercial_settings,
+            logo_data_uri=logo_data_uri,
+        )
+
     def render_html(self, document_model: QuotationPdfDocument) -> str:
         """Renderiza la plantilla HTML a partir del ViewModel."""
         return self._template.render(doc=document_model)
@@ -107,6 +130,33 @@ class QuotationPdfService:
         import weasyprint
 
         return weasyprint.HTML(string=html_content).write_pdf()
+
+    async def render_draft_pdf(
+        self,
+        quotation_out: QuotationBuilderOut,
+        customer: Partner | None = None,
+    ) -> tuple[bytes, str]:
+        """Renderiza la previsualizacion efimera del PDF comercial para borradores DRAFT."""
+        company_settings = await self._get_company_settings()
+        commercial_settings = await self._get_commercial_settings()
+        logo_data_uri = await self._resolve_logo_data_uri(company_settings)
+
+        doc_model = self.build_draft_document_model(
+            quotation_out=quotation_out,
+            customer=customer,
+            company_settings=company_settings,
+            commercial_settings=commercial_settings,
+            logo_data_uri=logo_data_uri,
+        )
+
+        html_content = self.render_html(doc_model)
+        pdf_bytes = await asyncio.to_thread(self.render_pdf_from_html, html_content)
+
+        customer_name = customer.name if customer else quotation_out.customer_name_snapshot
+        code_label = quotation_out.code or "BORRADOR"
+        filename = sanitize_pdf_filename(code_label, customer_name)
+
+        return pdf_bytes, filename
 
     async def get_quotation_pdf(self, quotation_id: int) -> tuple[bytes, str]:
         """Obtiene y renderiza el PDF comercial oficial de la cotizacion."""

@@ -1,6 +1,6 @@
 """API segura y transaccional del Cotizador multiproducto."""
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
 
 from app.api.deps import (
     AdminUserDep,
@@ -28,6 +28,65 @@ async def preview_quotation_builder(
     """Simula costos y produccion sin persistir ni consumir correlativos."""
 
     return await service.preview(payload)
+
+
+@router.post(
+    "/pdf-preview",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "Documento PDF comercial de previsualización del borrador.",
+        },
+        409: {"description": "Borrador incompleto o sin productos."},
+    },
+)
+async def preview_quotation_builder_pdf(
+    payload: QuotationBuilderDraftIn,
+    service: QuotationBuilderServiceDep,
+    _: CurrentUserDep,
+) -> Response:
+    """Genera la previsualizacion comercial en PDF de un borrador en memoria."""
+    pdf_bytes, filename = await service.render_pdf_preview(payload)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@router.get(
+    "/{quotation_id}/pdf-preview",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "Documento PDF comercial de previsualización del borrador guardado.",
+        },
+        404: {"description": "Cotización no encontrada."},
+        409: {"description": "Borrador incompleto o sin productos."},
+    },
+)
+async def get_quotation_builder_pdf_preview(
+    quotation_id: int,
+    service: QuotationBuilderServiceDep,
+    _: CurrentUserDep,
+) -> Response:
+    """Genera la previsualizacion comercial en PDF de un borrador guardado por ID."""
+    pdf_bytes, filename = await service.get_pdf_preview(quotation_id)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @router.post("", response_model=QuotationBuilderOut, status_code=status.HTTP_201_CREATED)

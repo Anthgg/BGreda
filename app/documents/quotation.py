@@ -6,11 +6,16 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect as sa_inspect
 
 from app.models.quotations import Quotation, QuotationStatus
 from app.models.settings import CommercialSettings, CompanySettings
+
+if TYPE_CHECKING:
+    from app.models.masters import Partner
+    from app.schemas.quotation_builder import QuotationBuilderOut
 
 
 def format_currency(amount: Decimal | None, symbol: str = "S/") -> str:
@@ -187,6 +192,72 @@ class QuotationPdfDocument:
     bank_accounts: list[BankAccountDocInfo] = field(default_factory=list)
 
 
+def _build_company_doc_info(
+    company_settings: CompanySettings | None,
+    logo_data_uri: str | None = None,
+) -> CompanyDocInfo:
+    address_parts = []
+    if company_settings:
+        if company_settings.address_line1:
+            address_parts.append(company_settings.address_line1)
+        if company_settings.address_line2:
+            address_parts.append(company_settings.address_line2)
+        loc = [
+            p
+            for p in (
+                company_settings.district,
+                company_settings.province,
+                company_settings.department,
+            )
+            if p
+        ]
+        if loc:
+            address_parts.append(", ".join(loc))
+
+    return CompanyDocInfo(
+        legal_name=company_settings.legal_name if company_settings else None,
+        trade_name=company_settings.trade_name if company_settings else None,
+        tax_id=company_settings.tax_id if company_settings else None,
+        address=" - ".join(address_parts) if address_parts else None,
+        phone=(company_settings.phone or company_settings.mobile) if company_settings else None,
+        email=company_settings.email if company_settings else None,
+        website=company_settings.website if company_settings else None,
+        logo_data_uri=logo_data_uri,
+    )
+
+
+def _build_conditions_doc(
+    commercial_settings: CommercialSettings | None,
+) -> CommercialDocConditions:
+    return CommercialDocConditions(
+        validity_text=f"Cotización válida por {commercial_settings.quote_validity_days} días."
+        if (commercial_settings and commercial_settings.quote_validity_days)
+        else None,
+        general_conditions=commercial_settings.general_conditions if commercial_settings else None,
+        payment_notes=commercial_settings.payment_notes if commercial_settings else None,
+        document_footer=commercial_settings.document_footer if commercial_settings else None,
+    )
+
+
+def _build_bank_accounts_doc(
+    commercial_settings: CommercialSettings | None,
+) -> list[BankAccountDocInfo]:
+    bank_accounts_doc: list[BankAccountDocInfo] = []
+    if commercial_settings and commercial_settings.bank_accounts:
+        for account in commercial_settings.bank_accounts:
+            if account.bank_name or account.account_number or account.cci:
+                bank_accounts_doc.append(
+                    BankAccountDocInfo(
+                        bank_name=account.bank_name,
+                        account_holder=account.account_holder,
+                        account_number=account.account_number,
+                        cci=account.cci,
+                        notes=account.notes,
+                    )
+                )
+    return bank_accounts_doc
+
+
 def build_quotation_pdf_document(
     quotation: Quotation,
     company_settings: CompanySettings | None = None,
@@ -207,34 +278,7 @@ def build_quotation_pdf_document(
     )
 
     # 1. Informacion de empresa
-    address_parts = []
-    if company_settings:
-        if company_settings.address_line1:
-            address_parts.append(company_settings.address_line1)
-        if company_settings.address_line2:
-            address_parts.append(company_settings.address_line2)
-        loc = [
-            p
-            for p in (
-                company_settings.district,
-                company_settings.province,
-                company_settings.department,
-            )
-            if p
-        ]
-        if loc:
-            address_parts.append(", ".join(loc))
-
-    company_doc = CompanyDocInfo(
-        legal_name=company_settings.legal_name if company_settings else None,
-        trade_name=company_settings.trade_name if company_settings else None,
-        tax_id=company_settings.tax_id if company_settings else None,
-        address=" - ".join(address_parts) if address_parts else None,
-        phone=(company_settings.phone or company_settings.mobile) if company_settings else None,
-        email=company_settings.email if company_settings else None,
-        website=company_settings.website if company_settings else None,
-        logo_data_uri=logo_data_uri,
-    )
+    company_doc = _build_company_doc_info(company_settings, logo_data_uri)
 
     # 2. Informacion de cliente (EXCLUSIVAMENTE DESDE SNAPSHOTS)
     customer_doc = CustomerDocInfo(
@@ -361,29 +405,157 @@ def build_quotation_pdf_document(
     )
 
     # 6. Condiciones comerciales
-    conditions_doc = CommercialDocConditions(
-        validity_text=f"Cotización válida por {commercial_settings.quote_validity_days} días."
-        if (commercial_settings and commercial_settings.quote_validity_days)
-        else None,
-        general_conditions=commercial_settings.general_conditions if commercial_settings else None,
-        payment_notes=commercial_settings.payment_notes if commercial_settings else None,
-        document_footer=commercial_settings.document_footer if commercial_settings else None,
-    )
+    conditions_doc = _build_conditions_doc(commercial_settings)
 
     # 7. Cuentas bancarias comerciales
-    bank_accounts_doc: list[BankAccountDocInfo] = []
-    if commercial_settings and commercial_settings.bank_accounts:
-        for account in commercial_settings.bank_accounts:
-            if account.bank_name or account.account_number or account.cci:
-                bank_accounts_doc.append(
-                    BankAccountDocInfo(
-                        bank_name=account.bank_name,
-                        account_holder=account.account_holder,
-                        account_number=account.account_number,
-                        cci=account.cci,
-                        notes=account.notes,
-                    )
-                )
+    bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
+
+    return QuotationPdfDocument(
+        company=company_doc,
+        customer=customer_doc,
+        document=document_header,
+        items=items,
+        totals=totals_doc,
+        conditions=conditions_doc,
+        bank_accounts=bank_accounts_doc,
+    )
+
+
+def build_draft_quotation_pdf_document(
+    quotation_out: QuotationBuilderOut,
+    customer: Partner | None = None,
+    company_settings: CompanySettings | None = None,
+    commercial_settings: CommercialSettings | None = None,
+    logo_data_uri: str | None = None,
+) -> QuotationPdfDocument:
+    """Construye el ViewModel del PDF comercial de previsualizacion a partir del borrador DRAFT."""
+    currency_symbol = (
+        quotation_out.currency_symbol_snapshot
+        or (commercial_settings.currency_symbol if commercial_settings else None)
+        or "S/"
+    )
+    currency_code = (
+        quotation_out.currency_code_snapshot
+        or (commercial_settings.currency_code if commercial_settings else None)
+        or "PEN"
+    )
+
+    # 1. Informacion de empresa
+    company_doc = _build_company_doc_info(company_settings, logo_data_uri)
+
+    # 2. Informacion de cliente (del maestro asociado o datos del borrador)
+    if customer is not None:
+        customer_address_parts = []
+        if customer.address:
+            customer_address_parts.append(customer.address)
+        loc = [
+            p
+            for p in (
+                customer.district,
+                customer.province,
+                customer.department,
+            )
+            if p
+        ]
+        if loc:
+            customer_address_parts.append(", ".join(loc))
+        customer_doc = CustomerDocInfo(
+            name=customer.name,
+            trade_name=None,
+            document_type=customer.document_type.value if customer.document_type else None,
+            document_number=customer.document_number,
+            address=" - ".join(customer_address_parts) if customer_address_parts else None,
+            ubigeo=customer.ubigeo_code,
+            email=customer.email,
+            phone=customer.phone or customer.mobile,
+        )
+    else:
+        customer_doc = CustomerDocInfo(
+            name=quotation_out.customer_name_snapshot or "Cliente General",
+            trade_name=None,
+            document_type=None,
+            document_number=None,
+            address=None,
+            ubigeo=None,
+            email=None,
+            phone=None,
+        )
+
+    # 3. Informacion del documento
+    emission_date_val = quotation_out.updated_at or quotation_out.created_at or datetime.now()
+    emission_date_str = format_date_display(emission_date_val)
+
+    validity_date_str = None
+    if commercial_settings and commercial_settings.quote_validity_days:
+        validity_days = commercial_settings.quote_validity_days
+        validity_date_str = f"{validity_days} días calendario"
+
+    document_header = DocumentHeaderInfo(
+        title="COTIZACIÓN",
+        code=quotation_out.code or "BORRADOR",
+        name=quotation_out.name,
+        status="DRAFT",
+        is_cancelled=False,
+        emission_date=emission_date_str,
+        validity_date=validity_date_str,
+        currency_symbol=currency_symbol,
+        currency_code=currency_code,
+    )
+
+    # 4. Items comerciales
+    items: list[QuotationDocItem] = []
+    for index, line in enumerate(quotation_out.items, start=1):
+        grammage_str = (
+            f"{format_quantity(line.product_grammage)} g"
+            if line.product_grammage is not None and line.product_grammage > 0
+            else None
+        )
+        quantity = line.quantity or 0
+        items.append(
+            QuotationDocItem(
+                item_number=index,
+                product_name=line.product_name,
+                product_reference=line.product_internal_reference,
+                material=line.product_material,
+                grammage_formatted=grammage_str,
+                dimensions_formatted=format_dimensions(
+                    width=line.width,
+                    height=line.height,
+                    length=line.length,
+                    depth=line.depth,
+                ),
+                quantity=quantity,
+                quantity_formatted=format_quantity(quantity),
+                unit_of_measure=line.product_uom or "NIU",
+                unit_price_formatted=format_currency(
+                    line.commercial_sale_unit_price, currency_symbol
+                ),
+                subtotal_formatted=format_currency(line.commercial_subtotal, currency_symbol),
+            )
+        )
+
+    # 5. Totales e impuestos comerciales
+    tax_percent = quotation_out.tax_percentage_snapshot
+    commercial_tax_amount = quotation_out.tax_amount
+    tax_label = (
+        f"IGV (tasa efectiva {format_quantity(tax_percent)}%)"
+        if quotation_out.tax_rate_source_snapshot == "MIXED"
+        else format_tax_label(tax_percent)
+    )
+    totals_doc = QuotationDocTotals(
+        subtotal_formatted=format_currency(quotation_out.commercial_subtotal, currency_symbol),
+        tax_percentage=tax_percent,
+        tax_label=tax_label,
+        tax_amount_formatted=format_currency(commercial_tax_amount, currency_symbol),
+        total_formatted=format_currency(quotation_out.total_with_tax, currency_symbol),
+        unit_price_with_tax_formatted=None,
+    )
+
+    # 6. Condiciones comerciales
+    conditions_doc = _build_conditions_doc(commercial_settings)
+
+    # 7. Cuentas bancarias comerciales
+    bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
 
     return QuotationPdfDocument(
         company=company_doc,

@@ -43,6 +43,7 @@ from app.schemas.quotations import (
 )
 from app.services.audit import AuditRecorder
 from app.services.firings import FiringService
+from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import FiringEstimateOverride, QuotationService
 from app.services.sequences import SequenceService
 
@@ -149,7 +150,10 @@ def _confirmed_production_summary(
         (_snapshot_decimal(item.production_snapshot.get("base_cost")) for item in confirmed),
         ZERO,
     )
-    firing_total = sum((item.firing_cost for item in confirmed), ZERO)
+    firing_total = sum(
+        (_snapshot_decimal(item.production_snapshot.get("total_cost")) for item in confirmed),
+        ZERO,
+    )
     weighted_factor = sum(
         (
             _snapshot_decimal(item.production_snapshot.get("base_cost"))
@@ -158,35 +162,26 @@ def _confirmed_production_summary(
         ),
         ZERO,
     )
-    weighted_occupancy = ZERO
-    weighted_volume = ZERO
-    for item in confirmed:
-        snapshot = item.production_snapshot
-        volume = _snapshot_decimal(snapshot.get("total_volume_cm3"))
-        occupancy_value = snapshot.get("occupancy_percentage")
-        occupancy = _snapshot_decimal(occupancy_value)
-        if occupancy_value is None:
-            capacities = {
-                _snapshot_decimal(session.get("capacity_snapshot"))
-                for session in snapshot.get("sessions", [])
-                if isinstance(session, dict) and session.get("capacity_snapshot") is not None
-            }
-            capacities.discard(ZERO)
-            if capacities:
-                # Los snapshots anteriores a Fase 005.11 no guardaban el horno
-                # de factor. El de menor capacidad es el que gobernaba el tramo
-                # comercial en las hojas existentes y permite reconstruirlas.
-                occupancy = volume / min(capacities) * Decimal(100)
-            else:
-                continue
-        weighted_occupancy += occupancy * volume
-        weighted_volume += volume
+    weighted_occupancy = sum(
+        (
+            _snapshot_decimal(item.production_snapshot.get("total_volume_cm3"))
+            * _snapshot_decimal(item.production_snapshot.get("occupancy_percentage"))
+            for item in confirmed
+        ),
+        ZERO,
+    )
+    weighted_volume = sum(
+        (
+            _snapshot_decimal(item.production_snapshot.get("total_volume_cm3"))
+            for item in confirmed
+            if item.production_snapshot.get("occupancy_percentage") is not None
+        ),
+        ZERO,
+    )
 
     enriched = dict(summary)
     enriched.update(
         {
-            "source": "CONFIRMED_FIRING_LINES",
-            "estimated": False,
             "complete": True,
             "total_volume_cm3": str(total_volume),
             "subtotal": str(base_total),
@@ -213,12 +208,14 @@ class QuotationBuilderService:
         sequences: SequenceService,
         firings: FiringService,
         quotations: QuotationService,
+        pdf: QuotationPdfService | None = None,
     ) -> None:
         self._session = session
         self._audit = audit
         self._sequences = sequences
         self._firings = firings
         self._quotations = quotations
+        self._pdf = pdf or QuotationPdfService(session)
 
     async def _get(self, quotation_id: int, *, for_update: bool = False) -> Quotation:
         stmt = (
@@ -1237,3 +1234,35 @@ class QuotationBuilderService:
 
     async def get(self, quotation_id: int) -> QuotationBuilderOut:
         return self._stored_output(await self._get(quotation_id))
+
+    async def render_pdf_preview(self, payload: QuotationBuilderDraftIn) -> tuple[bytes, str]:
+        """Genera la previsualizacion comercial en PDF de un borrador en memoria sin persistir."""
+        calculated = await self.preview(payload)
+        if not calculated.items:
+            raise QuotationBuilderIncompleteError(
+                "Agregue al menos un producto para generar la vista previa"
+            )
+
+        customer: Partner | None = None
+        if calculated.customer_id:
+            customer = await self._session.get(Partner, calculated.customer_id)
+
+        return await self._pdf.render_draft_pdf(calculated, customer=customer)
+
+    async def get_pdf_preview(self, quotation_id: int) -> tuple[bytes, str]:
+        """Genera la previsualizacion comercial en PDF de un borrador guardado por ID."""
+        quotation = await self._get(quotation_id)
+        if quotation.status is not QuotationStatus.DRAFT:
+            return await self._pdf.get_quotation_pdf(quotation_id)
+
+        calculated = await self.get(quotation_id)
+        if not calculated.items:
+            raise QuotationBuilderIncompleteError(
+                "Agregue al menos un producto para generar la vista previa"
+            )
+
+        customer: Partner | None = None
+        if calculated.customer_id:
+            customer = await self._session.get(Partner, calculated.customer_id)
+
+        return await self._pdf.render_draft_pdf(calculated, customer=customer)
