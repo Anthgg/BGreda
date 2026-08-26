@@ -13,6 +13,14 @@ from app.models.firings import (
     KilnOccupancyFactor,
     KilnRate,
 )
+from app.models.identity import (
+    IdentityDocumentType,
+    IdentityLookupAuditEvent,
+    IdentityLookupCache,
+    IdentityLookupDailyStat,
+    IdentityLookupProviderMetric,
+    ProviderName,
+)
 from app.models.importing import (
     ImportAction,
     ImportBatch,
@@ -81,6 +89,11 @@ __all__ = [
     "FiringLine",
     "FiringStatus",
     "FiringType",
+    "IdentityDocumentType",
+    "IdentityLookupAuditEvent",
+    "IdentityLookupCache",
+    "IdentityLookupDailyStat",
+    "IdentityLookupProviderMetric",
     "ImportAction",
     "ImportBatch",
     "ImportEntity",
@@ -100,6 +113,7 @@ __all__ = [
     "ProductCategory",
     "ProductType",
     "Profile",
+    "ProviderName",
     "Quotation",
     "QuotationAdditional",
     "QuotationOtherCost",

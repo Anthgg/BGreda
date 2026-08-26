@@ -190,7 +190,9 @@ async def reset_database(
                 "firing_lines, firing_kiln_sessions, firings, "
                 "kiln_occupancy_factors, kiln_rates, kilns, "
                 "import_rows, import_batches, stock_movements, stock_balances, "
-                "stock_locations, products, partners, product_categories, pos_categories "
+                "stock_locations, products, partners, product_categories, pos_categories, "
+                "identity_lookup_audit_events, identity_lookup_provider_metrics, "
+                "identity_lookup_daily_stats, identity_lookup_cache "
                 "RESTART IDENTITY CASCADE"
             )
         )
