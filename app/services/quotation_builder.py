@@ -147,11 +147,24 @@ def _confirmed_production_summary(
         ZERO,
     )
     base_total = sum(
-        (_snapshot_decimal(item.production_snapshot.get("base_cost")) for item in confirmed),
+        (
+            _snapshot_decimal(
+                item.production_snapshot.get("base_cost")
+                or item.production_snapshot.get("subtotal")
+            )
+            for item in confirmed
+        ),
         ZERO,
     )
     firing_total = sum(
-        (_snapshot_decimal(item.production_snapshot.get("total_cost")) for item in confirmed),
+        (
+            _snapshot_decimal(
+                item.production_snapshot.get("total_cost")
+                or item.production_snapshot.get("allocated_cost")
+                or item.firing_cost
+            )
+            for item in confirmed
+        ),
         ZERO,
     )
     weighted_factor = sum(
@@ -1238,9 +1251,9 @@ class QuotationBuilderService:
     async def render_pdf_preview(self, payload: QuotationBuilderDraftIn) -> tuple[bytes, str]:
         """Genera la previsualizacion comercial en PDF de un borrador en memoria sin persistir."""
         calculated = await self.preview(payload)
-        if not calculated.items:
+        if not calculated.items or not calculated.complete:
             raise QuotationBuilderIncompleteError(
-                "Agregue al menos un producto para generar la vista previa"
+                "La cotización debe estar completa para generar la vista previa"
             )
 
         customer: Partner | None = None
@@ -1256,9 +1269,9 @@ class QuotationBuilderService:
             return await self._pdf.get_quotation_pdf(quotation_id)
 
         calculated = await self.get(quotation_id)
-        if not calculated.items:
+        if not calculated.items or not calculated.complete:
             raise QuotationBuilderIncompleteError(
-                "Agregue al menos un producto para generar la vista previa"
+                "La cotización debe estar completa para generar la vista previa"
             )
 
         customer: Partner | None = None

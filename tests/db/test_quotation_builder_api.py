@@ -530,3 +530,11 @@ async def test_pdf_preview_empty_blocked(
     )
     assert empty_res.status_code == 409
     assert empty_res.json()["error"]["code"] == "QUOTATION_BUILDER_INCOMPLETE"
+
+    incomplete_res = await api.post(
+        f"{BUILDER}/pdf-preview",
+        json={"name": "Incompleta sin cliente", "items": [{"product_id": 1, "quantity": 10}]},
+        headers=head(admin_csrf),
+    )
+    assert incomplete_res.status_code == 409
+    assert incomplete_res.json()["error"]["code"] == "QUOTATION_BUILDER_INCOMPLETE"
