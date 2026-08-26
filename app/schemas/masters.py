@@ -135,6 +135,12 @@ class ProductOut(_Out):
     available_in_pos: bool
     active: bool
     notes: str | None
+    material: str | None = None
+    grammage: Decimal | None = None
+    width: Decimal | None = None
+    height: Decimal | None = None
+    length: Decimal | None = None
+    depth: Decimal | None = None
 
 
 class ProductPage(BaseModel):
@@ -160,6 +166,12 @@ class _ProductFields(_In):
     available_in_pos: bool = False
     active: bool = True
     notes: Annotated[str | None, Field(max_length=2000)] = None
+    material: Annotated[str | None, Field(max_length=200)] = None
+    grammage: Decimal | None = None
+    width: Decimal | None = None
+    height: Decimal | None = None
+    length: Decimal | None = None
+    depth: Decimal | None = None
 
     @field_validator("name", "notes", mode="after")
     @classmethod

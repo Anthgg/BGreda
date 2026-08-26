@@ -780,3 +780,341 @@ async def test_un_cero_configurado_es_una_tasa_no_una_ausencia(
         await api.post(f"{QUOTATIONS}/calculate", json=cuerpo, headers=head(admin_csrf))
     ).json()
     assert "IGV_RATE_NOT_CONFIGURED" in sin_ninguna["warnings"]
+
+
+async def test_quotation_customer_and_product_dimensions_snapshots(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Fase 005.6 y 005.7: Integracion de cliente y producto con snapshots inmutables."""
+    # 1. Crear cliente
+    partner_res = await api.post(
+        "/api/v1/partners",
+        json={
+            "name": "Artesanias & Ceramicas S.A.C.",
+            "reference": "Artesanias Lima",
+            "role": "CLIENT",
+            "document_type": "RUC",
+            "document_number": "20601234567",
+            "address": "Av. Las Flores 456",
+            "ubigeo_code": "150122",
+            "email": "ventas@artesanias.pe",
+            "phone": "987654321",
+        },
+        headers=head(admin_csrf),
+    )
+    assert partner_res.status_code == 201, partner_res.text
+    partner = partner_res.json()
+
+    # 2. Crear producto terminado con dimensiones tecnicas
+    category = await create_category(api, admin_csrf, "Piezas Tecnicas")
+    product_res = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=category["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Jarron Decorativo Andino",
+        base_uom_code="unit",
+        material="Pasta refractaria blanca",
+        grammage="650.5",
+        width="15.0",
+        height="30.0",
+        length="15.0",
+        depth="12.0",
+    )
+    assert product_res.status_code == 201, product_res.text
+    product = product_res.json()
+    assert product["material"] == "Pasta refractaria blanca"
+    assert Decimal(str(product["grammage"])) == Decimal("650.5")
+
+    # 3. Crear receta y quema
+    _, recipe = await _finished_product_and_recipe(api, admin_csrf, suffix="_cli")
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    payload = _quote_payload(product, recipe, firing_line)
+    payload["name"] = "Cotizacion para Decoracion Hotelera"
+    payload["customer_id"] = partner["id"]
+    payload["material_grams_per_piece"] = "650.5"
+    payload["markup_percent"] = "60"
+
+    # 4. Calcular cotizacion
+    calc_res = await api.post(f"{QUOTATIONS}/calculate", json=payload, headers=head(admin_csrf))
+    assert calc_res.status_code == 200, calc_res.text
+    calc = calc_res.json()
+
+    assert calc["name"] == "Cotizacion para Decoracion Hotelera"
+    assert calc["customer_id"] == partner["id"]
+    assert calc["customer_name_snapshot"] == "Artesanias & Ceramicas S.A.C."
+    assert calc["customer_trade_name_snapshot"] == "Artesanias Lima"
+    assert calc["customer_document_type_snapshot"] == "RUC"
+    assert calc["customer_document_number_snapshot"] == "20601234567"
+    assert calc["customer_address_snapshot"] == "Av. Las Flores 456"
+    assert calc["customer_ubigeo_snapshot"] == "150122"
+    assert calc["customer_email_snapshot"] == "ventas@artesanias.pe"
+    assert calc["customer_phone_snapshot"] == "987654321"
+
+    assert calc["product_name_snapshot"] == "Jarron Decorativo Andino"
+    assert calc["product_material_snapshot"] == "Pasta refractaria blanca"
+    assert Decimal(str(calc["product_grammage_snapshot"])) == Decimal("650.5")
+    assert Decimal(str(calc["product_width_snapshot"])) == Decimal("15.0")
+    assert Decimal(str(calc["product_height_snapshot"])) == Decimal("30.0")
+
+    # 5. Crear cotizacion guardada
+    create_res = await api.post(QUOTATIONS, json=payload, headers=head(admin_csrf))
+    assert create_res.status_code == 201, create_res.text
+    created = create_res.json()
+    assert created["id"] is not None
+    assert created["customer_id"] == partner["id"]
+
+    # 6. Modificar el cliente original en la base de datos para comprobar inmutabilidad del snapshot
+    await api.patch(
+        f"/api/v1/partners/{partner['id']}",
+        json={"name": "Nuevo Nombre Modificado", "address": "Otra direccion"},
+        headers=head(admin_csrf),
+    )
+
+    get_res = await api.get(f"{QUOTATIONS}/{created['id']}", headers=head(admin_csrf))
+    assert get_res.status_code == 200
+    stored = get_res.json()
+    assert stored["customer_name_snapshot"] == "Artesanias & Ceramicas S.A.C."
+    assert stored["customer_address_snapshot"] == "Av. Las Flores 456"
+
+    # 7. Listar cotizaciones con filtro por cliente y busqueda
+    list_by_customer = (
+        await api.get(f"{QUOTATIONS}?customer={partner['id']}", headers=head(admin_csrf))
+    ).json()
+    assert list_by_customer["total"] >= 1
+    assert any(item["id"] == created["id"] for item in list_by_customer["items"])
+
+    list_by_search = (
+        await api.get(f"{QUOTATIONS}?search=Hotelera", headers=head(admin_csrf))
+    ).json()
+    assert list_by_search["total"] >= 1
+    assert any(item["id"] == created["id"] for item in list_by_search["items"])
+
+
+async def test_quotation_commercial_pricing_and_confirm_flow(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Fase 005.8 - 005.10: Costeo, adicionales, margen comercial y confirmacion."""
+    category = await create_category(api, admin_csrf, "Precios QA")
+    product_res = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=category["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Taza con Relieve QA",
+        base_uom_code="unit",
+    )
+    product = product_res.json()
+    _, recipe = await _finished_product_and_recipe(api, admin_csrf, suffix="_flow")
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    payload = _quote_payload(product, recipe, firing_line)
+    payload["quantity"] = 20
+    payload["material_grams_per_piece"] = "250"
+    payload["markup_percent"] = "50"
+
+    create_res = await api.post(QUOTATIONS, json=payload, headers=head(admin_csrf))
+    assert create_res.status_code == 201, create_res.text
+    quotation = create_res.json()
+
+    # Comprobar costo interno y redondeo a 0.50
+    final_unit_cost = Decimal(quotation["final_unit_cost"])
+    assert final_unit_cost > Decimal(0)
+    suggested = Decimal(quotation["suggested_commercial_unit_price"])
+    # Debe ser multiplo de 0.50
+    assert (suggested % Decimal("0.50")) == Decimal("0.00")
+
+    # Actualizar con precio comercial manual
+    manual_price = suggested + Decimal("5.00")
+    update_res = await api.put(
+        f"{QUOTATIONS}/{quotation['id']}",
+        json={
+            **payload,
+            "commercial_sale_unit_price": str(manual_price),
+            "expected_source_fingerprint": quotation["source_fingerprint"],
+        },
+        headers=head(admin_csrf),
+    )
+    assert update_res.status_code == 200, update_res.text
+    updated = update_res.json()
+    assert Decimal(updated["commercial_sale_unit_price"]) == manual_price
+    assert Decimal(updated["effective_profit_unit"]) == manual_price - final_unit_cost
+    assert Decimal(updated["commercial_subtotal"]) == manual_price * Decimal(20)
+
+    # Confirmar cotizacion
+    confirm_res = await api.post(
+        f"{QUOTATIONS}/{quotation['id']}/confirm",
+        json={"accept_source_changes": True},
+        headers=head(admin_csrf),
+    )
+    assert confirm_res.status_code == 200, confirm_res.text
+    confirmed = confirm_res.json()
+    assert confirmed["status"] == "CONFIRMED"
+    assert confirmed["confirmed_at"] is not None
+
+    # Ya confirmada es inmutable: intentar editar da 409
+    fail_edit = await api.put(
+        f"{QUOTATIONS}/{quotation['id']}",
+        json={
+            **payload,
+            "expected_source_fingerprint": confirmed["source_fingerprint"],
+        },
+        headers=head(admin_csrf),
+    )
+    assert fail_edit.status_code == 409
+
+
+async def test_dynamic_igv_configuration_and_snapshot_immutability(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Auditoria IGV: El IGV no esta hardcodeado y proviene de commercial_settings.
+
+    Al cambiar la configuracion comercial (ej. a 10%), las cotizaciones nuevas
+    utilizan la nueva tasa. Al emitir/confirmar la cotizacion, la tasa queda
+    congelada inmutablemente.
+    """
+    category = await create_category(api, admin_csrf, "Piezas IGV")
+    product_res = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=category["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Pieza IGV Dinamico",
+        base_uom_code="unit",
+    )
+    product = product_res.json()
+    _, recipe = await _finished_product_and_recipe(api, admin_csrf, suffix="_igv")
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    # 1. Cambiar tasa comercial de IGV a 10%
+    curr_settings = (await api.get("/api/v1/settings/commercial", headers=head(admin_csrf))).json()
+    set_res = await api.put(
+        "/api/v1/settings/commercial",
+        json={"version": curr_settings["version"], "tax_percent": "10.00"},
+        headers=head(admin_csrf),
+    )
+    assert set_res.status_code == 200, set_res.text
+
+    payload = _quote_payload(product, recipe, firing_line)
+    payload["material_grams_per_piece"] = "300"
+    payload["quantity"] = 10
+
+    # 2. Calcular y verificar que usa 10%
+    calc_res = await api.post(f"{QUOTATIONS}/calculate", json=payload, headers=head(admin_csrf))
+    assert calc_res.status_code == 200, calc_res.text
+    calc = calc_res.json()
+    assert Decimal(calc["tax_percentage"]) == Decimal("10.00")
+    assert calc["tax_rate_source"] == "COMMERCIAL_SETTINGS"
+    expected_tax = Decimal(calc["calculated_total"]) * Decimal("0.10")
+    assert Decimal(calc["tax_amount"]) == expected_tax
+    assert Decimal(calc["commercial_total"]) == Decimal(calc["commercial_subtotal"]) * Decimal(
+        "1.10"
+    )
+
+    # 3. Crear y confirmar cotizacion con tasa 10%
+    create_res = await api.post(f"{QUOTATIONS}", json=payload, headers=head(admin_csrf))
+    assert create_res.status_code == 201, create_res.text
+    quote = create_res.json()
+
+    confirm_res = await api.post(
+        f"{QUOTATIONS}/{quote['id']}/confirm",
+        json={"accept_source_changes": True},
+        headers=head(admin_csrf),
+    )
+    assert confirm_res.status_code == 200, confirm_res.text
+    confirmed = confirm_res.json()
+    assert Decimal(confirmed["tax_percentage"]) == Decimal("10.00")
+
+    # 4. Modificar la configuracion comercial a 0% (exento)
+    curr_settings_2 = (
+        await api.get("/api/v1/settings/commercial", headers=head(admin_csrf))
+    ).json()
+    set_res_0 = await api.put(
+        "/api/v1/settings/commercial",
+        json={"version": curr_settings_2["version"], "tax_percent": "0.00"},
+        headers=head(admin_csrf),
+    )
+    assert set_res_0.status_code == 200, set_res_0.text
+
+    # 5. La cotizacion ya emitida NO cambia: su snapshot de IGV se mantiene en 10%
+    get_res = await api.get(f"{QUOTATIONS}/{quote['id']}", headers=head(admin_csrf))
+    assert get_res.status_code == 200, get_res.text
+    persisted = get_res.json()
+    assert Decimal(persisted["tax_percentage"]) == Decimal("10.00")
+    assert Decimal(persisted["tax_amount"]) == expected_tax
+
+    # Restaurar configuracion comercial al 18% estandar
+    curr_settings_3 = (
+        await api.get("/api/v1/settings/commercial", headers=head(admin_csrf))
+    ).json()
+    await api.put(
+        "/api/v1/settings/commercial",
+        json={"version": curr_settings_3["version"], "tax_percent": "18.00"},
+        headers=head(admin_csrf),
+    )
+
+
+async def test_product_list_price_no_auto_update_on_confirmation(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Auditoria Precio: Confirmar cotizacion NO altera el precio de lista del maestro.
+
+    Solo una llamada explicita al endpoint de actualizacion modifica el maestro.
+    """
+    category = await create_category(api, admin_csrf, "Piezas Precio")
+    product_res = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=category["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Pieza Precio Fijo",
+        base_uom_code="unit",
+        sale_price="50.00",
+    )
+    product = product_res.json()
+    assert Decimal(product["sale_price"]) == Decimal("50.00")
+
+    _, recipe = await _finished_product_and_recipe(api, admin_csrf, suffix="_prec")
+    firing_line = await _confirmed_firing_line(api, admin_csrf, db_session, product["id"])
+
+    payload = _quote_payload(product, recipe, firing_line)
+    payload["material_grams_per_piece"] = "250"
+    payload["quantity"] = 10
+
+    # Crear y confirmar
+    create_res = await api.post(f"{QUOTATIONS}", json=payload, headers=head(admin_csrf))
+    quote = create_res.json()
+
+    confirm_res = await api.post(
+        f"{QUOTATIONS}/{quote['id']}/confirm",
+        json={"accept_source_changes": True},
+        headers=head(admin_csrf),
+    )
+    assert confirm_res.status_code == 200
+
+    # Verificar que el producto maestro SIGUE en S/ 50.00 (sin alteracion automatica)
+    prod_check = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
+    assert prod_check.status_code == 200
+    assert Decimal(prod_check.json()["sale_price"]) == Decimal("50.00")
+
+    # Actualizacion manual explicita
+    update_price_res = await api.post(
+        f"{QUOTATIONS}/{quote['id']}/update-product-price",
+        headers=head(admin_csrf),
+    )
+    assert update_price_res.status_code == 200
+    expected_new_price = Decimal(quote["calculated_unit_price"])
+    assert Decimal(update_price_res.json()["new_price"]) == expected_new_price
+
+    # Ahora si se actualizo el producto maestro
+    prod_updated = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
+    assert Decimal(prod_updated.json()["sale_price"]) == expected_new_price

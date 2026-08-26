@@ -23,7 +23,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.precision import money_numeric, percentage_numeric, unit_cost_numeric
+from app.core.precision import (
+    money_numeric,
+    percentage_numeric,
+    quantity_numeric,
+    unit_cost_numeric,
+)
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
 
@@ -198,6 +203,14 @@ class Product(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     notes: Mapped[str | None] = mapped_column(Text)
+
+    #: Dimensiones tecnicas para produccion y cotizador
+    material: Mapped[str | None] = mapped_column(String(200))
+    grammage: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    width: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    height: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    length: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    depth: Mapped[Decimal | None] = mapped_column(quantity_numeric())
 
     __table_args__ = (
         CheckConstraint("length(btrim(internal_reference)) > 0", name="reference_not_blank"),
