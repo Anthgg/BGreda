@@ -522,6 +522,7 @@ async def test_pdf_preview_in_memory_and_saved_draft_and_no_mutation(
 async def test_pdf_preview_empty_blocked(
     api: httpx.AsyncClient,
     admin_csrf: str,
+    db_session: AsyncSession,
 ) -> None:
     empty_res = await api.post(
         f"{BUILDER}/pdf-preview",
@@ -531,9 +532,12 @@ async def test_pdf_preview_empty_blocked(
     assert empty_res.status_code == 409
     assert empty_res.json()["error"]["code"] == "QUOTATION_BUILDER_INCOMPLETE"
 
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    payload["customer_id"] = None
+
     incomplete_res = await api.post(
         f"{BUILDER}/pdf-preview",
-        json={"name": "Incompleta sin cliente", "items": [{"product_id": 1, "quantity": 10}]},
+        json=payload,
         headers=head(admin_csrf),
     )
     assert incomplete_res.status_code == 409
