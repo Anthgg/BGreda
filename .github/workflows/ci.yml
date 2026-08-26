@@ -137,3 +137,62 @@ jobs:
       - name: Detener el contenedor
         if: always()
         run: docker rm -f bgreda-ci || true
+
+  cloudbuild-lint:
+    name: Validar configuración Cloud Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar cloudbuild.yaml — campos requeridos
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          import yaml
+
+          configs = {
+              "cloudbuild.yaml": ["steps", "images", "options", "timeout"],
+              "cloudbuild.migrate.yaml": ["steps", "options", "timeout"],
+          }
+
+          errors = []
+          for filename, required_keys in configs.items():
+              try:
+                  with open(filename, "r") as f:
+                      data = yaml.safe_load(f)
+              except FileNotFoundError:
+                  errors.append(f"{filename}: archivo no encontrado")
+                  continue
+              except yaml.YAMLError as e:
+                  errors.append(f"{filename}: YAML invalido — {e}")
+                  continue
+
+              for key in required_keys:
+                  if key not in data:
+                      errors.append(f"{filename}: falta campo requerido '{key}'")
+
+              steps = data.get("steps", [])
+              for i, step in enumerate(steps):
+                  if "name" not in step:
+                      errors.append(f"{filename}: step[{i}] sin 'name'")
+                  if "args" not in step and "entrypoint" not in step:
+                      errors.append(f"{filename}: step[{i}] sin 'args' ni 'entrypoint'")
+
+              print(f"  {filename}: OK ({len(steps)} steps)")
+
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {e}", file=sys.stderr)
+              sys.exit(1)
+          print("Configuraciones Cloud Build: validas")
+          PYEOF
+
+      - name: Verificar scripts de deploy — sintaxis bash
+        run: |
+          for script in scripts/deploy-backend.sh scripts/smoke-production.sh; do
+            if [ ! -f "$script" ]; then
+              echo "ERROR: $script no encontrado"
+              exit 1
+            fi
+            bash -n "$script" && echo "  $script: sintaxis OK"
+          done

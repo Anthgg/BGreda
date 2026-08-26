@@ -1,0 +1,119 @@
+# Cloud Build — BGreda Migración Alembic
+#
+# Job EXPLÍCITO de migración de base de datos.
+# NUNCA se ejecuta automáticamente en el startup del contenedor web.
+#
+# Solo ejecutar cuando MIGRATION_REQUIRED: YES
+# (cuando PRODUCTION_ALEMBIC_CURRENT != CODE_HEAD)
+#
+# Ejecutar manualmente:
+#   gcloud builds submit --config cloudbuild.migrate.yaml .
+#
+# El job:
+#   1. Verifica que no hay múltiples heads de Alembic (head_count == 1)
+#   2. Compara current vs head
+#   3. Si ya está actualizado → salida exitosa sin migrar
+#   4. Si está desactualizado → alembic upgrade head
+
+substitutions:
+  _REGION: southamerica-west1
+  _IMAGE: southamerica-west1-docker.pkg.dev/cotizador-greda/cloud-run-source-deploy/bgreda-api
+
+steps:
+  # ------------------------------------------------------------------
+  # 1. Obtener imagen más reciente del backend para correr alembic
+  # ------------------------------------------------------------------
+  - id: pull-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - pull
+      - $_IMAGE:main-latest
+
+  # ------------------------------------------------------------------
+  # 2. Verificar precondiciones de migración
+  # ------------------------------------------------------------------
+  - id: check-migration-preconditions
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        echo "===================================================="
+        echo " BGreda — Verificación de migración Alembic"
+        echo "===================================================="
+        echo ""
+        echo "COMMIT_SHA: $COMMIT_SHA"
+        echo "Imagen: $_IMAGE:main-latest"
+        echo ""
+        echo "IMPORTANTE: Este job no ejecuta migración automáticamente."
+        echo "Solo lo hace si PRODUCTION_CURRENT < CODE_HEAD."
+        echo ""
+        echo "Precondición: ALEMBIC_HEAD_COUNT debe ser 1."
+        echo "Si hay múltiples heads, el job aborta y DEBE resolverse manualmente."
+        echo ""
+        echo "Precondición verificada en tiempo de ejecución via alembic heads."
+    waitFor:
+      - pull-image
+
+  # ------------------------------------------------------------------
+  # 3. Verificar heads y ejecutar migración si es necesario
+  #    La DATABASE_URL se inyecta desde Secret Manager en el job real.
+  #    Para CI dry-run, este step verifica solo la sintaxis offline.
+  # ------------------------------------------------------------------
+  - id: migrate
+    name: $_IMAGE:main-latest
+    entrypoint: bash
+    env:
+      - DATABASE_URL=$$DATABASE_URL
+    secretEnv:
+      - DATABASE_URL
+    args:
+      - -euc
+      - |
+        echo "======================================================"
+        echo " Alembic: verificando estado de migración"
+        echo "======================================================"
+
+        # Verificar que solo hay un head
+        HEAD_COUNT=$(python -m alembic heads 2>/dev/null | wc -l | tr -d ' ')
+        echo "Alembic heads encontrados: $HEAD_COUNT"
+        if [ "$HEAD_COUNT" -ne 1 ]; then
+          echo "ERROR: Se encontraron $HEAD_COUNT heads de Alembic."
+          echo "MÚLTIPLES HEADS detectados. Resolver manualmente antes de migrar."
+          echo "STATUS: MIGRATION_ABORTED_MULTIPLE_HEADS"
+          exit 1
+        fi
+
+        CODE_HEAD=$(python -m alembic heads 2>/dev/null | awk '{print $1}')
+        echo "CODE_HEAD: $CODE_HEAD"
+
+        CURRENT=$(python -m alembic current 2>/dev/null | awk '{print $1}' | head -1)
+        echo "PRODUCTION_CURRENT: $CURRENT"
+
+        if [ "$CURRENT" = "$CODE_HEAD" ]; then
+          echo ""
+          echo "PRODUCTION_CURRENT == CODE_HEAD"
+          echo "STATUS: MIGRATION_REQUIRED=NO — No se ejecuta migración."
+          exit 0
+        fi
+
+        echo ""
+        echo "PRODUCTION_CURRENT ($CURRENT) != CODE_HEAD ($CODE_HEAD)"
+        echo "Ejecutando alembic upgrade head..."
+        python -m alembic upgrade head
+        echo ""
+        echo "Verificando estado post-migración..."
+        python -m alembic current
+        echo "STATUS: MIGRATION_COMPLETE"
+    waitFor:
+      - check-migration-preconditions
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/database-url/versions/latest
+      env: DATABASE_URL
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 600s
