@@ -196,14 +196,14 @@ steps:
       - -euc
       - |
         BASE="https://bgreda-api-303244958634.southamerica-west1.run.app"
-        echo "Smoke en produccion: $BASE"
-        curl -fsS "$BASE/live"
+        echo "Smoke en produccion: $$BASE"
+        curl -fsS "$$BASE/live"
         echo "  /live: OK"
-        curl -fsS "$BASE/ready"
+        curl -fsS "$$BASE/ready"
         echo "  /ready: OK"
-        STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/auth/csrf")
-        echo "  /api/v1/auth/csrf: HTTP $STATUS"
-        if [ "$STATUS" != "200" ]; then echo "csrf endpoint unexpected status"; exit 1; fi
+        STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$$BASE/api/v1/auth/csrf")
+        echo "  /api/v1/auth/csrf: HTTP $$STATUS"
+        if [ "$$STATUS" != "200" ]; then echo "csrf endpoint unexpected status"; exit 1; fi
         echo "Smoke produccion: PASS"
     waitFor:
       - update-traffic
