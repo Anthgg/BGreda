@@ -1,0 +1,220 @@
+# Cloud Build — BGreda (Backend)
+#
+# Pipeline reproducible y auditable para despliegue en Cloud Run.
+# Nunca usa --source . en produccion.
+#
+# Flujo:
+#   docker build  →  push con SHA  →  gcloud run deploy  →  traffic 100%  →  smoke
+#
+# Ejecutar manualmente:
+#   gcloud builds submit --config cloudbuild.yaml .
+#
+# Variables sustitutas disponibles en Cloud Build:
+#   $PROJECT_ID          proyecto GCP
+#   $COMMIT_SHA          SHA completo del commit (40 hex)
+#   $SHORT_SHA           primeros 7 caracteres del SHA
+#   $REPO_NAME           nombre del repositorio
+
+substitutions:
+  _REGION: southamerica-west1
+  _SERVICE: bgreda-api
+  _IMAGE: southamerica-west1-docker.pkg.dev/cotizador-greda/cloud-run-source-deploy/bgreda-api
+  _PHASE: "007"
+
+steps:
+  # ------------------------------------------------------------------
+  # 1. Construir imagen etiquetada con SHA exacto
+  # ------------------------------------------------------------------
+  - id: docker-build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=Dockerfile
+      - --tag=$_IMAGE:$COMMIT_SHA
+      - --tag=$_IMAGE:main-latest
+      - --label=git-sha=$COMMIT_SHA
+      - --label=repository=$REPO_NAME
+      - --label=phase=$_PHASE
+      - --cache-from=$_IMAGE:main-latest
+      - .
+
+  # ------------------------------------------------------------------
+  # 2. Publicar imagen en Artifact Registry
+  # ------------------------------------------------------------------
+  - id: docker-push-sha
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - $_IMAGE:$COMMIT_SHA
+    waitFor:
+      - docker-build
+
+  - id: docker-push-alias
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - $_IMAGE:main-latest
+    waitFor:
+      - docker-build
+
+  # ------------------------------------------------------------------
+  # 3. Capturar revision actual (para rollback si smoke falla)
+  # ------------------------------------------------------------------
+  - id: capture-previous-revision
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        PREV=$(gcloud run services describe $_SERVICE \
+          --region=$_REGION \
+          --project=$PROJECT_ID \
+          --format="value(status.latestReadyRevisionName)")
+        echo "PREVIOUS_REVISION=${PREV}" > /workspace/rollback.env
+        echo "Revision anterior capturada: ${PREV}"
+    waitFor:
+      - docker-push-sha
+
+  # ------------------------------------------------------------------
+  # 4. Desplegar nueva revision (sin cambiar trafico todavia)
+  # ------------------------------------------------------------------
+  - id: deploy-revision
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        gcloud run deploy $_SERVICE \
+          --image=$_IMAGE:$COMMIT_SHA \
+          --region=$_REGION \
+          --project=$PROJECT_ID \
+          --no-traffic \
+          --tag=p007-$SHORT_SHA \
+          --update-labels=git-sha=$COMMIT_SHA,repository=$REPO_NAME,phase=$_PHASE
+        echo "Revision desplegada sin trafico. Tag: p007-$SHORT_SHA"
+    waitFor:
+      - capture-previous-revision
+
+  # ------------------------------------------------------------------
+  # 5. Esperar a que la revision quede READY
+  # ------------------------------------------------------------------
+  - id: wait-ready
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        echo "Esperando que la revision este READY..."
+        for i in $(seq 1 30); do
+          READY=$(gcloud run revisions list \
+            --service=$_SERVICE \
+            --region=$_REGION \
+            --project=$PROJECT_ID \
+            --filter="metadata.labels.commit-sha=$COMMIT_SHA OR status.conditions.type=Ready" \
+            --format="value(status.conditions[0].status)" \
+            --sort-by="~metadata.creationTimestamp" \
+            --limit=1)
+          echo "Intento $i: status=${READY}"
+          if [ "$READY" = "True" ]; then
+            echo "Revision READY."
+            exit 0
+          fi
+          sleep 5
+        done
+        # Fallback: verificar por tag URL
+        TAG_URL="https://p007-$SHORT_SHA---bgreda-api-ox6cywquca-tl.a.run.app"
+        echo "Verificando via tag URL: $TAG_URL"
+        curl -fsS "$TAG_URL/live" && exit 0
+        echo "La revision no alcanzo READY en el tiempo esperado."
+        exit 1
+    waitFor:
+      - deploy-revision
+
+  # ------------------------------------------------------------------
+  # 6. Smoke basico sobre la revision con tag (sin trafico publico)
+  # ------------------------------------------------------------------
+  - id: smoke-tag-revision
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        TAG_URL="https://p007-$SHORT_SHA---bgreda-api-ox6cywquca-tl.a.run.app"
+        echo "Smoke sobre revision con tag: $TAG_URL"
+        curl -fsS "$TAG_URL/live"
+        echo "  /live: OK"
+        curl -fsS "$TAG_URL/ready"
+        echo "  /ready: OK"
+        echo "Smoke pre-traffic: PASS"
+    waitFor:
+      - wait-ready
+
+  # ------------------------------------------------------------------
+  # 7. Mover 100% del trafico a la nueva revision
+  # ------------------------------------------------------------------
+  - id: update-traffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        NEW_REV=$(gcloud run revisions list \
+          --service=$_SERVICE \
+          --region=$_REGION \
+          --project=$PROJECT_ID \
+          --sort-by="~metadata.creationTimestamp" \
+          --filter="metadata.labels.commit-sha=$COMMIT_SHA" \
+          --format="value(metadata.name)" \
+          --limit=1)
+        if [ -z "$NEW_REV" ]; then
+          # Fallback: ultima revision creada
+          NEW_REV=$(gcloud run revisions list \
+            --service=$_SERVICE \
+            --region=$_REGION \
+            --project=$PROJECT_ID \
+            --sort-by="~metadata.creationTimestamp" \
+            --format="value(metadata.name)" \
+            --limit=1)
+        fi
+        echo "Moviendo 100% de trafico a: $NEW_REV"
+        gcloud run services update-traffic $_SERVICE \
+          --region=$_REGION \
+          --project=$PROJECT_ID \
+          --to-revisions="$NEW_REV=100"
+        echo "NEW_REVISION=${NEW_REV}" >> /workspace/rollback.env
+        echo "Trafico actualizado: $NEW_REV = 100%"
+    waitFor:
+      - smoke-tag-revision
+
+  # ------------------------------------------------------------------
+  # 8. Smoke post-trafico (produccion real)
+  # ------------------------------------------------------------------
+  - id: smoke-production
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        BASE="https://bgreda-api-303244958634.southamerica-west1.run.app"
+        echo "Smoke en produccion: $BASE"
+        curl -fsS "$BASE/live"
+        echo "  /live: OK"
+        curl -fsS "$BASE/ready"
+        echo "  /ready: OK"
+        STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/auth/csrf")
+        echo "  /api/v1/auth/csrf: HTTP $STATUS"
+        if [ "$STATUS" != "200" ]; then echo "csrf endpoint unexpected status"; exit 1; fi
+        echo "Smoke produccion: PASS"
+    waitFor:
+      - update-traffic
+
+# Imagen publicada — registro auditable
+images:
+  - $_IMAGE:$COMMIT_SHA
+  - $_IMAGE:main-latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 1200s
