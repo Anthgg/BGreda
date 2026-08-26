@@ -76,7 +76,7 @@ check_status_range "/api/v1/auth/me (sin sesion)" "$BASE_URL/api/v1/auth/me" "40
 
 # Endpoints de datos (requieren sesion, esperamos 401 sin cookies)
 info "=== Recursos (sin sesion → 401 esperado) ==="
-check_status_range "/api/v1/clients"   "$BASE_URL/api/v1/clients"   "401" "403"
+check_status_range "/api/v1/partners"   "$BASE_URL/api/v1/partners"   "401" "403"
 check_status_range "/api/v1/products"  "$BASE_URL/api/v1/products"  "401" "403"
 check_status_range "/api/v1/recipes"   "$BASE_URL/api/v1/recipes"   "401" "403"
 check_status_range "/api/v1/kilns"     "$BASE_URL/api/v1/kilns"     "401" "403"
