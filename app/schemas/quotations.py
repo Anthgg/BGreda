@@ -12,6 +12,7 @@ from app.models.quotations import (
     AdditionalFormulaType,
     OtherCostCalculationType,
     QuotationStatus,
+    QuotationWorkflow,
     TechniqueFormulaType,
 )
 
@@ -384,13 +385,15 @@ class QuotationSummaryOut(_Out):
     code: str
     name: str | None = None
     status: QuotationStatus
+    workflow: QuotationWorkflow = QuotationWorkflow.LEGACY
     customer_id: int | None = None
     customer_name: str | None = None
     customer_document_number: str | None = None
-    product_id: int
-    product_internal_reference: str
+    product_id: int | None = None
+    product_internal_reference: str | None = None
     product_name: str
-    quantity: int
+    quantity: int | None = None
+    item_count: int = 1
     calculated_unit_price: Decimal
     calculated_total: Decimal
     final_unit_cost: Decimal = Decimal(0)

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockMovement
 from app.models.masters import Product
-from app.models.quotations import Quotation, QuotationProductPriceUpdate
+from app.models.quotations import Quotation, QuotationItem, QuotationProductPriceUpdate
 from tests.db.conftest import (
     OPERATOR_EMAIL,
     OPERATOR_PASSWORD,
@@ -162,7 +162,11 @@ async def test_calculate_is_pure_and_uses_decimal_strings(
     data = response.json()
     assert Decimal(data["materials_calculated"]) == Decimal("9.5")
     assert Decimal(data["materials_applied"]) == Decimal("11.58")
-    assert Decimal(data["firing_cost"]) == Decimal(firing_line["allocated_cost"])
+    assert Decimal(data["firing_cost"]) == (
+        Decimal(firing_line["allocated_cost"])
+        / Decimal(firing_line["quantity"])
+        * Decimal(data["quantity"])
+    )
     # El IGV si tiene regla: la cotizacion se emite neta y el impuesto se anade
     # encima, de modo que el documento entregado muestre las dos cifras.
     assert data["igv_rule_source"] == "FOUND"
@@ -733,7 +737,7 @@ async def test_actualizar_precio_usa_el_unitario_neto_y_no_el_de_con_igv(
     fila = await db_session.get(Product, product["id"])
     assert fila is not None
     await db_session.refresh(fila)
-    assert fila.sale_price == neto
+    assert fila.sale_price == neto.quantize(Decimal("0.000001"))
     assert fila.sale_price != con_igv
 
 
@@ -956,6 +960,20 @@ async def test_quotation_commercial_pricing_and_confirm_flow(
     confirmed = confirm_res.json()
     assert confirmed["status"] == "CONFIRMED"
     assert confirmed["confirmed_at"] is not None
+
+    legacy_item = (
+        await db_session.execute(
+            select(QuotationItem).where(QuotationItem.quotation_id == quotation["id"])
+        )
+    ).scalar_one()
+    assert legacy_item.quantity == 20
+    assert legacy_item.commercial_sale_unit_price == manual_price
+
+    list_res = await api.get(QUOTATIONS)
+    assert list_res.status_code == 200, list_res.text
+    listed = next(item for item in list_res.json()["items"] if item["id"] == quotation["id"])
+    assert listed["workflow"] == "LEGACY"
+    assert listed["item_count"] == 1
 
     # Ya confirmada es inmutable: intentar editar da 409
     fail_edit = await api.put(

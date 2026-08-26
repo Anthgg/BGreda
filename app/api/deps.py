@@ -36,6 +36,7 @@ from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
 from app.services.masters import MasterDataService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.recipes import RecipeService
@@ -307,6 +308,21 @@ async def get_quotation_service(
 
 
 QuotationServiceDep = Annotated[QuotationService, Depends(get_quotation_service)]
+
+
+async def get_quotation_builder_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
+    firings: FiringServiceDep,
+    quotations: QuotationServiceDep,
+) -> QuotationBuilderService:
+    return QuotationBuilderService(session, audit, sequences, firings, quotations)
+
+
+QuotationBuilderServiceDep = Annotated[
+    QuotationBuilderService, Depends(get_quotation_builder_service)
+]
 
 
 # ---------------------------------------------------------------------------

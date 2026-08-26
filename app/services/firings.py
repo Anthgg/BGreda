@@ -51,6 +51,7 @@ from app.models.firings import (
 )
 from app.models.masters import Product
 from app.models.sequence import SequenceType
+from app.models.settings import SINGLETON_ID, CommercialSettings
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.firings import (
     ConfirmedFiringLineOut,
@@ -439,6 +440,26 @@ class FiringService:
         self._audit = audit
         self._sequences = sequences
 
+    async def _commercial_totals(
+        self, total_cost: Decimal
+    ) -> tuple[Decimal, Decimal, Decimal, str, str]:
+        commercial = (
+            await self._session.execute(
+                select(CommercialSettings).where(CommercialSettings.id == SINGLETON_ID)
+            )
+        ).scalar_one_or_none()
+        tax_percentage = (
+            commercial.tax_percent if commercial and commercial.tax_percent else Decimal(0)
+        )
+        tax_amount = total_cost * tax_percentage / Decimal(100)
+        return (
+            tax_percentage,
+            tax_amount,
+            total_cost + tax_amount,
+            (commercial.currency_code if commercial else None) or "PEN",
+            (commercial.currency_symbol if commercial else None) or "S/",
+        )
+
     # -- Resolucion de datos maestros ---------------------------------------
     async def _load_kilns(self, kiln_ids: Sequence[int]) -> dict[int, Kiln]:
         if not kiln_ids:
@@ -605,6 +626,13 @@ class FiringService:
         """
         sessions, lines, factors, kilns, references = await self._build(payload)
         math = compute_firing(sessions, lines, factors)
+        (
+            tax_percentage,
+            tax_amount,
+            total_with_tax,
+            currency_code,
+            currency_symbol,
+        ) = await self._commercial_totals(math.total_cost)
 
         session_out = [
             FiringSessionOut(
@@ -656,6 +684,11 @@ class FiringService:
             total_volume_cm3=math.total_volume_cm3,
             subtotal=math.subtotal,
             total_cost=math.total_cost,
+            tax_percentage=tax_percentage,
+            tax_amount=tax_amount,
+            total_with_tax=total_with_tax,
+            currency_code=currency_code,
+            currency_symbol=currency_symbol,
             occupancy_percentage=math.occupancy_percentage,
             occupancy_factor=math.occupancy_factor,
             capacity_exceeded=math.capacity_exceeded,
@@ -920,6 +953,13 @@ class FiringService:
             [line.product_id for line in firing.lines if line.product_id is not None]
         )
         total = firing.total_volume_cm3 or Decimal(0)
+        (
+            tax_percentage,
+            tax_amount,
+            total_with_tax,
+            currency_code,
+            currency_symbol,
+        ) = await self._commercial_totals(firing.total_cost)
 
         return FiringOut(
             id=firing.id,
@@ -933,6 +973,11 @@ class FiringService:
             occupancy_factor=firing.occupancy_factor,
             subtotal=firing.subtotal,
             total_cost=firing.total_cost,
+            tax_percentage=tax_percentage,
+            tax_amount=tax_amount,
+            total_with_tax=total_with_tax,
+            currency_code=currency_code,
+            currency_symbol=currency_symbol,
             created_by_id=firing.created_by_id,
             confirmed_at=firing.confirmed_at,
             cancelled_at=firing.cancelled_at,

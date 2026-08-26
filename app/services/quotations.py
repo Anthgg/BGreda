@@ -41,10 +41,12 @@ from app.models.quotations import (
     OtherCost,
     Quotation,
     QuotationAdditional,
+    QuotationItem,
     QuotationOtherCost,
     QuotationProductPriceUpdate,
     QuotationStatus,
     QuotationTechnique,
+    QuotationWorkflow,
     Technique,
 )
 from app.models.recipes import Recipe, RecipeStatus, RecipeVersion
@@ -156,6 +158,15 @@ class _ResolvedCalculation:
     technique_inputs: list[TechniqueSelectionIn]
     additional_inputs: list[AdditionalSelectionIn]
     other_cost_inputs: list[OtherCostSelectionIn]
+
+
+@dataclass(frozen=True, slots=True)
+class FiringEstimateOverride:
+    """Costo de quema simulado y trazable para consumidores internos."""
+
+    cost: Decimal
+    snapshot: dict[str, object]
+    source_key: object
 
 
 MasterT = TypeVar("MasterT", Technique, Additional, OtherCost)
@@ -376,12 +387,51 @@ class QuotationService:
             raise QuotationError("La configuracion comercial no esta inicializada")
         return settings
 
+    async def resolve_product(
+        self,
+        product_id: int,
+        *,
+        for_update: bool = False,
+        require_active: bool = True,
+    ) -> Product:
+        """Expone la validacion canonica de producto a orquestadores internos."""
+
+        return await self._product(
+            product_id,
+            for_update=for_update,
+            require_active=require_active,
+        )
+
+    async def resolve_customer(
+        self,
+        customer_id: int | None,
+        *,
+        require_active: bool = True,
+    ) -> Partner | None:
+        """Expone la validacion canonica de cliente a orquestadores internos."""
+
+        return await self._customer(customer_id, require_active=require_active)
+
+    async def commercial_settings(self) -> CommercialSettings:
+        """Devuelve la configuracion comercial unica ya validada."""
+
+        return await self._commercial()
+
     async def _recipe_materials(
         self, payload: QuotationCalculateIn, product: Product
     ) -> tuple[Decimal, RecipeVersion | None, list[str], list[str]]:
         """Costo de materiales, version usada, avisos y materiales sin precio."""
         if payload.recipe_id is None or payload.recipe_version_id is None:
-            return ZERO, None, ["RECIPE_REQUIRED"], []
+            return (
+                ZERO,
+                None,
+                (
+                    []
+                    if payload.materials_applied is not None and payload.materials_applied > ZERO
+                    else ["RECIPE_REQUIRED"]
+                ),
+                [],
+            )
         version = (
             await self._session.execute(
                 select(RecipeVersion)
@@ -506,14 +556,35 @@ class QuotationService:
             "firing_code": line.firing.code,
             "product_id": line.product_id,
             "description": line.description,
-            "quantity": line.quantity,
-            "total_volume_cm3": str(line.total_volume_cm3),
-            "base_cost": str(line.base_cost),
-            "allocated_cost": str(line.allocated_cost),
+            "source_quantity": line.quantity,
+            "quantity": payload.quantity,
+            "unit_volume_cm3": str(line.unit_volume_cm3),
+            "source_total_volume_cm3": str(line.total_volume_cm3),
+            "total_volume_cm3": str(line.unit_volume_cm3 * Decimal(payload.quantity)),
+            "source_base_cost": str(line.base_cost),
+            "base_cost": str(line.base_cost / Decimal(line.quantity) * Decimal(payload.quantity)),
+            "source_allocated_cost": str(line.allocated_cost),
+            "allocated_cost": str(
+                line.allocated_cost / Decimal(line.quantity) * Decimal(payload.quantity)
+            ),
+            "occupancy_percentage": str(line.occupancy_percentage),
+            "occupancy_bracket": line.occupancy_bracket,
             "occupancy_factor": str(line.occupancy_factor),
+            "low_kiln_id": (
+                sessions[line.low_session_id].kiln_id
+                if line.low_session_id is not None and line.low_session_id in sessions
+                else None
+            ),
+            "high_kiln_id": (
+                sessions[line.high_session_id].kiln_id
+                if line.high_session_id is not None and line.high_session_id in sessions
+                else None
+            ),
+            "factor_kiln_id": line.factor_kiln_id,
             "sessions": snapshot_sessions,
         }
-        return line, line.allocated_cost, snapshot, []
+        firing_cost = line.allocated_cost / Decimal(line.quantity) * Decimal(payload.quantity)
+        return line, firing_cost, snapshot, []
 
     async def _load_sources(self, model: type[MasterT], ids: list[int]) -> dict[int, MasterT]:
         if not ids:
@@ -555,7 +626,12 @@ class QuotationService:
         serialized = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    async def _calculate(self, payload: QuotationCalculateIn) -> _ResolvedCalculation:
+    async def _calculate(
+        self,
+        payload: QuotationCalculateIn,
+        *,
+        firing_override: FiringEstimateOverride | None = None,
+    ) -> _ResolvedCalculation:
         product = await self._product(payload.product_id)
         customer = await self._customer(payload.customer_id)
         settings = await self._commercial()
@@ -565,9 +641,21 @@ class QuotationService:
             recipe_warnings,
             materials_without_cost,
         ) = await self._recipe_materials(payload, product)
-        firing_line, firing_cost, firing_snapshot, firing_warnings = await self._firing_source(
-            payload, product
-        )
+        if firing_override is None:
+            firing_line, firing_cost, firing_snapshot, firing_warnings = await self._firing_source(
+                payload, product
+            )
+            firing_source_key: object = [
+                firing_line.id if firing_line else None,
+                firing_line.updated_at if firing_line else None,
+                firing_line.firing.updated_at if firing_line else None,
+            ]
+        else:
+            firing_line = None
+            firing_cost = firing_override.cost
+            firing_snapshot = firing_override.snapshot
+            firing_warnings = []
+            firing_source_key = firing_override.source_key
 
         technique_inputs = list(payload.techniques)
         additional_inputs = list(payload.additionals)
@@ -692,7 +780,6 @@ class QuotationService:
                 if product.sale_tax_rate is not None or settings.tax_percent is not None
                 else ["IGV_RATE_NOT_CONFIGURED"]
             ),
-            "DISCOUNT_RULE_BLOCKED_BY_SOURCE",
         ]
         source_data: dict[str, object] = {
             "customer": [customer.id, customer.updated_at] if customer else None,
@@ -703,11 +790,7 @@ class QuotationService:
                 recipe_version.fingerprint if recipe_version else None,
                 recipe_version.updated_at if recipe_version else None,
             ],
-            "firing": [
-                firing_line.id if firing_line else None,
-                firing_line.updated_at if firing_line else None,
-                firing_line.firing.updated_at if firing_line else None,
-            ],
+            "firing": firing_source_key,
             "techniques": sorted((row.id, row.updated_at) for row in technique_rows.values()),
             "additionals": sorted((row.id, row.updated_at) for row in additional_rows.values()),
             "other_costs": sorted((row.id, row.updated_at) for row in other_rows.values()),
@@ -873,6 +956,15 @@ class QuotationService:
         """Simula sin insertar, emitir correlativo, consumir stock ni cambiar precios."""
         return (await self._calculate(payload)).output
 
+    async def calculate_with_firing_estimate(
+        self,
+        payload: QuotationCalculateIn,
+        estimate: FiringEstimateOverride,
+    ) -> QuotationCalculateOut:
+        """Cotiza usando una quema simulada sin crear un evento productivo."""
+
+        return (await self._calculate(payload, firing_override=estimate)).output
+
     @staticmethod
     def _identity(payload: QuotationCalculateIn) -> tuple[object, ...]:
         return (
@@ -891,7 +983,10 @@ class QuotationService:
     async def _get(self, quotation_id: int, *, for_update: bool = False) -> Quotation:
         stmt = (
             select(Quotation)
-            .where(Quotation.id == quotation_id)
+            .where(
+                Quotation.id == quotation_id,
+                Quotation.workflow == QuotationWorkflow.LEGACY,
+            )
             .options(
                 selectinload(Quotation.techniques),
                 selectinload(Quotation.additionals),
@@ -908,6 +1003,8 @@ class QuotationService:
 
     @staticmethod
     def _to_capture(quotation: Quotation) -> QuotationCalculateIn:
+        if quotation.product_id is None or quotation.quantity is None:
+            raise QuotationNotFoundError()
         return QuotationCalculateIn(
             name=quotation.name,
             customer_id=quotation.customer_id,
@@ -1047,6 +1144,9 @@ class QuotationService:
         await self._session.execute(
             delete(QuotationOtherCost).where(QuotationOtherCost.quotation_id == quotation.id)
         )
+        await self._session.execute(
+            delete(QuotationItem).where(QuotationItem.quotation_id == quotation.id)
+        )
         await self._session.flush()
 
         for index, technique_line in enumerate(output.techniques):
@@ -1113,8 +1213,68 @@ class QuotationService:
                     sort_order=other_cost_line.sort_order,
                 )
             )
+        # La ruta legacy mantiene una sola linea sincronizada con su cabecera.
+        # Asi los registros migrados por 0012 y los creados despues de la
+        # migracion producen el mismo item_count y el PDF usa el snapshot
+        # vigente tras editar o confirmar.
+        self._session.add(
+            QuotationItem(
+                quotation_id=quotation.id,
+                product_id=output.product_id,
+                sort_order=0,
+                quantity=output.quantity,
+                product_name_snapshot=output.product_name_snapshot,
+                product_internal_reference_snapshot=output.product_internal_reference_snapshot,
+                product_type_snapshot=output.product_type_snapshot,
+                product_uom_snapshot=output.product_uom_snapshot,
+                product_material_snapshot=output.product_material_snapshot,
+                product_grammage_snapshot=output.product_grammage_snapshot,
+                product_width_snapshot=output.product_width_snapshot,
+                product_height_snapshot=output.product_height_snapshot,
+                product_length_snapshot=output.product_length_snapshot,
+                product_depth_snapshot=output.product_depth_snapshot,
+                recipe_id=output.recipe_id,
+                recipe_version_id=output.recipe_version_id,
+                recipe_version_fingerprint_snapshot=(output.recipe_version_fingerprint_snapshot),
+                material_grams_per_piece=output.material_grams_per_piece,
+                kiln_id=None,
+                kiln_snapshot={},
+                production_snapshot=output.firing_snapshot,
+                techniques_snapshot=[value.model_dump(mode="json") for value in output.techniques],
+                additionals_snapshot=[
+                    value.model_dump(mode="json") for value in output.additionals
+                ],
+                other_costs_snapshot=[
+                    value.model_dump(mode="json") for value in output.other_costs
+                ],
+                materials_calculated=output.materials_calculated,
+                materials_applied=output.materials_applied,
+                firing_cost=output.firing_cost,
+                labor_cost=output.labor_cost,
+                calculated_days=output.calculated_days,
+                days_adjustment=output.days_adjustment,
+                waiting_days=output.waiting_days,
+                total_days=output.total_days,
+                space_cost=output.space_cost,
+                final_unit_cost=output.final_unit_cost,
+                final_total_cost=output.final_total_cost,
+                markup_percent=output.markup_percent,
+                calculated_sale_unit_price=output.calculated_sale_unit_price,
+                suggested_commercial_unit_price=output.suggested_commercial_unit_price,
+                commercial_sale_unit_price=output.commercial_sale_unit_price,
+                effective_profit_unit=output.effective_profit_unit,
+                effective_profit_total=output.effective_profit_total,
+                effective_markup_percent=output.effective_markup_percent,
+                commercial_subtotal=output.commercial_subtotal,
+                tax_percentage_snapshot=output.tax_percentage,
+                tax_rate_source_snapshot=output.tax_rate_source,
+                tax_amount=output.tax_amount,
+                source_fingerprint=output.source_fingerprint,
+                calculation_warnings=output.warnings,
+            )
+        )
         await self._session.flush()
-        self._session.expire(quotation, ["techniques", "additionals", "other_costs"])
+        self._session.expire(quotation, ["techniques", "additionals", "other_costs", "items"])
         return output
 
     async def create(self, payload: QuotationCreateIn, *, user: AuthenticatedUser) -> QuotationOut:
@@ -1287,6 +1447,8 @@ class QuotationService:
         if existing is not None:
             raise ProductPriceUpdateError("Esta cotizacion ya actualizo el precio del producto")
 
+        if quotation.product_id is None:
+            raise ProductPriceUpdateError("La cotizacion no tiene un unico producto")
         product = await self._product(quotation.product_id, for_update=True)
         old_price = product.sale_price
         new_price = quotation.calculated_unit_price
@@ -1329,6 +1491,9 @@ class QuotationService:
 
     # -- Lectura -----------------------------------------------------------
     async def _stored_output(self, quotation: Quotation, product: Product) -> QuotationCalculateOut:
+        if quotation.quantity is None:
+            raise QuotationNotFoundError()
+        quantity = quotation.quantity
         gramos_guardados = quotation.material_grams_per_piece
         return QuotationCalculateOut(
             name=quotation.name,
@@ -1341,7 +1506,7 @@ class QuotationService:
             customer_ubigeo_snapshot=quotation.customer_ubigeo_snapshot,
             customer_email_snapshot=quotation.customer_email_snapshot,
             customer_phone_snapshot=quotation.customer_phone_snapshot,
-            product_id=quotation.product_id,
+            product_id=product.id,
             product_internal_reference=product.internal_reference,
             product_name=product.name,
             product_name_snapshot=quotation.product_name_snapshot or product.name,
@@ -1366,7 +1531,7 @@ class QuotationService:
             product_depth_snapshot=quotation.product_depth_snapshot
             if quotation.product_depth_snapshot is not None
             else product.depth,
-            quantity=quotation.quantity,
+            quantity=quantity,
             recipe_id=quotation.recipe_id,
             recipe_version_id=quotation.recipe_version_id,
             recipe_version_fingerprint_snapshot=(quotation.recipe_version_fingerprint_snapshot),
@@ -1407,9 +1572,7 @@ class QuotationService:
             materials_without_cost=[],
             material_grams_per_piece=gramos_guardados,
             material_total_grams=(
-                gramos_guardados * Decimal(quotation.quantity)
-                if gramos_guardados is not None
-                else None
+                gramos_guardados * Decimal(quantity) if gramos_guardados is not None else None
             ),
             tax_percentage=quotation.tax_percentage_snapshot,
             tax_rate_source=cast(
@@ -1481,6 +1644,8 @@ class QuotationService:
 
     async def get(self, quotation_id: int) -> QuotationOut:
         quotation = await self._get(quotation_id)
+        if quotation.product_id is None:
+            raise QuotationNotFoundError()
         product = await self._product(quotation.product_id, require_active=False)
         output = await self._stored_output(quotation, product)
         return QuotationOut(
@@ -1509,7 +1674,10 @@ class QuotationService:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[QuotationSummaryOut], int]:
-        stmt = select(Quotation, Product).join(Product, Product.id == Quotation.product_id)
+        stmt = select(Quotation).options(
+            selectinload(Quotation.product),
+            selectinload(Quotation.items),
+        )
         if search:
             term = f"%{search.strip()}%"
             stmt = stmt.where(
@@ -1518,14 +1686,27 @@ class QuotationService:
                     Quotation.name.ilike(term),
                     Quotation.customer_name_snapshot.ilike(term),
                     Quotation.customer_document_number_snapshot.ilike(term),
-                    Product.name.ilike(term),
-                    Product.internal_reference.ilike(term),
+                    Quotation.product.has(Product.name.ilike(term)),
+                    Quotation.product.has(Product.internal_reference.ilike(term)),
+                    Quotation.items.any(
+                        QuotationItem.product.has(
+                            or_(
+                                Product.name.ilike(term),
+                                Product.internal_reference.ilike(term),
+                            )
+                        )
+                    ),
                 )
             )
         if status is not None:
             stmt = stmt.where(Quotation.status == status)
         if product_id is not None:
-            stmt = stmt.where(Quotation.product_id == product_id)
+            stmt = stmt.where(
+                or_(
+                    Quotation.product_id == product_id,
+                    Quotation.items.any(QuotationItem.product_id == product_id),
+                )
+            )
         if customer_id is not None:
             stmt = stmt.where(Quotation.customer_id == customer_id)
         if date_from is not None:
@@ -1538,32 +1719,53 @@ class QuotationService:
                 await self._session.execute(select(func.count()).select_from(stmt.subquery()))
             ).scalar_one()
         )
-        rows = (
-            await self._session.execute(
-                stmt.order_by(Quotation.id.desc()).limit(limit).offset(offset)
+        rows = list(
+            (
+                await self._session.execute(
+                    stmt.order_by(Quotation.id.desc()).limit(limit).offset(offset)
+                )
             )
-        ).all()
+            .scalars()
+            .all()
+        )
         items = [
             QuotationSummaryOut(
                 id=quotation.id,
                 code=quotation.code,
                 name=quotation.name,
                 status=quotation.status,
+                workflow=quotation.workflow,
                 customer_id=quotation.customer_id,
                 customer_name=quotation.customer_name_snapshot,
                 customer_document_number=quotation.customer_document_number_snapshot,
-                product_id=product.id,
-                product_internal_reference=product.internal_reference,
-                product_name=product.name,
-                quantity=quotation.quantity,
+                product_id=quotation.product.id if quotation.product else None,
+                product_internal_reference=(
+                    quotation.product.internal_reference if quotation.product else None
+                ),
+                product_name=(
+                    quotation.product.name
+                    if quotation.product
+                    else f"{len(quotation.items)} productos"
+                ),
+                quantity=(
+                    sum(item.quantity or 0 for item in quotation.items)
+                    if quotation.items
+                    else quotation.quantity
+                ),
+                item_count=len(quotation.items),
                 calculated_unit_price=quotation.calculated_unit_price,
                 calculated_total=quotation.calculated_total,
                 final_unit_cost=quotation.final_unit_cost,
-                commercial_sale_unit_price=quotation.commercial_sale_unit_price,
+                commercial_sale_unit_price=(
+                    quotation.commercial_subtotal
+                    / Decimal(sum(item.quantity or 0 for item in quotation.items))
+                    if quotation.items and sum(item.quantity or 0 for item in quotation.items) > 0
+                    else quotation.commercial_sale_unit_price
+                ),
                 commercial_total=quotation.commercial_total,
                 total_with_tax=quotation.total_with_tax,
                 created_at=quotation.created_at,
             )
-            for quotation, product in rows
+            for quotation in rows
         ]
         return items, total

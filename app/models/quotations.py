@@ -54,6 +54,13 @@ class QuotationStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class QuotationWorkflow(StrEnum):
+    """Flujo que creo la cotizacion sin alterar su estado comercial."""
+
+    LEGACY = "LEGACY"
+    COTIZADOR = "COTIZADOR"
+
+
 class Technique(Base, TimestampMixin):
     __tablename__ = "techniques"
 
@@ -155,13 +162,20 @@ class Quotation(Base, TimestampMixin):
         default=QuotationStatus.DRAFT,
         index=True,
     )
+    workflow: Mapped[QuotationWorkflow] = mapped_column(
+        StrEnumType(QuotationWorkflow, 16),
+        nullable=False,
+        default=QuotationWorkflow.LEGACY,
+        server_default=text("'LEGACY'"),
+        index=True,
+    )
     customer_id: Mapped[int | None] = mapped_column(
         ForeignKey("partners.id", ondelete="RESTRICT"), index=True
     )
-    product_id: Mapped[int] = mapped_column(
-        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Snapshots de cliente
     customer_name_snapshot: Mapped[str | None] = mapped_column(String(200))
@@ -333,6 +347,7 @@ class Quotation(Base, TimestampMixin):
         CheckConstraint("space_cost >= 0", name="space_cost_non_negative"),
         CheckConstraint("commercial_factor > 0", name="commercial_factor_positive"),
         CheckConstraint("status IN ('DRAFT', 'CONFIRMED', 'CANCELLED')", name="status_allowed"),
+        CheckConstraint("workflow IN ('LEGACY', 'COTIZADOR')", name="workflow_allowed"),
         Index("ix_quotations_created_at", "created_at"),
     )
 
@@ -355,7 +370,150 @@ class Quotation(Base, TimestampMixin):
         order_by=lambda: (QuotationOtherCost.sort_order.asc(), QuotationOtherCost.id.asc()),
     )
     customer: Mapped[Partner | None] = relationship("Partner", foreign_keys=[customer_id])
-    product: Mapped[Product] = relationship("Product", foreign_keys=[product_id])
+    product: Mapped[Product | None] = relationship("Product", foreign_keys=[product_id])
+    items: Mapped[list[QuotationItem]] = relationship(
+        "QuotationItem",
+        back_populates="quotation",
+        cascade="all, delete-orphan",
+        order_by=lambda: (QuotationItem.sort_order.asc(), QuotationItem.id.asc()),
+    )
+
+
+class QuotationItem(Base, TimestampMixin):
+    """Linea multiproducto con fuentes, costos y precios historicos propios."""
+
+    __tablename__ = "quotation_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    quantity: Mapped[int | None] = mapped_column(Integer)
+
+    product_name_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
+    product_internal_reference_snapshot: Mapped[str] = mapped_column(String(64), nullable=False)
+    product_type_snapshot: Mapped[str] = mapped_column(String(32), nullable=False)
+    product_uom_snapshot: Mapped[str | None] = mapped_column(String(32))
+    product_material_snapshot: Mapped[str | None] = mapped_column(String(200))
+    product_grammage_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_width_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_height_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_length_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    product_depth_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+
+    recipe_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipes.id", ondelete="RESTRICT"), index=True
+    )
+    recipe_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipe_versions.id", ondelete="RESTRICT"), index=True
+    )
+    recipe_version_fingerprint_snapshot: Mapped[str | None] = mapped_column(String(64))
+    material_grams_per_piece: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+
+    kiln_id: Mapped[int | None] = mapped_column(
+        ForeignKey("kilns.id", ondelete="RESTRICT"), index=True
+    )
+    kiln_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    production_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    techniques_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    additionals_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    other_costs_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+    materials_calculated: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    materials_applied: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    firing_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    labor_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    calculated_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    days_adjustment: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    waiting_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    total_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    space_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    final_unit_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    final_total_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    markup_percent: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, server_default=text("100")
+    )
+    calculated_sale_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    suggested_commercial_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    commercial_sale_unit_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    effective_profit_unit: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    effective_profit_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    effective_markup_percent: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, server_default=text("0")
+    )
+    commercial_subtotal: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    tax_percentage_snapshot: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, server_default=text("0")
+    )
+    tax_rate_source_snapshot: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'COMMERCIAL_SETTINGS'")
+    )
+    tax_amount: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    calculation_warnings: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+    __table_args__ = (
+        UniqueConstraint("quotation_id", "sort_order", name="uq_quotation_items_sort_order"),
+        CheckConstraint("quantity IS NULL OR quantity > 0", name="quantity_positive"),
+        CheckConstraint("materials_calculated >= 0", name="materials_calculated_non_negative"),
+        CheckConstraint("materials_applied >= 0", name="materials_applied_non_negative"),
+        CheckConstraint("firing_cost >= 0", name="firing_cost_non_negative"),
+        CheckConstraint("labor_cost >= 0", name="labor_cost_non_negative"),
+        CheckConstraint("waiting_days >= 0", name="waiting_days_non_negative"),
+        CheckConstraint("total_days >= 0", name="total_days_non_negative"),
+        CheckConstraint("space_cost >= 0", name="space_cost_non_negative"),
+        CheckConstraint("markup_percent >= 0", name="markup_non_negative"),
+        Index("ix_quotation_items_quotation_product", "quotation_id", "product_id"),
+    )
+
+    quotation: Mapped[Quotation] = relationship("Quotation", back_populates="items")
+    product: Mapped[Product] = relationship("Product", lazy="joined")
 
 
 class QuotationTechnique(Base, TimestampMixin):
