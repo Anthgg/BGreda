@@ -70,8 +70,8 @@ steps:
           --region=$_REGION \
           --project=$PROJECT_ID \
           --format="value(status.latestReadyRevisionName)")
-        echo "PREVIOUS_REVISION=${PREV}" > /workspace/rollback.env
-        echo "Revision anterior capturada: ${PREV}"
+        echo "PREVIOUS_REVISION=$$PREV" > /workspace/rollback.env
+        echo "Revision anterior capturada: $$PREV"
     waitFor:
       - docker-push-sha
 
@@ -114,8 +114,8 @@ steps:
             --format="value(status.conditions[0].status)" \
             --sort-by="~metadata.creationTimestamp" \
             --limit=1)
-          echo "Intento $i: status=${READY}"
-          if [ "$READY" = "True" ]; then
+          echo "Intento $$i: status=$$READY"
+          if [ "$$READY" = "True" ]; then
             echo "Revision READY."
             exit 0
           fi
@@ -123,8 +123,8 @@ steps:
         done
         # Fallback: verificar por tag URL
         TAG_URL="https://p007-$SHORT_SHA---bgreda-api-ox6cywquca-tl.a.run.app"
-        echo "Verificando via tag URL: $TAG_URL"
-        curl -fsS "$TAG_URL/live" && exit 0
+        echo "Verificando via tag URL: $$TAG_URL"
+        curl -fsS "$$TAG_URL/live" && exit 0
         echo "La revision no alcanzo READY en el tiempo esperado."
         exit 1
     waitFor:
@@ -140,10 +140,10 @@ steps:
       - -euc
       - |
         TAG_URL="https://p007-$SHORT_SHA---bgreda-api-ox6cywquca-tl.a.run.app"
-        echo "Smoke sobre revision con tag: $TAG_URL"
-        curl -fsS "$TAG_URL/live"
+        echo "Smoke sobre revision con tag: $$TAG_URL"
+        curl -fsS "$$TAG_URL/live"
         echo "  /live: OK"
-        curl -fsS "$TAG_URL/ready"
+        curl -fsS "$$TAG_URL/ready"
         echo "  /ready: OK"
         echo "Smoke pre-traffic: PASS"
     waitFor:
@@ -166,7 +166,7 @@ steps:
           --filter="metadata.labels.commit-sha=$COMMIT_SHA" \
           --format="value(metadata.name)" \
           --limit=1)
-        if [ -z "$NEW_REV" ]; then
+        if [ -z "$$NEW_REV" ]; then
           # Fallback: ultima revision creada
           NEW_REV=$(gcloud run revisions list \
             --service=$_SERVICE \
@@ -176,13 +176,13 @@ steps:
             --format="value(metadata.name)" \
             --limit=1)
         fi
-        echo "Moviendo 100% de trafico a: $NEW_REV"
+        echo "Moviendo 100% de trafico a: $$NEW_REV"
         gcloud run services update-traffic $_SERVICE \
           --region=$_REGION \
           --project=$PROJECT_ID \
-          --to-revisions="$NEW_REV=100"
-        echo "NEW_REVISION=${NEW_REV}" >> /workspace/rollback.env
-        echo "Trafico actualizado: $NEW_REV = 100%"
+          --to-revisions="$$NEW_REV=100"
+        echo "NEW_REVISION=$$NEW_REV" >> /workspace/rollback.env
+        echo "Trafico actualizado: $$NEW_REV = 100%"
     waitFor:
       - smoke-tag-revision
 
