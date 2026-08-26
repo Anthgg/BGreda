@@ -30,6 +30,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Un downgrade con cotizaciones 'MIXED' violaria el constraint narrower.
+    # Bloquear explicitamente es seguro y previene fallos silenciosos o corrupcion.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM quotations WHERE tax_rate_source_snapshot = 'MIXED') THEN
+                RAISE EXCEPTION '0013 downgrade bloqueado: existen cotizaciones MIXED';
+            END IF;
+        END
+        $$
+        """
+    )
     op.drop_constraint("ck_quotations_tax_rate_source_allowed", "quotations", type_="check")
     op.create_check_constraint(
         "ck_quotations_tax_rate_source_allowed",
