@@ -542,3 +542,21 @@ async def test_pdf_preview_empty_blocked(
     )
     assert incomplete_res.status_code == 409
     assert incomplete_res.json()["error"]["code"] == "QUOTATION_BUILDER_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_draft_persistence_with_mixed_tax_rate_source(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+) -> None:
+    # 1. Borrador inicial sin items ni cliente: tax_rate_source_snapshot queda 'MIXED'
+    res = await api.post(
+        BUILDER,
+        json={"name": "Borrador inicial MIXED", "items": []},
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 201, res.text
+    draft = res.json()
+    assert draft["tax_rate_source_snapshot"] == "MIXED"
+    assert draft["status"] == "DRAFT"
+    assert draft["workflow"] == "COTIZADOR"
