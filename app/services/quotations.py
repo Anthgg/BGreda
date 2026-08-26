@@ -771,6 +771,8 @@ class QuotationService:
             for index, calc in enumerate(result.other_costs)
         ]
         por_pieza = self._grams_per_piece(payload)
+        currency_code_snap = settings.currency_code or "PEN"
+        currency_symbol_snap = settings.currency_symbol or "S/"
         output = QuotationCalculateOut(
             name=payload.name,
             customer_id=customer.id if customer else None,
@@ -839,6 +841,8 @@ class QuotationService:
             commercial_subtotal=result.commercial_subtotal,
             commercial_total=result.commercial_total,
             commercial_unit_price_with_tax=result.commercial_unit_price_with_tax,
+            currency_code_snapshot=currency_code_snap,
+            currency_symbol_snapshot=currency_symbol_snap,
             materials_without_cost=materials_without_cost,
             material_grams_per_piece=por_pieza,
             material_total_grams=(
@@ -1023,6 +1027,8 @@ class QuotationService:
         quotation.commercial_subtotal = output.commercial_subtotal
         quotation.commercial_total = output.commercial_total
         quotation.commercial_unit_price_with_tax = output.commercial_unit_price_with_tax
+        quotation.currency_code_snapshot = output.currency_code_snapshot
+        quotation.currency_symbol_snapshot = output.currency_symbol_snapshot
         quotation.material_grams_per_piece = output.material_grams_per_piece
         quotation.tax_percentage_snapshot = output.tax_percentage
         quotation.tax_rate_source_snapshot = output.tax_rate_source
@@ -1120,6 +1126,8 @@ class QuotationService:
             customer_id=payload.customer_id,
             product_id=payload.product_id,
             quantity=payload.quantity,
+            currency_code_snapshot="PEN",
+            currency_symbol_snapshot="S/",
             commercial_factor_default_snapshot=Decimal(1),
             commercial_factor=Decimal(1),
             source_fingerprint="0" * 64,

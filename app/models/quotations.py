@@ -277,6 +277,13 @@ class Quotation(Base, TimestampMixin):
     commercial_unit_price_with_tax: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
+    #: Moneda comercial congelada al momento de cotizar y confirmar
+    currency_code_snapshot: Mapped[str] = mapped_column(
+        String(3), nullable=False, default="PEN", server_default=text("'PEN'")
+    )
+    currency_symbol_snapshot: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="S/", server_default=text("'S/'")
+    )
 
     #: Gramos de receta que lleva **una** pieza. Nulo mientras no se indique:
     #: no hay valor por omision, porque suponer uno daria un costo de materiales

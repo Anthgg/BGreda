@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    QuotationPdfServiceDep,
     QuotationServiceDep,
 )
 from app.models.quotations import QuotationStatus
@@ -301,3 +302,34 @@ async def update_product_price(
     result = await service.update_product_price(quotation_id, user=admin)
     await session.commit()
     return result
+
+
+@router.get(
+    "/quotations/{quotation_id}/pdf",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "Documento PDF comercial oficial de la cotización.",
+        },
+        404: {"description": "Cotización no encontrada."},
+        409: {
+            "description": "La cotización está en borrador y no tiene documento comercial oficial."
+        },
+    },
+)
+async def get_quotation_pdf(
+    quotation_id: int,
+    pdf_service: QuotationPdfServiceDep,
+    _: CurrentUserDep,
+) -> Response:
+    pdf_bytes, filename = await pdf_service.get_quotation_pdf(quotation_id)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )

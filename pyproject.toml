@@ -16,6 +16,8 @@ dependencies = [
     "email-validator>=2.2",
     "python-multipart>=0.0.32",
     "openpyxl>=3.1",
+    "jinja2>=3.1.6",
+    "weasyprint>=69.0",
 ]
 
 [dependency-groups]
@@ -103,5 +105,5 @@ no_implicit_optional = true
 strict_equality = true
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*"]
+module = ["asyncpg.*", "weasyprint.*"]
 ignore_missing_imports = true
