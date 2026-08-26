@@ -90,7 +90,7 @@ steps:
           --project=$PROJECT_ID \
           --no-traffic \
           --tag=p007-$SHORT_SHA \
-          --update-labels=git-sha=$COMMIT_SHA,repository=$REPO_NAME,phase=$_PHASE
+          --update-labels=git-sha=$COMMIT_SHA,repository=bgreda,phase=$_PHASE
         echo "Revision desplegada sin trafico. Tag: p007-$SHORT_SHA"
     waitFor:
       - capture-previous-revision
