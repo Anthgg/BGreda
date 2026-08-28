@@ -399,8 +399,8 @@ async def test_production_capacity_uses_effective_not_master_dimensions(
         suffix="_009b_capacity",
         master_dimensions={"width": "1", "height": "1", "length": "1"},
     )
-    # Un horno diminuto: el maestro (1x1x1 = 1 cm3) jamas lo excederia, pero
-    # una medida personalizada mucho mas grande si debe hacerlo.
+    # Un horno diminuto: el maestro (1x1x1 = 1 cm3) entra en una sola hornada,
+    # pero una medida personalizada mucho mas grande necesita varias.
     tiny_kiln = await crear_horno(
         api,
         admin_csrf,
@@ -424,5 +424,11 @@ async def test_production_capacity_uses_effective_not_master_dimensions(
     preview = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
     assert preview.status_code == 200, preview.text
     body = preview.json()
-    assert "KILN_CAPACITY_EXCEEDED" in body["items"][0]["warnings"]
-    assert body["production_summary"]["capacity_exceeded"] is True
+    # Desde Fase 009C exceder la capacidad ya no es una alerta: se resuelve
+    # con mas hornadas. Que la medida EFECTIVA (50x50x50 = 125 000 cm3) manda
+    # sobre la del maestro (1x1x1 = 1 cm3) se comprueba igual de bien —y mas
+    # directamente— con el numero de hornadas que hacen falta en un horno de
+    # 5 cm3: con la medida del maestro seria 1.
+    assert "KILN_CAPACITY_EXCEEDED" not in body["items"][0]["warnings"]
+    assert body["production_summary"]["capacity_exceeded"] is False
+    assert body["production_summary"]["total_batches"] > 1
