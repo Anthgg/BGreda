@@ -27,7 +27,17 @@ class _Strict(BaseModel):
 
 
 class ProductDimensionCompletionIn(_Strict):
-    """Solo valores ausentes en el maestro pueden viajar por este contrato."""
+    """Dimensiones efectivas para ESTA linea de cotizacion.
+
+    Fase 009B: un valor aqui SIEMPRE gana sobre el maestro del producto para
+    calcular y persistir la dimension efectiva de la linea — nunca se
+    escribe de vuelta en products.* (el maestro es de solo lectura desde el
+    Cotizador). Antes de esta fase, este contrato solo aceptaba completar
+    campos ausentes en el maestro (y el guardado SI lo escribia en el
+    maestro compartido); ver dimensions_overridden en QuotationBuilderItemIn
+    para la bandera que distingue "usa el estandar" de "personalizado para
+    esta cotizacion".
+    """
 
     width: Dimension | None = None
     height: Dimension | None = None
@@ -40,6 +50,13 @@ class QuotationBuilderItemIn(_Strict):
     product_id: PositiveInt
     quantity: PositiveInt | None = None
     dimensions: ProductDimensionCompletionIn = Field(default_factory=ProductDimensionCompletionIn)
+    #: Intencion explicita del usuario (paso Piezas: "Usar medidas estandar"
+    #: vs "Personalizar medidas"), independiente de si `dimensions` coincide
+    #: numericamente con el maestro. Persistida en production_snapshot (no
+    #: amerita columna propia); impulsa el badge "Medidas personalizadas" y
+    #: sobrevive a que el maestro cambie despues (nunca se re-infiere
+    #: comparando contra el maestro en vivo).
+    dimensions_overridden: bool = False
     recipe_id: PositiveInt | None = None
     recipe_version_id: PositiveInt | None = None
     firing_line_id: PositiveInt | None = None
@@ -103,11 +120,20 @@ class QuotationBuilderItemOut(BaseModel):
     product_uom: str | None = None
     product_material: str | None = None
     product_grammage: Decimal | None = None
+    #: Medidas EFECTIVAS de esta linea (personalizadas o heredadas del maestro).
     width: Decimal | None = None
     height: Decimal | None = None
     length: Decimal | None = None
     depth: Decimal | None = None
+    #: Medidas ESTANDAR del maestro vigente, para que la UI pueda mostrar el
+    #: contraste y restaurarlas al volver a "usar medidas estandar" sin tener
+    #: que consultar el producto por separado (Fase 009B).
+    standard_width: Decimal | None = None
+    standard_height: Decimal | None = None
+    standard_length: Decimal | None = None
+    standard_depth: Decimal | None = None
     editable_dimensions: list[str] = Field(default_factory=list)
+    dimensions_overridden: bool = False
     quantity: int | None = None
     recipe_id: int | None = None
     recipe_version_id: int | None = None

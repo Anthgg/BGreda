@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
+from app.core.precision import QUANTITY_SCALE
 from app.models.audit import AuditAction
 from app.models.firings import FiringType
 from app.models.masters import Partner, Product
@@ -52,6 +53,25 @@ BUILDER_ENTITY = "quotation_builder"
 PRODUCTION_DIMENSIONS = ("length", "width", "height")
 ALL_DIMENSIONS = ("width", "height", "length", "depth")
 HIDDEN_WARNING_CODES = {"DISCOUNT_RULE_BLOCKED_BY_SOURCE"}
+_DIMENSION_QUANTUM = Decimal(1).scaleb(-QUANTITY_SCALE)
+
+
+def _quantize_dimension(value: Decimal | None) -> Decimal | None:
+    """Normaliza una dimension a la misma escala de la columna DB (6 decimales).
+
+    Fase 009B: una dimension recien parseada del payload ("24", escala 0) y
+    la misma dimension releida de products.width/QuotationItem.*_snapshot
+    tras un roundtrip por Postgres ("24.000000", escala 6) son iguales en
+    VALOR pero distintas en REPRESENTACION. _fingerprint() hashea texto ya
+    stringificado (via los distintos "*_cm"/"*_snapshot" que arma
+    firings.py), asi que sin esta normalizacion dos calculos con exactamente
+    la misma dimension efectiva podian producir un fingerprint distinto
+    segun de donde viniera el valor ese request en particular - disparando
+    un QUOTATION_BUILDER_SOURCE_CHANGED espurio al confirmar.
+    """
+    if value is None:
+        return None
+    return value.quantize(_DIMENSION_QUANTUM)
 
 
 class QuotationBuilderNotFoundError(APIError):
@@ -78,20 +98,28 @@ class QuotationBuilderSourceChangedError(APIError):
     message = "Una fuente cambio; guarde el recalculo antes de confirmar"
 
 
-class ProductDimensionConflictError(APIError):
-    status_code = 409
-    code = "PRODUCT_DIMENSION_CONFLICT"
-    message = "Una dimension del producto ya fue completada por otro usuario"
-
-
 class QuotationBuilderIncompleteError(APIError):
     status_code = 409
     code = "QUOTATION_BUILDER_INCOMPLETE"
     message = "Complete los datos obligatorios antes de confirmar"
 
 
+def _fingerprint_default(value: object) -> str:
+    # Un Decimal matematicamente igual puede llegar con distinta cantidad de
+    # ceros de relleno segun su origen: recien parseado del payload del
+    # usuario ("24") vs releido de una columna quantity_numeric() tras un
+    # roundtrip por la base de datos ("24.000000"). str() sin normalizar
+    # preserva esa diferencia de representacion y el fingerprint (que hashea
+    # el string) los trataria como si hubieran cambiado, aunque el valor
+    # efectivo sea identico. normalize() colapsa ambos a la misma forma
+    # canonica antes de convertir a texto.
+    if isinstance(value, Decimal):
+        return str(value.normalize())
+    return str(value)
+
+
 def _fingerprint(value: object) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=_fingerprint_default)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -261,37 +289,6 @@ class QuotationBuilderService:
         if current != expected:
             raise QuotationBuilderConflictError()
 
-    async def _complete_dimensions(
-        self, payload: QuotationBuilderDraftIn, user: AuthenticatedUser
-    ) -> None:
-        """Completa solo NULL bajo bloqueo, sin sobrescrituras silenciosas."""
-
-        for item in sorted(payload.items, key=lambda value: value.product_id):
-            submitted = item.dimensions.model_dump(exclude_none=True)
-            if not submitted:
-                continue
-            product = await self._quotations.resolve_product(item.product_id, for_update=True)
-            changes: dict[str, tuple[object, object]] = {}
-            for field, value in submitted.items():
-                current = getattr(product, field)
-                if current is not None and current != value:
-                    raise ProductDimensionConflictError(
-                        f"{field} ya tiene el valor {current}",
-                        details=[{"product_id": product.id, "field": field}],
-                    )
-                if current is None:
-                    setattr(product, field, value)
-                    changes[field] = (None, value)
-            if changes:
-                self._audit.record_changes(
-                    entity_type="product",
-                    entity_id=str(product.id),
-                    changes=changes,
-                    user_id=user.id,
-                    user_display_name=user.display_name,
-                )
-        await self._session.flush()
-
     async def _recipe_for(
         self, item: QuotationBuilderItemIn
     ) -> tuple[int | None, int | None, str | None, bool]:
@@ -326,18 +323,22 @@ class QuotationBuilderService:
     def _effective_dimensions(
         product: Product, completion: ProductDimensionCompletionIn
     ) -> dict[str, Decimal | None]:
+        """Resuelve las dimensiones efectivas de un item.
+
+        Fase 009B: una dimension enviada por la cotizacion SIEMPRE gana sobre
+        el maestro (personalizacion por linea, sin mutar products.*); si no
+        se envia nada para un campo, se usa el valor del maestro (puede ser
+        None si el maestro tampoco lo tiene, lo que dispara el warning de
+        PRODUCTION_DIMENSIONS_REQUIRED mas abajo). Antes de esta fase, un
+        valor enviado que difiriera del maestro lanzaba PRODUCT_DIMENSION_CONFLICT
+        y, al guardar, se escribia silenciosamente en el maestro compartido -
+        ver docstring de dimensions_overridden en QuotationBuilderItemIn.
+        """
         submitted = completion.model_dump(exclude_none=True)
-        result: dict[str, Decimal | None] = {}
-        for field in ALL_DIMENSIONS:
-            current = getattr(product, field)
-            candidate = submitted.get(field)
-            if current is not None and candidate is not None and current != candidate:
-                raise ProductDimensionConflictError(
-                    f"{field} ya tiene el valor {current}",
-                    details=[{"product_id": product.id, "field": field}],
-                )
-            result[field] = current if current is not None else candidate
-        return result
+        return {
+            field: _quantize_dimension(submitted.get(field, getattr(product, field)))
+            for field in ALL_DIMENSIONS
+        }
 
     async def _resolve_items(
         self, payload: QuotationBuilderDraftIn
@@ -473,6 +474,15 @@ class QuotationBuilderService:
             ]
             if missing_dimensions:
                 warnings.append("PRODUCTION_DIMENSIONS_REQUIRED")
+            # Una linea de quema confirmada es un hecho fisico ya ocurrido:
+            # su volumen y su costo asignado se calcularon con las medidas
+            # reales de esa hornada. Personalizar las medidas aqui no puede
+            # cambiar ese costo (el item queda fuera de _simulate_production
+            # y _firing_source usa unit_volume_cm3/allocated_cost historicos),
+            # asi que aceptarlo produciria una cotizacion que ANUNCIA una
+            # pieza mas grande cobrando la quema de la pequena. Se bloquea.
+            if item.firing_line_id is not None and item.dimensions_overridden:
+                warnings.append("CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING")
             if item.firing_line_id is None and item.low_kiln_id is None and payload.kiln_id is None:
                 warnings.append("LOW_KILN_REQUIRED")
             if (
@@ -564,7 +574,12 @@ class QuotationBuilderService:
                     height=dimensions["height"],
                     length=dimensions["length"],
                     depth=dimensions["depth"],
+                    standard_width=product.width,
+                    standard_height=product.height,
+                    standard_length=product.length,
+                    standard_depth=product.depth,
                     editable_dimensions=editable_dimensions,
+                    dimensions_overridden=item.dimensions_overridden,
                     quantity=item.quantity,
                     recipe_id=recipe_id,
                     recipe_version_id=version_id,
@@ -603,6 +618,7 @@ class QuotationBuilderService:
                         ),
                         "materials_applied_input": item.materials_applied,
                         "commercial_sale_unit_price_input": item.commercial_sale_unit_price,
+                        "dimensions_overridden": item.dimensions_overridden,
                     },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
@@ -677,6 +693,7 @@ class QuotationBuilderService:
                             "KILN_CAPACITY_EXCEEDED",
                             "RECIPE_REQUIRED",
                             "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
+                            "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
                         )
                     ),
                     sort_order=position,
@@ -901,7 +918,6 @@ class QuotationBuilderService:
     async def create(
         self, payload: QuotationBuilderCreateIn, *, user: AuthenticatedUser
     ) -> QuotationBuilderOut:
-        await self._complete_dimensions(payload, user)
         preview = await self.preview(payload)
         settings = await self._quotations.commercial_settings()
         row = Quotation(
@@ -941,7 +957,6 @@ class QuotationBuilderService:
         row = await self._get(quotation_id, for_update=True)
         self._ensure_draft(row)
         self._ensure_fresh(row, expected_updated_at)
-        await self._complete_dimensions(payload, user)
         preview = await self.preview(payload)
         await self._apply(row, preview)
         self._audit.record_action(
@@ -1045,6 +1060,24 @@ class QuotationBuilderService:
                 QuotationBuilderItemIn(
                     product_id=item.product_id,
                     quantity=item.quantity,
+                    # _to_input reproduce fielmente el ultimo estado guardado
+                    # (para duplicate() y para la re-verificacion de deriva
+                    # de confirm()) — siempre se re-envian las dimensiones
+                    # congeladas de la linea, esten o no personalizadas. El
+                    # "refresco" de modo estandar contra un maestro que
+                    # cambio (ver seccion "Cambio del maestro en Draft" del
+                    # spec) ocurre solo cuando el usuario mismo vuelve a
+                    # guardar el borrador desde el wizard enviando
+                    # `dimensions` vacio — no aqui.
+                    dimensions=ProductDimensionCompletionIn(
+                        width=item.product_width_snapshot,
+                        height=item.product_height_snapshot,
+                        length=item.product_length_snapshot,
+                        depth=item.product_depth_snapshot,
+                    ),
+                    dimensions_overridden=bool(
+                        item.production_snapshot.get("dimensions_overridden")
+                    ),
                     recipe_id=item.recipe_id,
                     recipe_version_id=item.recipe_version_id,
                     materials_applied=item.production_snapshot.get("materials_applied_input"),
@@ -1098,6 +1131,7 @@ class QuotationBuilderService:
             "KILN_REQUIRED",
             "LOW_KILN_REQUIRED",
             "HIGH_KILN_REQUIRED",
+            "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
         }
         firing_complete = bool(
             item.kiln_id or item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
@@ -1132,6 +1166,13 @@ class QuotationBuilderService:
                 height=item.product_height_snapshot,
                 length=item.product_length_snapshot,
                 depth=item.product_depth_snapshot,
+                # item.product es lazy="joined": el maestro VIGENTE viaja sin
+                # consulta extra, para que la UI pueda restaurar el estandar
+                # al desactivar "Personalizar medidas".
+                standard_width=item.product.width if item.product else None,
+                standard_height=item.product.height if item.product else None,
+                standard_length=item.product.length if item.product else None,
+                standard_depth=item.product.depth if item.product else None,
                 editable_dimensions=(
                     []
                     if row.status is not QuotationStatus.DRAFT
@@ -1141,6 +1182,7 @@ class QuotationBuilderService:
                         if getattr(item, f"product_{field}_snapshot") is None
                     ]
                 ),
+                dimensions_overridden=bool(item.production_snapshot.get("dimensions_overridden")),
                 quantity=item.quantity,
                 recipe_id=item.recipe_id,
                 recipe_version_id=item.recipe_version_id,

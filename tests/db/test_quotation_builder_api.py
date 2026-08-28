@@ -122,10 +122,15 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
     assert draft["workflow"] == "COTIZADOR"
     assert draft["status"] == "DRAFT"
     assert draft["complete"] is True
+    # La dimension enviada (completa un NULL del maestro) queda en la linea...
+    assert Decimal(draft["items"][0]["width"]) == Decimal("24")
+    assert Decimal(draft["items"][0]["height"]) == Decimal("2")
 
+    # ...pero el maestro NUNCA se muta desde el Cotizador (Fase 009B):
+    # antes de esta fase, crear el borrador escribia width=24 en products.
     product_after = await api.get(f"/api/v1/products/{products[0]['id']}")
     assert product_after.status_code == 200
-    assert product_after.json()["width"] == "24.000000"
+    assert product_after.json()["width"] is None
     assert product_after.json()["height"] == "2.000000"
 
     valid_update = dict(payload)
@@ -138,17 +143,6 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
     assert update_response.status_code == 200, update_response.text
     draft = update_response.json()
     assert Decimal(draft["items"][0]["commercial_sale_unit_price"]) == Decimal("9")
-
-    # Una dimension que ya existia no puede cambiarse desde el Cotizador.
-    conflicting = dict(payload)
-    conflicting["items"] = [dict(value) for value in payload["items"]]
-    conflicting["items"][0]["dimensions"] = {"height": "99"}
-    conflicting["expected_updated_at"] = draft["updated_at"]
-    conflict_response = await api.put(
-        f"{BUILDER}/{draft['id']}", json=conflicting, headers=head(admin_csrf)
-    )
-    assert conflict_response.status_code == 409
-    assert conflict_response.json()["error"]["code"] == "PRODUCT_DIMENSION_CONFLICT"
 
     await db_session.execute(
         update(Product)
@@ -336,6 +330,24 @@ async def test_builder_usa_una_linea_confirmada_como_fuente_del_costo(
     assert Decimal(preview["items"][0]["firing_cost"]) == (
         Decimal(firing_line["allocated_cost"]) / source_quantity * quoted_quantity
     )
+
+    # Fase 009B: personalizar medidas NO se admite sobre una linea de quema
+    # confirmada. Esa quema ya ocurrio con medidas reales y su costo/volumen
+    # salen del historico, asi que aceptar un override anunciaria una pieza
+    # mas grande cobrando la quema de la pequena.
+    with_override = dict(payload)
+    with_override["items"] = [dict(payload["items"][0])]
+    with_override["items"][0]["dimensions"] = {"width": "50", "height": "50", "length": "50"}
+    with_override["items"][0]["dimensions_overridden"] = True
+    override_preview = (
+        await api.post(f"{BUILDER}/preview", json=with_override, headers=head(admin_csrf))
+    ).json()
+    assert (
+        "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING"
+        in override_preview["items"][0]["warnings"]
+    )
+    assert override_preview["items"][0]["complete"] is False
+    assert override_preview["complete"] is False
 
     created = (await api.post(BUILDER, json=payload, headers=head(admin_csrf))).json()
     reopened = (await api.get(f"{BUILDER}/{created['id']}")).json()
