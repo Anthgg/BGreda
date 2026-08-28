@@ -618,14 +618,21 @@ class FiringService:
         return sessions, lines, factors, kilns, references
 
     # -- Simulador ----------------------------------------------------------
-    async def calculate(self, payload: FiringIn) -> FiringCalculateOut:
+    async def calculate(
+        self, payload: FiringIn, *, multi_batch: bool = False
+    ) -> FiringCalculateOut:
         """Calcula el costo de una hoja **sin persistir nada**.
 
         No inserta, no actualiza, no consume correlativo y no genera ningun
         movimiento de inventario.
+
+        ``multi_batch`` (Fase 009C) lo activa solo el Cotizador, que planifica
+        y por tanto puede repartir el volumen en varias hornadas. El simulador
+        de una hoja de quema real lo deja apagado: ahi la hoja describe UNA
+        hornada concreta y exceder la capacidad debe seguir avisando.
         """
         sessions, lines, factors, kilns, references = await self._build(payload)
-        math = compute_firing(sessions, lines, factors)
+        math = compute_firing(sessions, lines, factors, multi_batch=multi_batch)
         (
             tax_percentage,
             tax_amount,
@@ -646,6 +653,7 @@ class FiringService:
                 physical_occupancy_percentage=result.physical_occupancy_percentage,
                 subtotal=result.subtotal,
                 capacity_exceeded=result.capacity_exceeded,
+                batches=result.batches,
                 sort_order=item.sort_order,
             )
             for result, item in zip(math.sessions, payload.sessions, strict=True)
@@ -691,6 +699,7 @@ class FiringService:
             currency_symbol=currency_symbol,
             occupancy_percentage=math.occupancy_percentage,
             occupancy_factor=math.occupancy_factor,
+            total_batches=math.total_batches,
             capacity_exceeded=math.capacity_exceeded,
             sessions=session_out,
             lines=line_out,

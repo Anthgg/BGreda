@@ -167,6 +167,9 @@ class FiringEstimateOverride:
     cost: Decimal
     snapshot: dict[str, object]
     source_key: object
+    #: Fase 009C: dias que aporta la quema simulada (3 por hornada). Viaja con
+    #: el costo porque ambos salen del mismo calculo de hornadas.
+    days: int = 0
 
 
 MasterT = TypeVar("MasterT", Technique, Additional, OtherCost)
@@ -645,6 +648,9 @@ class QuotationService:
             firing_line, firing_cost, firing_snapshot, firing_warnings = await self._firing_source(
                 payload, product
             )
+            # Una linea de quema confirmada ya ocurrio: su plazo es historia,
+            # no una estimacion a sumar.
+            firing_days = 0
             firing_source_key: object = [
                 firing_line.id if firing_line else None,
                 firing_line.updated_at if firing_line else None,
@@ -655,6 +661,7 @@ class QuotationService:
             firing_cost = firing_override.cost
             firing_snapshot = firing_override.snapshot
             firing_warnings = []
+            firing_days = firing_override.days
             firing_source_key = firing_override.source_key
 
         technique_inputs = list(payload.techniques)
@@ -759,6 +766,7 @@ class QuotationService:
                     days_adjustment=payload.days_adjustment,
                     waiting_days=payload.waiting_days,
                     other_costs=core_other,
+                    firing_days=firing_days,
                     commercial_factor=factor,
                     markup_percent=payload.markup_percent,
                     manual_commercial_unit_price=payload.commercial_sale_unit_price,

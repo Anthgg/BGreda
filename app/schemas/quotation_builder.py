@@ -66,6 +66,14 @@ class QuotationBuilderItemIn(_Strict):
     ] = None
     low_kiln_id: PositiveInt | None = None
     high_kiln_id: PositiveInt | None = None
+    #: Fase 009C: intencion explicita de quemar (baja / alta). Son
+    #: INDEPENDIENTES: una pieza puede necesitar solo baja, solo alta o ambas.
+    #: Existen aparte de `*_kiln_id` para poder decir "si quiero quema baja,
+    #: con el horno de cabecera de la cotizacion" sin repetir el id en cada
+    #: linea. Por defecto True para no romper payloads anteriores a 009C, que
+    #: siempre asumian ambas quemas.
+    low_kiln_selected: bool = True
+    high_kiln_selected: bool = True
     factor_kiln_id: PositiveInt | None = None
     techniques: list[TechniqueSelectionIn] = Field(default_factory=list, max_length=100)
     additionals: list[AdditionalSelectionIn] = Field(default_factory=list, max_length=100)
