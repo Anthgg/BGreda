@@ -482,3 +482,166 @@ async def test_sin_ninguna_quema_seleccionada_se_bloquea(
     body = response.json()
     assert "FIRING_REQUIRED" in body["warnings"]
     assert body["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Regresiones de la revision automatica del PR #15 (Fase 009C)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_desmarcar_una_quema_manda_sobre_el_horno_que_quedo_en_el_payload(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """La INTENCION manda: un horno olvidado en el payload no resucita la quema."""
+    customer, product, recipe, kiln = await _setup(
+        api,
+        admin_csrf,
+        db_session,
+        suffix="_009c_flag",
+        capacity="10000",
+        dimensions={"width": "10", "height": "10", "length": "10"},
+    )
+    payload = {
+        "name": "009C flag manda",
+        "customer_id": customer["id"],
+        "items": [
+            _item(
+                product,
+                recipe,
+                low_kiln_id=kiln["id"],
+                # El id de la quema alta sigue ahi de una seleccion anterior,
+                # pero el usuario la desmarco: no debe cobrarse ni planificarse.
+                high_kiln_id=kiln["id"],
+                high_kiln_selected=False,
+            )
+        ],
+    }
+    response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(_sessions_by_type(body)) == {"LOW"}
+    assert body["production_summary"]["total_batches"] == 1
+    assert body["items"][0]["calculated_days"] == DAYS_PER_BATCH
+
+
+@pytest.mark.asyncio
+async def test_una_quema_pedida_sin_horno_bloquea_en_vez_de_omitirse(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Un payload previo a 009C no puede colar una cotizacion sin la quema alta."""
+    customer, product, recipe, kiln = await _setup(
+        api,
+        admin_csrf,
+        db_session,
+        suffix="_009c_nokiln",
+        capacity="10000",
+        dimensions={"width": "10", "height": "10", "length": "10"},
+    )
+    payload = {
+        "name": "009C quema sin horno",
+        "customer_id": customer["id"],
+        # Sin kiln_id de cabecera: la quema alta queda pedida (default True)
+        # pero sin horno con el que hacerse.
+        "items": [_item(product, recipe, low_kiln_id=kiln["id"])],
+    }
+    response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "FIRING_KILN_REQUIRED" in body["warnings"]
+    assert body["complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_las_hornadas_de_otra_linea_no_inflan_los_dias_de_esta(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Las sesiones se emparejan por (horno, tipo), no por producto cartesiano."""
+    customer, product_a, recipe_a, kiln_1 = await _setup(
+        api,
+        admin_csrf,
+        db_session,
+        suffix="_009c_cross_a",
+        capacity="10000",
+        dimensions={"width": "10", "height": "10", "length": "10"},
+    )
+    kiln_2 = await crear_horno(
+        api,
+        admin_csrf,
+        db_session,
+        nombre="Horno 009C cruzado",
+        capacidad="10000",
+        baja="400",
+        alta="600",
+        factores=FACTORES_CHICO,
+    )
+    product_b, recipe_b = await _finished_product_and_recipe(api, admin_csrf, "_009c_cross_b")
+    await db_session.execute(
+        update(Product)
+        .where(Product.id == product_b["id"])
+        .values(width=Decimal(10), height=Decimal(10), length=Decimal(10))
+    )
+    await db_session.commit()
+
+    payload = {
+        "name": "009C rutas cruzadas",
+        "customer_id": customer["id"],
+        "items": [
+            # Linea A: baja en horno 1, alta en horno 2.
+            _item(
+                product_a,
+                recipe_a,
+                low_kiln_id=kiln_1["id"],
+                high_kiln_id=kiln_2["id"],
+            ),
+            # Linea B: al reves. Sus sesiones (horno 2, BAJA) y (horno 1, ALTA)
+            # NO deben contarse en la linea A.
+            _item(
+                product_b,
+                recipe_b,
+                low_kiln_id=kiln_2["id"],
+                high_kiln_id=kiln_1["id"],
+                sort_order=1,
+            ),
+        ],
+    }
+    response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Hay 4 sesiones en la hoja, pero cada linea solo usa 2 -> 6 dias, no 12.
+    assert len(body["production_summary"]["sessions"]) == 4
+    for item_out in body["items"]:
+        assert item_out["calculated_days"] == 2 * DAYS_PER_BATCH
+
+
+@pytest.mark.asyncio
+async def test_duplicar_un_borrador_incompleto_conserva_la_seleccion_de_quemas(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """La intencion se persiste, no se deduce de una simulacion que no corrio."""
+    customer, product, recipe, kiln = await _setup(
+        api,
+        admin_csrf,
+        db_session,
+        suffix="_009c_incomplete",
+        capacity="10000",
+        dimensions={"width": "10", "height": "10", "length": "10"},
+    )
+    # Sin cantidad: la simulacion sale temprano y no deja low/high_kiln_id.
+    incomplete = _item(product, recipe, low_kiln_id=kiln["id"], high_kiln_selected=False)
+    del incomplete["quantity"]
+    payload = {
+        "name": "009C incompleto",
+        "customer_id": customer["id"],
+        "items": [incomplete],
+    }
+    created = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert created.status_code == 201, created.text
+
+    duplicated = await api.post(
+        f"{BUILDER}/{created.json()['id']}/duplicate", headers=head(admin_csrf)
+    )
+    assert duplicated.status_code == 200, duplicated.text
+    # La copia conserva "solo quema baja": no aparece FIRING_REQUIRED ni
+    # resucita la quema alta.
+    assert "FIRING_REQUIRED" not in duplicated.json()["warnings"]

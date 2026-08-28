@@ -155,6 +155,11 @@ class QuotationBuilderItemOut(BaseModel):
     kiln_id: int | None = None
     low_kiln_id: int | None = None
     high_kiln_id: int | None = None
+    #: Fase 009C: la INTENCION de quemar, independiente de con que horno. Una
+    #: quema que hereda el horno de cabecera no trae *_kiln_id propio, asi que
+    #: la UI no puede deducirla del id sin apagarla por error.
+    low_kiln_selected: bool = True
+    high_kiln_selected: bool = True
     factor_kiln_id: int | None = None
     production_snapshot: dict[str, Any] = Field(default_factory=dict)
     techniques: list[dict[str, Any]] = Field(default_factory=list)

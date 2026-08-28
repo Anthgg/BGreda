@@ -68,30 +68,51 @@ def _selected_kilns(
 ) -> tuple[int | None, int | None]:
     """Hornos de quema baja y alta realmente seleccionados para una linea.
 
-    Fase 009C: baja y alta son independientes. `fallback_kiln_id` (el horno
-    de cabecera de la cotizacion) solo rellena una quema que el usuario ya
-    eligio dejando el horno sin especificar — NUNCA inventa una quema que no
-    se pidio, que es lo que hacia antes al forzar siempre baja y alta.
+    Fase 009C: baja y alta son independientes, y la INTENCION manda sobre el
+    dato. El flag decide si la quema existe; el id (o, en su defecto, el
+    horno de cabecera) solo dice con que horno. Un `low_kiln_id` que quedo
+    en el payload de una seleccion anterior NO resucita la quema: sin flag
+    no hay quema, aunque el id siga ahi.
+
+    `fallback_kiln_id` nunca inventa una quema que no se pidio; solo rellena
+    el horno de una quema ya elegida.
     """
-    low = item.low_kiln_id or (fallback_kiln_id if item.low_kiln_selected else None)
-    high = item.high_kiln_id or (fallback_kiln_id if item.high_kiln_selected else None)
+    low = (item.low_kiln_id or fallback_kiln_id) if item.low_kiln_selected else None
+    high = (item.high_kiln_id or fallback_kiln_id) if item.high_kiln_selected else None
     return low, high
 
 
-def _selected_firing_types(item: QuotationBuilderItemIn, fallback_kiln_id: int | None) -> set[str]:
-    """Tipos de quema que esta linea realmente usa.
+def _selected_routes(
+    item: QuotationBuilderItemIn, fallback_kiln_id: int | None
+) -> set[tuple[int, str]]:
+    """Pares exactos (horno, tipo de quema) que esta linea usa.
 
-    Hace falta ademas de `_selected_kilns` porque baja y alta pueden compartir
-    el mismo horno: filtrar las sesiones solo por `kiln_id` contaria las
-    hornadas de la quema alta en una pieza que solo pidio la baja.
+    Emparejar por par —y no cruzando "hornos de la linea" con "tipos de la
+    linea"— es lo que evita un producto cartesiano: una linea que usa
+    (horno 1, BAJA) y (horno 2, ALTA) contaria tambien la sesion
+    (horno 2, BAJA) de OTRA linea, inflando sus hornadas, sus dias y con
+    ellos todos los gastos PER_DAY.
     """
     low, high = _selected_kilns(item, fallback_kiln_id)
-    types: set[str] = set()
+    routes: set[tuple[int, str]] = set()
     if low is not None:
-        types.add(FiringType.LOW.value)
+        routes.add((low, FiringType.LOW.value))
     if high is not None:
-        types.add(FiringType.HIGH.value)
-    return types
+        routes.add((high, FiringType.HIGH.value))
+    return routes
+
+
+def _firings_without_kiln(item: QuotationBuilderItemIn, fallback_kiln_id: int | None) -> bool:
+    """True si alguna quema pedida se quedo sin horno con el que hacerse.
+
+    Un payload anterior a 009C puede traer `low_kiln_id` y ningun horno de
+    cabecera: con el nuevo `high_kiln_selected=True` por omision, la quema
+    alta queda pedida pero sin horno. Antes eso daba HIGH_KILN_REQUIRED;
+    sin esta comprobacion la cotizacion saldria "valida" habiendose comido
+    en silencio el costo y el plazo de esa quema.
+    """
+    low, high = _selected_kilns(item, fallback_kiln_id)
+    return (item.low_kiln_selected and low is None) or (item.high_kiln_selected and high is None)
 
 
 def _quantize_dimension(value: Decimal | None) -> Decimal | None:
@@ -426,6 +447,8 @@ class QuotationBuilderService:
             # tupla de dos None sigue siendo truthy.
             if not any(_selected_kilns(item, kiln_id)):
                 warnings.append("FIRING_REQUIRED")
+            elif _firings_without_kiln(item, kiln_id):
+                warnings.append("FIRING_KILN_REQUIRED")
 
         if warnings:
             summary = {"estimated": True, "complete": False, "warnings": _unique(warnings)}
@@ -541,8 +564,11 @@ class QuotationBuilderService:
                 warnings.append("CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING")
             # Fase 009C: baja y alta son independientes; solo se exige que
             # haya al menos una (misma regla que el dominio de quemas).
-            if item.firing_line_id is None and not any(_selected_kilns(item, payload.kiln_id)):
-                warnings.append("FIRING_REQUIRED")
+            if item.firing_line_id is None:
+                if not any(_selected_kilns(item, payload.kiln_id)):
+                    warnings.append("FIRING_REQUIRED")
+                elif _firings_without_kiln(item, payload.kiln_id):
+                    warnings.append("FIRING_KILN_REQUIRED")
             if item.materials_applied is None and (recipe_id is None or version_id is None):
                 warnings.append("RECIPE_REQUIRED")
             if item.materials_applied is None and item.material_grams_per_piece is None:
@@ -560,11 +586,11 @@ class QuotationBuilderService:
             # SESIONES que realmente queman esta pieza (baja y/o alta), asi que
             # una pieza de solo-baja con 2 hornadas son 6 dias, y una de baja +
             # alta con 2 hornadas cada una son 12.
+            item_routes = _selected_routes(item, payload.kiln_id)
             item_batches = sum(
                 int(session.get("batches", 1))
                 for session in production.get("sessions", [])
-                if session.get("kiln_id") in _selected_kilns(item, payload.kiln_id)
-                and session.get("firing_type") in _selected_firing_types(item, payload.kiln_id)
+                if (session.get("kiln_id"), session.get("firing_type")) in item_routes
             )
             estimate = FiringEstimateOverride(
                 cost=Decimal(str(line_snapshot.get("allocated_cost", "0"))),
@@ -666,6 +692,8 @@ class QuotationBuilderService:
                         line_snapshot.get("high_kiln_id") if line_snapshot else item.high_kiln_id
                     )
                     or payload.kiln_id,
+                    low_kiln_selected=item.low_kiln_selected,
+                    high_kiln_selected=item.high_kiln_selected,
                     factor_kiln_id=(
                         line_snapshot.get("factor_kiln_id")
                         if line_snapshot
@@ -684,6 +712,16 @@ class QuotationBuilderService:
                         "materials_applied_input": item.materials_applied,
                         "commercial_sale_unit_price_input": item.commercial_sale_unit_price,
                         "dimensions_overridden": item.dimensions_overridden,
+                        # La INTENCION se guarda tal cual el usuario la
+                        # expreso. Derivarla despues de la simulacion la
+                        # perderia en un borrador incompleto: ahi la
+                        # simulacion sale temprano y no deja low/high_kiln_id,
+                        # asi que duplicarlo apagaria ambas quemas.
+                        "low_kiln_selected": item.low_kiln_selected,
+                        "high_kiln_selected": item.high_kiln_selected,
+                        "low_kiln_id_input": item.low_kiln_id,
+                        "high_kiln_id_input": item.high_kiln_id,
+                        "firing_batches": item_batches,
                     },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
@@ -754,6 +792,7 @@ class QuotationBuilderService:
                             "PRODUCTION_DIMENSIONS_REQUIRED",
                             "KILN_REQUIRED",
                             "FIRING_REQUIRED",
+                            "FIRING_KILN_REQUIRED",
                             "KILN_CAPACITY_EXCEEDED",
                             "RECIPE_REQUIRED",
                             "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
@@ -1151,15 +1190,31 @@ class QuotationBuilderService:
                         if item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
                         else None
                     ),
-                    low_kiln_id=item.production_snapshot.get("low_kiln_id"),
-                    high_kiln_id=item.production_snapshot.get("high_kiln_id"),
-                    # Fase 009C: la seleccion de quemas se reconstruye de lo
-                    # que se guardo, no se re-asume. Un borrador de solo-baja
-                    # debe reabrirse como solo-baja aunque exista kiln_id de
-                    # cabecera; antes `or item.kiln_id` lo resucitaba como
-                    # baja+alta.
-                    low_kiln_selected=item.production_snapshot.get("low_kiln_id") is not None,
-                    high_kiln_selected=item.production_snapshot.get("high_kiln_id") is not None,
+                    low_kiln_id=item.production_snapshot.get(
+                        "low_kiln_id_input", item.production_snapshot.get("low_kiln_id")
+                    ),
+                    high_kiln_id=item.production_snapshot.get(
+                        "high_kiln_id_input", item.production_snapshot.get("high_kiln_id")
+                    ),
+                    # Fase 009C: se lee la INTENCION guardada, no se deduce de
+                    # si quedo un horno. Deducirla rompe el borrador
+                    # incompleto: ahi la simulacion sale temprano y no deja
+                    # low/high_kiln_id, asi que duplicarlo apagaria ambas
+                    # quemas y lo dejaria con FIRING_REQUIRED. Los borradores
+                    # anteriores a 009C no tienen el flag: para ellos se cae a
+                    # la presencia del horno, que es como se guardaban.
+                    low_kiln_selected=bool(
+                        item.production_snapshot.get(
+                            "low_kiln_selected",
+                            item.production_snapshot.get("low_kiln_id") is not None,
+                        )
+                    ),
+                    high_kiln_selected=bool(
+                        item.production_snapshot.get(
+                            "high_kiln_selected",
+                            item.production_snapshot.get("high_kiln_id") is not None,
+                        )
+                    ),
                     factor_kiln_id=item.production_snapshot.get("factor_kiln_id") or item.kiln_id,
                     techniques=[self._technique_input(value) for value in item.techniques_snapshot],
                     additionals=[
@@ -1201,6 +1256,7 @@ class QuotationBuilderService:
             "QUANTITY_REQUIRED",
             "KILN_REQUIRED",
             "FIRING_REQUIRED",
+            "FIRING_KILN_REQUIRED",
             "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
         }
         firing_complete = bool(
@@ -1265,6 +1321,18 @@ class QuotationBuilderService:
                 kiln_id=item.kiln_id,
                 low_kiln_id=item.production_snapshot.get("low_kiln_id") or item.kiln_id,
                 high_kiln_id=item.production_snapshot.get("high_kiln_id") or item.kiln_id,
+                low_kiln_selected=bool(
+                    item.production_snapshot.get(
+                        "low_kiln_selected",
+                        item.production_snapshot.get("low_kiln_id") is not None,
+                    )
+                ),
+                high_kiln_selected=bool(
+                    item.production_snapshot.get(
+                        "high_kiln_selected",
+                        item.production_snapshot.get("high_kiln_id") is not None,
+                    )
+                ),
                 factor_kiln_id=item.production_snapshot.get("factor_kiln_id") or item.kiln_id,
                 production_snapshot=_confirmed_item_snapshot(item.production_snapshot),
                 techniques=item.techniques_snapshot,
