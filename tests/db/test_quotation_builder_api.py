@@ -331,6 +331,24 @@ async def test_builder_usa_una_linea_confirmada_como_fuente_del_costo(
         Decimal(firing_line["allocated_cost"]) / source_quantity * quoted_quantity
     )
 
+    # Fase 009B: personalizar medidas NO se admite sobre una linea de quema
+    # confirmada. Esa quema ya ocurrio con medidas reales y su costo/volumen
+    # salen del historico, asi que aceptar un override anunciaria una pieza
+    # mas grande cobrando la quema de la pequena.
+    with_override = dict(payload)
+    with_override["items"] = [dict(payload["items"][0])]
+    with_override["items"][0]["dimensions"] = {"width": "50", "height": "50", "length": "50"}
+    with_override["items"][0]["dimensions_overridden"] = True
+    override_preview = (
+        await api.post(f"{BUILDER}/preview", json=with_override, headers=head(admin_csrf))
+    ).json()
+    assert (
+        "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING"
+        in override_preview["items"][0]["warnings"]
+    )
+    assert override_preview["items"][0]["complete"] is False
+    assert override_preview["complete"] is False
+
     created = (await api.post(BUILDER, json=payload, headers=head(admin_csrf))).json()
     reopened = (await api.get(f"{BUILDER}/{created['id']}")).json()
     assert reopened["items"][0]["firing_line_id"] == firing_line["id"]

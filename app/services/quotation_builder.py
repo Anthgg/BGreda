@@ -474,6 +474,15 @@ class QuotationBuilderService:
             ]
             if missing_dimensions:
                 warnings.append("PRODUCTION_DIMENSIONS_REQUIRED")
+            # Una linea de quema confirmada es un hecho fisico ya ocurrido:
+            # su volumen y su costo asignado se calcularon con las medidas
+            # reales de esa hornada. Personalizar las medidas aqui no puede
+            # cambiar ese costo (el item queda fuera de _simulate_production
+            # y _firing_source usa unit_volume_cm3/allocated_cost historicos),
+            # asi que aceptarlo produciria una cotizacion que ANUNCIA una
+            # pieza mas grande cobrando la quema de la pequena. Se bloquea.
+            if item.firing_line_id is not None and item.dimensions_overridden:
+                warnings.append("CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING")
             if item.firing_line_id is None and item.low_kiln_id is None and payload.kiln_id is None:
                 warnings.append("LOW_KILN_REQUIRED")
             if (
@@ -684,6 +693,7 @@ class QuotationBuilderService:
                             "KILN_CAPACITY_EXCEEDED",
                             "RECIPE_REQUIRED",
                             "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
+                            "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
                         )
                     ),
                     sort_order=position,
@@ -1121,6 +1131,7 @@ class QuotationBuilderService:
             "KILN_REQUIRED",
             "LOW_KILN_REQUIRED",
             "HIGH_KILN_REQUIRED",
+            "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
         }
         firing_complete = bool(
             item.kiln_id or item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
