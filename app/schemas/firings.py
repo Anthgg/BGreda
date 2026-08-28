@@ -220,6 +220,9 @@ class FiringSessionOut(_Out):
     physical_occupancy_percentage: Decimal
     subtotal: Decimal
     capacity_exceeded: bool = False
+    #: Hornadas necesarias para esta sesion (Fase 009C). En una hoja de quema
+    #: real siempre es 1: la hoja describe UNA hornada fisica.
+    batches: int = 1
     sort_order: int = 0
 
 
@@ -265,6 +268,8 @@ class FiringCalculateOut(_Out):
     occupancy_percentage: Decimal
     occupancy_factor: Decimal
     capacity_exceeded: bool
+    #: Suma de hornadas de todas las sesiones (Fase 009C).
+    total_batches: int = 0
     sessions: list[FiringSessionOut]
     lines: list[FiringLineOut]
 

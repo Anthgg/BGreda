@@ -160,6 +160,30 @@ def allocate_session_cost(share: Decimal, rate: Decimal) -> Decimal:
     return share * rate
 
 
+def required_batches(assigned_volume_cm3: Decimal, capacity_cm3: Decimal) -> int:
+    """Cuantas hornadas hacen falta para quemar un volumen (Fase 009C).
+
+    Un horno no se llena "2.5 veces": si sobra media carga hay que encender
+    el horno otra vez, asi que el resultado se redondea SIEMPRE hacia arriba.
+    Capacidad exacta es una sola hornada (100/100 -> 1, no 2); un cm3 de mas
+    ya obliga a la segunda (101/100 -> 2).
+
+    Nada de float: el techo se calcula con division entera sobre enteros
+    escalados, para que 3 * 0.1 no acabe siendo 0.30000000000000004.
+    """
+    if capacity_cm3 <= 0:
+        raise FiringError("La capacidad del horno debe ser mayor que cero")
+    if assigned_volume_cm3 <= 0:
+        return 0
+    # -(-a // b) es el techo exacto de a/b para enteros positivos. Ambos
+    # Decimal se llevan al mismo exponente entero antes de dividir.
+    volume_exponent = assigned_volume_cm3.as_tuple().exponent
+    capacity_exponent = capacity_cm3.as_tuple().exponent
+    assert isinstance(volume_exponent, int) and isinstance(capacity_exponent, int)
+    scale = Decimal(1).scaleb(-min(volume_exponent, capacity_exponent, 0))
+    return -(-int(assigned_volume_cm3 * scale) // int(capacity_cm3 * scale))
+
+
 @dataclass(frozen=True)
 class SessionInput:
     """Sesion de horno tal y como entra al calculo."""
@@ -211,6 +235,10 @@ class SessionResult:
     physical_occupancy_percentage: Decimal
     subtotal: Decimal
     capacity_exceeded: bool
+    #: Hornadas necesarias para esta sesion (Fase 009C). Con
+    #: ``multi_batch=False`` siempre es 1: es lo que ve una hoja de quema
+    #: real, donde la hoja describe UNA hornada fisica.
+    batches: int = 1
 
 
 @dataclass(frozen=True)
@@ -225,17 +253,28 @@ class FiringMath:
     lines: tuple[LineResult, ...]
     sessions: tuple[SessionResult, ...]
     capacity_exceeded: bool
+    #: Suma de hornadas de todas las sesiones (Fase 009C).
+    total_batches: int = 0
 
 
 def compute_firing(
     sessions: Sequence[SessionInput],
     lines: Sequence[LineInput],
     factor_tables: Mapping[int, Sequence[tuple[int, int, Decimal]]],
+    *,
+    multi_batch: bool = False,
 ) -> FiringMath:
     """Calcula volumenes, reparto, ocupacion, factores y costos.
 
     ``factor_tables`` mapea ``kiln_id`` a su tabla de tramos. Es un argumento y
     no una consulta para que la funcion siga siendo pura y comprobable.
+
+    ``multi_batch`` (Fase 009C) es **opt-in a proposito**. Una hoja de quema
+    REAL describe una hornada fisica concreta: si no cabe, no cabe, y la
+    hoja se corrige — no se le multiplica el costo por detras. El Cotizador,
+    en cambio, planifica: ahi si tiene sentido decir "esto no entra en una
+    sola hornada, hacen falta 3, y cuesta 3 veces". Dejarlo apagado por
+    omision mantiene el costo de las hojas reales byte a byte igual.
     """
     if not sessions or not lines:
         raise FiringEmptyError()
@@ -262,15 +301,35 @@ def compute_firing(
     session_subtotal: dict[str, Decimal] = {session.key: Decimal(0) for session in sessions}
     any_capacity_exceeded = False
 
+    # Primera pasada: cuanto volumen carga cada sesion. Hace falta ANTES de
+    # repartir costos porque el numero de hornadas depende del volumen total
+    # de la sesion (varias piezas comparten hornada) y multiplica su tarifa.
+    for line, (_unit, total) in zip(lines, volumes, strict=True):
+        for key in line.session_keys:
+            session_volume[key] += total
+
+    session_batches: dict[str, int] = {
+        session.key: (
+            max(1, required_batches(session_volume[session.key], session.capacity))
+            if multi_batch
+            else 1
+        )
+        for session in sessions
+    }
+    # La tarifa de la sesion es el costo de UNA hornada: con N hornadas el
+    # horno se enciende N veces. Multiplicar aqui deja intacto el reparto
+    # proporcional por volumen que ya hace allocate_session_cost.
+    session_rate: dict[str, Decimal] = {
+        session.key: session.rate * Decimal(session_batches[session.key]) for session in sessions
+    }
+
     for line, (unit, total) in zip(lines, volumes, strict=True):
         share = volume_share(total, total_volume)
 
         base_cost = Decimal(0)
         for key in line.session_keys:
-            session = by_key[key]
-            portion = allocate_session_cost(share, session.rate)
+            portion = allocate_session_cost(share, session_rate[key])
             base_cost += portion
-            session_volume[key] += total
             session_subtotal[key] += portion
 
         # El horno que decide el tramo: el declarado o, si no se declara, el
@@ -322,6 +381,7 @@ def compute_firing(
             else Decimal(0)
         )
         max_occupancy = max(max_occupancy, occupancy)
+        batches = session_batches[session.key]
         session_results.append(
             SessionResult(
                 key=session.key,
@@ -332,7 +392,10 @@ def compute_firing(
                 assigned_volume_cm3=assigned,
                 physical_occupancy_percentage=occupancy,
                 subtotal=session_subtotal[session.key],
-                capacity_exceeded=occupancy > Decimal(100),
+                # Con multi_batch el exceso deja de ser un problema: se
+                # resuelve con mas hornadas, no con una alerta.
+                capacity_exceeded=(not multi_batch) and occupancy > Decimal(100),
+                batches=batches,
             )
         )
 
@@ -350,5 +413,6 @@ def compute_firing(
         occupancy_factor=effective_factor,
         lines=tuple(line_results),
         sessions=tuple(session_results),
-        capacity_exceeded=any_capacity_exceeded,
+        capacity_exceeded=(not multi_batch) and any_capacity_exceeded,
+        total_batches=sum(session_batches.values()),
     )

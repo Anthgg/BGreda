@@ -101,6 +101,12 @@ class QuotationInput:
     days_adjustment: int
     waiting_days: int
     other_costs: tuple[OtherCostInput, ...]
+    #: Fase 009C: dias que aporta la quema (3 por hornada). Se suman a los
+    #: dias de tecnicas, que hasta ahora eran la unica fuente de
+    #: `calculated_days`. Entra por aqui —y no despues del calculo— porque
+    #: `total_days` alimenta los otros gastos de tipo PER_DAY: sumarlo mas
+    #: tarde dejaria esos gastos calculados sobre un plazo que ya no es real.
+    firing_days: int = 0
     commercial_factor: Decimal | None = None
     markup_percent: Decimal | None = None
     manual_commercial_unit_price: Decimal | None = None
@@ -270,7 +276,10 @@ def calculate_quotation(payload: QuotationInput) -> QuotationResult:
     labor_cost = sum((item.applied_cost for item in techniques), ZERO) + sum(
         (item.applied_cost for item in additionals), ZERO
     )
-    calculated_days = sum(item.applied_days for item in techniques)
+    # Fase 009C: los dias de quema se SUMAN a los de tecnicas, no los
+    # reemplazan: son trabajos distintos (hornear vs. decorar/esmaltar) y el
+    # sistema no modela solapamiento, asi que van uno tras otro.
+    calculated_days = sum(item.applied_days for item in techniques) + payload.firing_days
     total_days = calculated_days + payload.days_adjustment + payload.waiting_days
     if total_days < 0:
         raise QuotationCalculationError("El total de dias no puede ser negativo")
