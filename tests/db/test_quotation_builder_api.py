@@ -122,10 +122,15 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
     assert draft["workflow"] == "COTIZADOR"
     assert draft["status"] == "DRAFT"
     assert draft["complete"] is True
+    # La dimension enviada (completa un NULL del maestro) queda en la linea...
+    assert Decimal(draft["items"][0]["width"]) == Decimal("24")
+    assert Decimal(draft["items"][0]["height"]) == Decimal("2")
 
+    # ...pero el maestro NUNCA se muta desde el Cotizador (Fase 009B):
+    # antes de esta fase, crear el borrador escribia width=24 en products.
     product_after = await api.get(f"/api/v1/products/{products[0]['id']}")
     assert product_after.status_code == 200
-    assert product_after.json()["width"] == "24.000000"
+    assert product_after.json()["width"] is None
     assert product_after.json()["height"] == "2.000000"
 
     valid_update = dict(payload)
@@ -138,17 +143,6 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
     assert update_response.status_code == 200, update_response.text
     draft = update_response.json()
     assert Decimal(draft["items"][0]["commercial_sale_unit_price"]) == Decimal("9")
-
-    # Una dimension que ya existia no puede cambiarse desde el Cotizador.
-    conflicting = dict(payload)
-    conflicting["items"] = [dict(value) for value in payload["items"]]
-    conflicting["items"][0]["dimensions"] = {"height": "99"}
-    conflicting["expected_updated_at"] = draft["updated_at"]
-    conflict_response = await api.put(
-        f"{BUILDER}/{draft['id']}", json=conflicting, headers=head(admin_csrf)
-    )
-    assert conflict_response.status_code == 409
-    assert conflict_response.json()["error"]["code"] == "PRODUCT_DIMENSION_CONFLICT"
 
     await db_session.execute(
         update(Product)
