@@ -49,7 +49,7 @@ async def _kiln(
         alta=alta,
         factores=FACTORES_CHICO,
     )
-    updated = await api.patch(
+    updated = await api.put(
         f"{KILNS}/{kiln['id']}",
         json={"firing_days_per_batch": dias},
         headers=head(csrf),
@@ -106,14 +106,14 @@ async def test_el_horno_expone_y_edita_su_duracion_de_hornada(
     assert created.json()["firing_days_per_batch"] == 3
 
     kiln_id = created.json()["id"]
-    updated = await api.patch(
+    updated = await api.put(
         f"{KILNS}/{kiln_id}", json={"firing_days_per_batch": 5}, headers=head(admin_csrf)
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["firing_days_per_batch"] == 5
 
     # Cero dias no es un horno: es un error de configuracion.
-    invalid = await api.patch(
+    invalid = await api.put(
         f"{KILNS}/{kiln_id}", json={"firing_days_per_batch": 0}, headers=head(admin_csrf)
     )
     assert invalid.status_code == 422, invalid.text
@@ -302,7 +302,7 @@ async def test_confirmed_snapshot_immutable_y_draft_recalcula(
     draft_id = open_draft.json()["id"]
 
     # El taller reconfigura el horno DESPUES.
-    changed = await api.patch(
+    changed = await api.put(
         f"{KILNS}/{kiln['id']}", json={"firing_days_per_batch": 6}, headers=head(admin_csrf)
     )
     assert changed.status_code == 200, changed.text
