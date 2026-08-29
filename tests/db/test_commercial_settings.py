@@ -219,3 +219,103 @@ async def test_version_desfasada_se_rechaza(api: httpx.AsyncClient, admin_csrf: 
     )
 
     assert response.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Porcentaje de esmalte estimado (Fase 009D)
+# ---------------------------------------------------------------------------
+async def test_el_porcentaje_de_esmalte_se_lee_y_vale_quince(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """GET_RETURNS_15.
+
+    Es el unico valor comercial que SI viene precargado, y a proposito: la
+    columna es NOT NULL y el Cotizador necesita siempre un porcentaje con el
+    que estimar. La migracion 0015 lo inicializa en 15.
+    """
+    body = (await api.get(COMMERCIAL)).json()
+
+    assert Decimal(str(body["estimated_glaze_percent"])) == Decimal("15")
+
+
+async def test_el_porcentaje_de_esmalte_se_puede_cambiar_y_persiste(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """UPDATE_15_TO_20 y RELOAD_RETURNS_20."""
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, estimated_glaze_percent="20"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+    assert Decimal(str(respuesta.json()["estimated_glaze_percent"])) == Decimal("20")
+
+    # Releido desde la API...
+    recargado = (await api.get(COMMERCIAL)).json()
+    assert Decimal(str(recargado["estimated_glaze_percent"])) == Decimal("20")
+
+    # ...y desde la base, para que no valga un valor que solo vive en memoria.
+    almacenado = (
+        await db_session.execute(
+            text("SELECT estimated_glaze_percent FROM commercial_settings WHERE id = 1")
+        )
+    ).scalar_one()
+    assert Decimal(str(almacenado)) == Decimal("20")
+
+
+async def test_el_porcentaje_de_esmalte_rechaza_cero(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """INVALID_0.
+
+    Cero no es "sin esmalte": es una estimacion que siempre da cero gramos y
+    hace desaparecer el material del costo sin avisar.
+    """
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, estimated_glaze_percent="0"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert respuesta.status_code == 422, respuesta.text
+
+
+async def test_el_porcentaje_de_esmalte_rechaza_mas_de_cien(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """INVALID_GT_100: mas esmalte que pieza es un error de captura."""
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, estimated_glaze_percent="101"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert respuesta.status_code == 422, respuesta.text
+
+
+async def test_un_valor_invalido_no_deja_rastro(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """RESTORE_15: un rechazo no debe dejar el valor a medias.
+
+    Se comprueba contra la base y no contra la respuesta: un 422 que hubiera
+    escrito antes de validar seguiria devolviendo 422 y habria corrompido la
+    configuracion igual.
+    """
+    for invalido in ("0", "101", "-5"):
+        respuesta = await api.put(
+            COMMERCIAL,
+            json=_payload(1, estimated_glaze_percent=invalido),
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert respuesta.status_code == 422, f"{invalido}: {respuesta.text}"
+
+    almacenado = (
+        await db_session.execute(
+            text("SELECT estimated_glaze_percent FROM commercial_settings WHERE id = 1")
+        )
+    ).scalar_one()
+    assert Decimal(str(almacenado)) == Decimal("15")
+
+    # Y la version no se ha movido: un rechazo no consume el bloqueo optimista.
+    assert (await api.get(COMMERCIAL)).json()["version"] == 1

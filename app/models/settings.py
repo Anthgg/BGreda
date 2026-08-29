@@ -38,6 +38,14 @@ MAX_TAX_PERCENT = Decimal("100")
 #: Vigencia maxima admitida para una cotizacion, en dias.
 MAX_VALIDITY_DAYS = 3650
 
+#: Limite del porcentaje de esmalte estimado. Como MAX_TAX_PERCENT, es una
+#: barrera contra errores de captura, no una regla del taller.
+MAX_GLAZE_PERCENT = Decimal("100")
+
+#: Valor con el que la migracion 0015 inicializa el porcentaje. Vive aqui para
+#: que el modelo, el esquema y la migracion digan el mismo numero.
+DEFAULT_ESTIMATED_GLAZE_PERCENT = Decimal("15")
+
 
 class VersionedSingletonMixin(TimestampMixin):
     """Fila unica con control de concurrencia optimista.
@@ -120,7 +128,10 @@ class CommercialSettings(Base, VersionedSingletonMixin):
     #: Es una ESTIMACION comercial para cotizar, no consumo real de inventario;
     #: el descuento real de material pertenece a 009H.
     estimated_glaze_percent: Mapped[Decimal] = mapped_column(
-        percentage_numeric(), nullable=False, default=Decimal(15), server_default=text("15")
+        percentage_numeric(),
+        nullable=False,
+        default=DEFAULT_ESTIMATED_GLAZE_PERCENT,
+        server_default=text("15"),
     )
 
     # ---- Textos de documentos (texto plano, jamas HTML) ------------------
@@ -143,7 +154,7 @@ class CommercialSettings(Base, VersionedSingletonMixin):
         ),
         CheckConstraint("default_quotation_factor > 0", name="default_quotation_factor_positive"),
         CheckConstraint(
-            "estimated_glaze_percent > 0 AND estimated_glaze_percent <= 100",
+            f"estimated_glaze_percent > 0 AND estimated_glaze_percent <= {MAX_GLAZE_PERCENT}",
             name="estimated_glaze_percent_range",
         ),
         CheckConstraint(

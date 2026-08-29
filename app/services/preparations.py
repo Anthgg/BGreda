@@ -32,6 +32,10 @@ from app.core.preparations import (
     PreparationError,
     batch_total_cost,
     component_amounts,
+    distribute_glaze,
+    estimated_glaze_grams,
+    glaze_cost,
+    grams_to_ml,
     solids_concentration_g_per_ml,
     unit_cost_per_ml,
 )
@@ -46,6 +50,7 @@ from app.models.recipes import (
     RecipeVersion,
 )
 from app.models.sequence import SequenceType
+from app.models.settings import SINGLETON_ID, CommercialSettings
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.inventory import InventoryService
@@ -99,6 +104,28 @@ class InsufficientStockError(APIError):
         )
 
 
+@dataclass(frozen=True)
+class GlazeAllocation:
+    """Lo que le toca a un esmalte del consumo estimado de la pieza."""
+
+    preparation: RecipePreparation
+    share: Decimal
+    grams: Decimal
+    millilitres: Decimal
+    cost: Decimal
+
+
+@dataclass(frozen=True)
+class GlazeEstimate:
+    """Resultado de estimar esmalte para cotizar. Nada de esto se persiste."""
+
+    estimated_glaze_percent: Decimal
+    grams_per_piece: Decimal
+    total_grams: Decimal
+    allocations: tuple[GlazeAllocation, ...]
+    total_cost: Decimal
+
+
 class PreparationService:
     """Registra preparaciones fisicas de receta."""
 
@@ -149,11 +176,20 @@ class PreparationService:
         return row
 
     async def list_preparations(
-        self, *, recipe_id: int | None = None, limit: int = 50, offset: int = 0
+        self,
+        *,
+        recipe_id: int | None = None,
+        prepared_product_id: int | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> tuple[list[RecipePreparation], int]:
         stmt = select(RecipePreparation)
         if recipe_id is not None:
             stmt = stmt.join(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id)
+        # El Cotizador necesita "que lotes de ESTE esmalte hay": sin el filtro
+        # tendria que traerse la lista entera y descartar en el navegador.
+        if prepared_product_id is not None:
+            stmt = stmt.where(RecipePreparation.prepared_product_id == prepared_product_id)
         total = await self._session.scalar(select(func.count()).select_from(stmt.subquery()))
         rows = await self._session.execute(
             stmt.options(
@@ -167,6 +203,86 @@ class PreparationService:
             .offset(max(0, offset))
         )
         return list(rows.scalars().unique()), int(total or 0)
+
+    async def estimated_glaze_percent(self) -> Decimal:
+        """Porcentaje configurado. Autoridad del backend, no una constante."""
+        settings = await self._session.scalar(
+            select(CommercialSettings).where(CommercialSettings.id == SINGLETON_ID)
+        )
+        if settings is None:
+            raise PreparationValidationError(
+                "La configuracion comercial no esta inicializada: no hay "
+                "porcentaje de esmalte con el que estimar"
+            )
+        return settings.estimated_glaze_percent
+
+    async def estimate_glaze(
+        self,
+        *,
+        piece_weight_g: Decimal,
+        quantity: int,
+        glazes: Sequence[tuple[int, Decimal]],
+    ) -> GlazeEstimate:
+        """Estima el esmalte de una cotizacion y lo reparte entre los elegidos.
+
+        Es una SIMULACION: no escribe nada, no descuenta nada, no bloquea nada.
+        Cotizar no consume material; el consumo real al vender pertenece a 009H.
+
+        El total sale del peso de la pieza, no de los esmaltes: usar dos
+        esmaltes no gasta el doble, gasta lo mismo repartido. Por eso el
+        porcentaje se aplica UNA vez y `distribute_glaze` reparte el resultado.
+        """
+        percent = await self.estimated_glaze_percent()
+        try:
+            total_grams = estimated_glaze_grams(piece_weight_g, quantity, percent)
+        except PreparationError as error:
+            raise PreparationValidationError(str(error)) from error
+
+        ids = [preparation_id for preparation_id, _ in glazes]
+        if len(ids) != len(set(ids)):
+            raise PreparationValidationError(
+                "Un mismo preparado no puede aparecer dos veces en el reparto"
+            )
+        if not glazes:
+            # Sin esmaltes elegidos todavia se puede decir CUANTO hara falta.
+            # Es el estado normal mientras el usuario aun no ha elegido.
+            return GlazeEstimate(
+                estimated_glaze_percent=percent,
+                grams_per_piece=estimated_glaze_grams(piece_weight_g, 1, percent),
+                total_grams=total_grams,
+                allocations=(),
+                total_cost=Decimal(0),
+            )
+
+        preparations = [await self.get(preparation_id) for preparation_id in ids]
+        try:
+            shares = distribute_glaze(total_grams, [share for _, share in glazes])
+        except PreparationError as error:
+            raise PreparationValidationError(str(error)) from error
+
+        allocations: list[GlazeAllocation] = []
+        for preparation, (_, share), grams in zip(preparations, glazes, shares, strict=True):
+            try:
+                millilitres = grams_to_ml(grams, preparation.solids_g_per_ml)
+                cost = glaze_cost(millilitres, preparation.unit_cost_per_ml)
+            except PreparationError as error:
+                raise PreparationValidationError(str(error)) from error
+            allocations.append(
+                GlazeAllocation(
+                    preparation=preparation,
+                    share=share,
+                    grams=grams,
+                    millilitres=millilitres,
+                    cost=cost,
+                )
+            )
+        return GlazeEstimate(
+            estimated_glaze_percent=percent,
+            grams_per_piece=estimated_glaze_grams(piece_weight_g, 1, percent),
+            total_grams=total_grams,
+            allocations=tuple(allocations),
+            total_cost=sum((a.cost for a in allocations), Decimal(0)),
+        )
 
     async def prepare(
         self,

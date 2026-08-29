@@ -188,6 +188,19 @@ def estimated_glaze_grams(
     return _quantize_quantity(per_piece * Decimal(quantity))
 
 
+def glaze_cost(millilitres: Decimal, unit_cost_per_ml: Decimal) -> Decimal:
+    """Costo estimado de una asignacion de esmalte.
+
+    Se cobra por mililitro y no por gramo porque el costo congelado del lote es
+    por mililitro de preparado: el agua ya esta descontada de esa cifra.
+    """
+    if millilitres < 0:
+        raise PreparationError("Los mililitros no pueden ser negativos")
+    if unit_cost_per_ml < 0:
+        raise PreparationError("El costo por mililitro no puede ser negativo")
+    return _quantize_money(millilitres * unit_cost_per_ml)
+
+
 def distribute_glaze(total_grams: Decimal, shares: Sequence[Decimal]) -> tuple[Decimal, ...]:
     """Reparte el consumo estimado entre varios esmaltes.
 
