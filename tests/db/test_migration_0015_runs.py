@@ -160,12 +160,31 @@ async def _uom(engine: AsyncEngine, code: str) -> tuple[str, Decimal] | None:
     return (str(row[0]), Decimal(str(row[1]))) if row else None
 
 
+async def _uom_snapshot(engine: AsyncEngine) -> dict[str, tuple[object, ...]]:
+    """Retrato completo de las unidades existentes, para comparar antes/despues.
+
+    Comparar solo dimension y factor dejaria pasar un cambio silencioso de
+    nombre, simbolo, `is_base` o `active`.
+    """
+    async with engine.connect() as connection:
+        rows = (
+            await connection.execute(
+                text(
+                    "SELECT code, name, symbol, dimension, factor_to_base, is_base, active "
+                    "FROM units_of_measure ORDER BY code"
+                )
+            )
+        ).all()
+    return {str(row[0]): tuple(row[1:]) for row in rows}
+
+
 @pytest.mark.asyncio
 async def test_0014_a_0015_a_0014_y_de_vuelta(migration_engine: AsyncEngine) -> None:
     """ALEMBIC_0014_TO_0015 + ALEMBIC_0015_TO_0014_TO_0015."""
     _upgrade("0014")
     assert await _current(migration_engine) == "0014"
     assert not await _table_exists(migration_engine, "recipe_preparations")
+    unidades_antes = await _uom_snapshot(migration_engine)
 
     _upgrade("0015")
     assert await _current(migration_engine) == "0015"
@@ -173,10 +192,13 @@ async def test_0014_a_0015_a_0014_y_de_vuelta(migration_engine: AsyncEngine) -> 
     # ---- Unidades ------------------------------------------------------
     assert await _uom(migration_engine, "ml") == ("VOLUME", Decimal(1))
     assert await _uom(migration_engine, "l") == ("VOLUME", Decimal(1000))
-    # EXISTING_UOMS_UNCHANGED.
-    assert await _uom(migration_engine, "g") == ("MASS", Decimal(1))
-    assert await _uom(migration_engine, "kg") == ("MASS", Decimal(1000))
-    assert await _uom(migration_engine, "unit") == ("COUNT", Decimal(1))
+    # EXISTING_UOMS_UNCHANGED: cada unidad previa, entera y sin tocar.
+    unidades_despues = await _uom_snapshot(migration_engine)
+    for code, antes in unidades_antes.items():
+        assert code in unidades_despues, f"la 0015 borro la unidad {code}"
+        assert unidades_despues[code] == antes, f"la 0015 altero la unidad {code}"
+    # Y las unicas altas son las dos de volumen.
+    assert set(unidades_despues) - set(unidades_antes) == {"ml", "l"}
 
     # ---- Tablas y columnas nuevas ---------------------------------------
     assert await _table_exists(migration_engine, "recipe_preparations")
@@ -289,6 +311,41 @@ async def test_el_porcentaje_de_esmalte_llega_como_quince(
     assert "estimated_glaze_percent >" in clause and "<=" in clause
 
 
+async def _assert_no_partial_schema(engine: AsyncEngine) -> None:
+    """Nada de la 0015 puede quedar aplicado tras un upgrade abortado.
+
+    Que `alembic_version` siga en 0014 no basta: alembic podria haber dejado
+    objetos creados si el DDL no fuera transaccional. En PostgreSQL lo es, pero
+    eso hay que COMPROBARLO, no suponerlo — y aqui importa especialmente,
+    porque el CHECK de unidades se cambia ANTES de la guarda que aborta.
+    """
+    assert await _current(engine) == "0014"
+
+    assert not await _table_exists(engine, "recipe_preparations")
+    assert not await _table_exists(engine, "recipe_preparation_lines")
+    assert not await _column_exists(engine, "stock_movements", "preparation_id")
+    assert not await _column_exists(engine, "commercial_settings", "estimated_glaze_percent")
+
+    # La secuencia del lote no debe haberse sembrado.
+    assert (
+        await _scalar(
+            engine,
+            "SELECT COUNT(*) FROM document_sequences WHERE sequence_type = 'PREPARATION'",
+        )
+        == 0
+    )
+
+    # El CHECK de unidades sigue siendo el de 0014: sin VOLUME.
+    unidades = await _check_clause(engine, "ck_units_of_measure_dimension_allowed")
+    assert unidades is not None, "el CHECK de unidades desaparecio"
+    assert "VOLUME" not in unidades, f"quedo aplicado a medias: {unidades}"
+
+    # Y los tipos de movimiento tampoco se ampliaron.
+    movimientos = await _check_clause(engine, "ck_stock_movements_movement_type_allowed")
+    assert movimientos is not None
+    assert "PREPARATION_OUT" not in movimientos and "PREPARATION_IN" not in movimientos
+
+
 async def _insert_uom(engine: AsyncEngine, code: str, dimension: str, factor: str) -> None:
     async with engine.begin() as connection:
         await connection.execute(
@@ -319,9 +376,8 @@ async def test_ml_existente_con_definicion_incorrecta_aborta(
     result = _alembic("upgrade", "0015")
     assert result.returncode != 0, "la migracion deberia haber abortado"
     assert "definicion distinta" in (result.stdout + result.stderr)
-    # Y no queda a medias.
-    assert await _current(migration_engine) == "0014"
-    assert not await _table_exists(migration_engine, "recipe_preparations")
+    # FAILED_MIGRATION_TRANSACTIONALITY + NO_PARTIAL_SCHEMA_AFTER_FAILURE.
+    await _assert_no_partial_schema(migration_engine)
 
 
 @pytest.mark.asyncio
@@ -333,4 +389,4 @@ async def test_l_existente_con_factor_incorrecto_aborta(migration_engine: AsyncE
     result = _alembic("upgrade", "0015")
     assert result.returncode != 0, "la migracion deberia haber abortado"
     assert "definicion distinta" in (result.stdout + result.stderr)
-    assert await _current(migration_engine) == "0014"
+    await _assert_no_partial_schema(migration_engine)
