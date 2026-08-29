@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 from sqlalchemy import select
 
 from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    PreparationServiceDep,
     RecipeImportServiceDep,
     RecipeServiceDep,
 )
+from app.core.preparations import PreparationError, grams_to_ml, ml_to_grams
 from app.models.importing import ImportEntity, ImportRow
+from app.models.recipes import RecipePreparation
 from app.schemas.recipes import (
     RecipeCalculateIn,
     RecipeCalculateOut,
@@ -22,11 +25,18 @@ from app.schemas.recipes import (
     RecipeImportPreviewOut,
     RecipeOut,
     RecipePage,
+    RecipePreparationIn,
+    RecipePreparationLineOut,
+    RecipePreparationOut,
+    RecipePreparationPage,
     RecipeRowResolutionIn,
     RecipeUpdate,
     RecipeVersionIn,
     RecipeVersionOut,
+    UnitConversionIn,
+    UnitConversionOut,
 )
+from app.services.preparations import PreparationValidationError
 
 router = APIRouter(tags=["recetas"])
 
@@ -206,3 +216,124 @@ async def commit_recipe_import(
     result = await import_service.commit(batch_id, user=admin)
     await session.commit()
     return result
+
+
+# ---------------------------------------------------------------------------
+# Preparaciones (Fase 009D)
+# ---------------------------------------------------------------------------
+def _preparation_out(row: RecipePreparation) -> RecipePreparationOut:
+    return RecipePreparationOut(
+        id=row.id,
+        code=row.code,
+        recipe_version_id=row.recipe_version_id,
+        prepared_product_id=row.prepared_product_id,
+        prepared_product_internal_reference=row.prepared_product.internal_reference,
+        prepared_product_name=row.prepared_product.name,
+        location_id=row.location_id,
+        total_dry_weight_g=row.total_dry_weight_g,
+        water_amount_ml=row.water_amount_ml,
+        final_yield_ml=row.final_yield_ml,
+        solids_g_per_ml=row.solids_g_per_ml,
+        batch_total_cost=row.batch_total_cost,
+        unit_cost_per_ml=row.unit_cost_per_ml,
+        status=row.status.value,
+        prepared_at=row.prepared_at,
+        lines=[
+            RecipePreparationLineOut(
+                id=line.id,
+                component_product_id=line.component_product_id,
+                component_internal_reference=line.component_product.internal_reference,
+                component_name=line.component_product.name,
+                quantity_g=line.quantity_g,
+                unit_cost_snapshot=line.unit_cost_snapshot,
+                line_cost=line.line_cost,
+            )
+            for line in row.lines
+        ],
+    )
+
+
+@router.get("/recipe-preparations", response_model=RecipePreparationPage)
+async def list_recipe_preparations(
+    service: PreparationServiceDep,
+    _: CurrentUserDep,
+    recipe_id: int | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> RecipePreparationPage:
+    items, total = await service.list_preparations(recipe_id=recipe_id, limit=limit, offset=offset)
+    return RecipePreparationPage(
+        items=[_preparation_out(row) for row in items], total=total, limit=limit, offset=offset
+    )
+
+
+@router.get("/recipe-preparations/{preparation_id}", response_model=RecipePreparationOut)
+async def get_recipe_preparation(
+    preparation_id: int,
+    service: PreparationServiceDep,
+    _: CurrentUserDep,
+) -> RecipePreparationOut:
+    return _preparation_out(await service.get(preparation_id))
+
+
+@router.post("/recipe-preparations", response_model=RecipePreparationOut)
+async def create_recipe_preparation(
+    payload: RecipePreparationIn,
+    service: PreparationServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> RecipePreparationOut:
+    """Registra una preparacion fisica: consume materia prima y produce preparado.
+
+    Devuelve 201 cuando la preparacion se ejecuta y 200 cuando la clave de
+    idempotencia ya la habia ejecutado. Un reintento no repite el descuento, y
+    el codigo distingue "lo acabo de hacer" de "ya estaba hecho" sin que el
+    cliente tenga que adivinarlo.
+    """
+    preparation, created = await service.prepare(
+        recipe_version_id=payload.recipe_version_id,
+        location_id=payload.location_id,
+        total_dry_weight_g=payload.total_dry_weight_g,
+        water_amount_ml=payload.water_amount_ml,
+        final_yield_ml=payload.final_yield_ml,
+        idempotency_key=payload.idempotency_key,
+        user=admin,
+    )
+    if created:
+        await session.commit()
+    response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    return _preparation_out(await service.get(preparation.id))
+
+
+@router.post("/recipe-preparations/convert", response_model=UnitConversionOut)
+async def convert_units(
+    payload: UnitConversionIn,
+    service: PreparationServiceDep,
+    _: CurrentUserDep,
+) -> UnitConversionOut:
+    """Convierte g <-> ml usando la concentracion de una preparacion.
+
+    La autoridad es el backend: el frontend puede previsualizar, pero el numero
+    que vale es este. No existe una densidad universal, asi que la conversion
+    siempre se apoya en un lote concreto.
+    """
+    preparation = await service.get(payload.preparation_id)
+    concentration = preparation.solids_g_per_ml
+    try:
+        if payload.from_unit == "g":
+            converted = grams_to_ml(payload.value, concentration)
+            to_unit = "ml"
+        else:
+            converted = ml_to_grams(payload.value, concentration)
+            to_unit = "g"
+    except PreparationError as error:
+        raise PreparationValidationError(str(error)) from error
+    return UnitConversionOut(
+        preparation_id=preparation.id,
+        solids_g_per_ml=concentration,
+        value=payload.value,
+        from_unit=payload.from_unit,
+        converted=converted,
+        to_unit=to_unit,
+    )

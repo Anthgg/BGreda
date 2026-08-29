@@ -49,6 +49,7 @@ class SequenceType(StrEnum):
     FIRING = "FIRING"
     PRODUCT_50 = "PRODUCT_50"
     PRODUCT_70 = "PRODUCT_70"
+    PREPARATION = "PREPARATION"
 
 
 class ResetPolicy(StrEnum):
@@ -98,7 +99,7 @@ class DocumentSequence(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70')",
+            "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', 'PREPARATION')",
             name="type_allowed",
         ),
         CheckConstraint(

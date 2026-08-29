@@ -45,6 +45,12 @@ class MovementType(StrEnum):
     ADJUSTMENT = "ADJUSTMENT"
     IN = "IN"
     OUT = "OUT"
+    #: Fase 009D. Preparar una receta es una transformacion fisica: consume
+    #: materia prima y produce material preparado. Se distinguen de IN/OUT
+    #: genericos para poder auditar la transformacion como un hecho propio, y
+    #: llevan `preparation_id` para saber a que lote pertenecen.
+    PREPARATION_OUT = "PREPARATION_OUT"
+    PREPARATION_IN = "PREPARATION_IN"
 
 
 class StockLocation(Base, TimestampMixin):
@@ -114,6 +120,11 @@ class StockMovement(Base):
         ForeignKey("units_of_measure.code", ondelete="RESTRICT"), nullable=False
     )
 
+    #: Lote de preparacion que origino el movimiento (Fase 009D). Nulo en
+    #: compras, ajustes y cargas iniciales.
+    preparation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipe_preparations.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     import_batch_id: Mapped[int | None] = mapped_column(
         ForeignKey("import_batches.id", ondelete="RESTRICT")
     )
@@ -129,7 +140,8 @@ class StockMovement(Base):
         CheckConstraint("quantity <> 0", name="quantity_not_zero"),
         CheckConstraint("balance_after >= 0", name="balance_after_not_negative"),
         CheckConstraint(
-            "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT')",
+            "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT', "
+            "'PREPARATION_OUT', 'PREPARATION_IN')",
             name="movement_type_allowed",
         ),
         Index("ix_stock_movements_product_created", "product_id", "created_at"),

@@ -240,3 +240,78 @@ class RecipeRowResolutionIn(_In):
     component_type: RecipeComponentType | None = None
     percentage: Decimal | None = None
     action: str = "RESOLVE"  # RESOLVE, SKIP
+
+
+# ---------------------------------------------------------------------------
+# Preparaciones (Fase 009D)
+# ---------------------------------------------------------------------------
+class RecipePreparationIn(_In):
+    """Peticion para registrar una preparacion fisica.
+
+    No lleva `code`: lo emite el backend. Tampoco lleva la concentracion ni el
+    costo: se calculan aqui, porque son autoridad del dominio.
+    """
+
+    recipe_version_id: int
+    location_id: int
+    total_dry_weight_g: Annotated[Decimal, Field(gt=Decimal(0))]
+    water_amount_ml: Annotated[Decimal, Field(ge=Decimal(0))] = Decimal(0)
+    #: Rendimiento REAL medido. No se deriva de peso seco + agua: los solidos
+    #: ocupan volumen y el agua se absorbe, asi que la suma no es el volumen.
+    final_yield_ml: Annotated[Decimal, Field(gt=Decimal(0))]
+    #: Clave que impide ejecutar dos veces la misma preparacion fisica.
+    idempotency_key: Annotated[str, Field(min_length=8, max_length=64)]
+
+
+class RecipePreparationLineOut(_Out):
+    id: int
+    component_product_id: int
+    component_internal_reference: str
+    component_name: str
+    quantity_g: Decimal
+    #: Costo por gramo en el momento de preparar. Congelado.
+    unit_cost_snapshot: Decimal
+    line_cost: Decimal
+
+
+class RecipePreparationOut(_Out):
+    id: int
+    code: str
+    recipe_version_id: int
+    prepared_product_id: int
+    prepared_product_internal_reference: str
+    prepared_product_name: str
+    location_id: int
+    total_dry_weight_g: Decimal
+    water_amount_ml: Decimal
+    final_yield_ml: Decimal
+    solids_g_per_ml: Decimal
+    batch_total_cost: Decimal
+    unit_cost_per_ml: Decimal
+    status: str
+    prepared_at: datetime
+    lines: list[RecipePreparationLineOut] = []
+
+
+class RecipePreparationPage(_Out):
+    items: list[RecipePreparationOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class UnitConversionIn(_In):
+    """Conversion g <-> ml apoyada en una preparacion concreta."""
+
+    preparation_id: int
+    value: Annotated[Decimal, Field(ge=Decimal(0))]
+    from_unit: Literal["g", "ml"]
+
+
+class UnitConversionOut(_Out):
+    preparation_id: int
+    solids_g_per_ml: Decimal
+    value: Decimal
+    from_unit: str
+    converted: Decimal
+    to_unit: str
