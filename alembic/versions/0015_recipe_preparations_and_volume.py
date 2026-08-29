@@ -50,16 +50,46 @@ def upgrade() -> None:
         "units_of_measure",
         "dimension IN ('MASS', 'COUNT', 'VOLUME')",
     )
-    # `ON CONFLICT DO NOTHING`: si un entorno ya las tuviera, migrar no falla.
+    # Alta de `ml` y `l`.
+    #
+    # Deliberadamente NO se usa `ON CONFLICT DO NOTHING`. Si un entorno ya
+    # tuviera un `ml` con otra dimension o otro factor, saltarselo en silencio
+    # dejaria la base incoherente y la migracion diria SUCCESS: a partir de ahi
+    # cada conversion g <-> ml daria un numero equivocado sin que nadie se
+    # entere. Ante una definicion que no cuadra, se aborta y se resuelve a mano.
     op.execute(
         sa.text(
             """
-            INSERT INTO units_of_measure
-                (code, name, symbol, dimension, factor_to_base, is_base, active)
-            VALUES
-                ('ml', 'Mililitro', 'ml', 'VOLUME', 1, true, true),
-                ('l',  'Litro',     'l',  'VOLUME', 1000, false, true)
-            ON CONFLICT (code) DO NOTHING
+            DO $$
+            DECLARE
+                existente RECORD;
+            BEGIN
+                FOR existente IN
+                    SELECT * FROM (VALUES
+                        ('ml', 'Mililitro', 'ml', 1::numeric, true),
+                        ('l',  'Litro',     'l',  1000::numeric, false)
+                    ) AS esperado(code, name, symbol, factor_to_base, is_base)
+                LOOP
+                    IF EXISTS (SELECT 1 FROM units_of_measure u WHERE u.code = existente.code) THEN
+                        PERFORM 1
+                        FROM units_of_measure u
+                        WHERE u.code = existente.code
+                          AND u.dimension = 'VOLUME'
+                          AND u.factor_to_base = existente.factor_to_base;
+                        IF NOT FOUND THEN
+                            RAISE EXCEPTION
+                                'La unidad % ya existe con una definicion distinta de la canonica '
+                                '(VOLUME, factor %). Resuelvala manualmente antes de migrar.',
+                                existente.code, existente.factor_to_base;
+                        END IF;
+                    ELSE
+                        INSERT INTO units_of_measure
+                            (code, name, symbol, dimension, factor_to_base, is_base, active)
+                        VALUES (existente.code, existente.name, existente.symbol,
+                                'VOLUME', existente.factor_to_base, existente.is_base, true);
+                    END IF;
+                END LOOP;
+            END $$;
             """
         )
     )
@@ -195,15 +225,20 @@ def upgrade() -> None:
         "document_sequences",
         "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', 'PREPARATION')",
     )
+    # Igual que con las unidades: si la secuencia ya existiera con otro
+    # contador, insertarla en silencio no seria posible y saltarsela dejaria el
+    # sistema sin poder emitir codigos de lote. Se inserta solo si no existe, y
+    # se aborta si existe con un tipo que no es el esperado.
     op.execute(
         sa.text(
             """
             INSERT INTO document_sequences
                 (sequence_type, prefix, pattern, padding, reset_policy,
                  current_value, period_key, active)
-            VALUES
-                ('PREPARATION', 'PREP', :pattern, 6, 'YEARLY', 0, '', true)
-            ON CONFLICT (sequence_type) DO NOTHING
+            SELECT 'PREPARATION', 'PREP', :pattern, 6, 'YEARLY', 0, '', true
+            WHERE NOT EXISTS (
+                SELECT 1 FROM document_sequences WHERE sequence_type = 'PREPARATION'
+            )
             """
         ).bindparams(pattern=SEQUENCE_PATTERN)
     )
