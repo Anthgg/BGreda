@@ -602,12 +602,23 @@ class QuotationBuilderService:
                 for session in production.get("sessions", [])
                 if (session.get("kiln_id"), session.get("firing_type")) in item_routes
             ]
-            item_batches = sum(int(session.get("batches", 1)) for session in item_sessions)
-            item_days = sum(
-                int(session.get("batches", 1))
-                * int(session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH))
+            item_plan = [
+                {
+                    "kiln_id": session.get("kiln_id"),
+                    "kiln_code": session.get("kiln_code"),
+                    "kiln_name": session.get("kiln_name"),
+                    "firing_type": session.get("firing_type"),
+                    "firing_days_per_batch": int(
+                        session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH)
+                    ),
+                    "required_batches": int(session.get("batches", 1)),
+                    "calculated_firing_days": int(session.get("batches", 1))
+                    * int(session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH)),
+                }
                 for session in item_sessions
-            )
+            ]
+            item_batches = sum(entry["required_batches"] for entry in item_plan)
+            item_days = sum(entry["calculated_firing_days"] for entry in item_plan)
             estimate = FiringEstimateOverride(
                 cost=Decimal(str(line_snapshot.get("allocated_cost", "0"))),
                 snapshot={
@@ -615,24 +626,7 @@ class QuotationBuilderService:
                     "kiln": kiln_snapshot,
                     "production": line_snapshot,
                     "batches": item_batches,
-                    # Requisito 8: al confirmar hay que poder explicar el
-                    # numero sin volver a consultar la configuracion, porque
-                    # el horno puede cambiar de duracion despues.
-                    "firing_plan": [
-                        {
-                            "kiln_id": session.get("kiln_id"),
-                            "kiln_code": session.get("kiln_code"),
-                            "kiln_name": session.get("kiln_name"),
-                            "firing_type": session.get("firing_type"),
-                            "firing_days_per_batch": int(
-                                session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH)
-                            ),
-                            "required_batches": int(session.get("batches", 1)),
-                            "calculated_firing_days": int(session.get("batches", 1))
-                            * int(session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH)),
-                        }
-                        for session in item_sessions
-                    ],
+                    "firing_plan": item_plan,
                     "calculated_firing_days": item_days,
                 }
                 if line_snapshot
@@ -756,6 +750,11 @@ class QuotationBuilderService:
                         "low_kiln_id_input": item.low_kiln_id,
                         "high_kiln_id_input": item.high_kiln_id,
                         "firing_batches": item_batches,
+                        # Requisito 8: al confirmar hay que poder explicar los
+                        # dias sin volver a consultar la configuracion, porque
+                        # el horno puede cambiar de duracion despues.
+                        "firing_plan": item_plan,
+                        "calculated_firing_days": item_days,
                     },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
