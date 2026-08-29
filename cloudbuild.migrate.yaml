@@ -72,8 +72,9 @@ steps:
   - id: migrate
     name: $_IMAGE:main-latest
     entrypoint: bash
-    env:
-      - DATABASE_URL=$$DATABASE_URL
+    # `secretEnv` ya inyecta DATABASE_URL en el entorno del step desde Secret
+    # Manager. Declararla ademas en `env` la duplica, y Cloud Build rechaza el
+    # build: "step 2 has secret and non-secret env DATABASE_URL".
     secretEnv:
       - DATABASE_URL
     args:
