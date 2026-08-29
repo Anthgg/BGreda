@@ -208,6 +208,10 @@ async def reset_database(
             ("FIRING", "HR", DEFAULT_PATTERN, 6, "YEARLY"),
             ("PRODUCT_50", "LAB50", "{PREFIX}{NUMBER}", 3, "NEVER"),
             ("PRODUCT_70", "LAB70", "{PREFIX}{NUMBER}", 3, "NEVER"),
+            # Fase 009D: lotes de preparacion. Misma convencion documental que
+            # CTZ y HR, sembrada aqui porque la base de test se crea desde los
+            # modelos y no ejecuta la migracion 0015.
+            ("PREPARATION", "PREP", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(
