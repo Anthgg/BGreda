@@ -1,8 +1,5 @@
 from pathlib import Path
 
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-
 MIGRATION_FILE = (
     Path(__file__).parents[2] / "alembic" / "versions" / "0013_allow_mixed_tax_rate_source.py"
 )
@@ -27,9 +24,6 @@ def test_migration_0013_upgrade_downgrade_contracts() -> None:
     assert "'PRODUCT', 'COMMERCIAL_SETTINGS', 'MIXED'" in content
     assert "'PRODUCT', 'COMMERCIAL_SETTINGS'" in content
 
-
-def test_alembic_heads_single_0013() -> None:
-    alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    script = ScriptDirectory.from_config(alembic_cfg)
-    heads = script.get_heads()
-    assert heads == ["0013"]
+# La cabeza unica de Alembic se comprueba junto a la migracion mas reciente
+# (tests/unit/test_migration_0014.py): es una propiedad del arbol entero, no
+# de la 0013, y dejarla aqui obligaba a editar este archivo en cada fase.

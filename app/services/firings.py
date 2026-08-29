@@ -201,6 +201,7 @@ class KilnService:
             code=kiln.code,
             name=kiln.name,
             capacity_volume_cm3=kiln.capacity_volume_cm3,
+            firing_days_per_batch=kiln.firing_days_per_batch,
             active=kiln.active,
             notes=kiln.notes,
             created_at=kiln.created_at,
@@ -248,6 +249,7 @@ class KilnService:
             code=await self._next_code(),
             name=payload.name,
             capacity_volume_cm3=payload.capacity_volume_cm3,
+            firing_days_per_batch=payload.firing_days_per_batch,
             active=payload.active,
             notes=payload.notes,
         )
@@ -288,7 +290,13 @@ class KilnService:
         kiln = await self._get(kiln_id)
         changes: dict[str, tuple[object, object]] = {}
 
-        for field in ("name", "capacity_volume_cm3", "active", "notes"):
+        for field in (
+            "name",
+            "capacity_volume_cm3",
+            "firing_days_per_batch",
+            "active",
+            "notes",
+        ):
             if field not in payload.model_fields_set:
                 continue
             new = getattr(payload, field)
@@ -571,6 +579,7 @@ class FiringService:
                     firing_type=item.firing_type.value,
                     rate=rates[rate_key],
                     capacity=kilns[item.kiln_id].capacity_volume_cm3,
+                    days_per_batch=kilns[item.kiln_id].firing_days_per_batch,
                 )
             )
 
@@ -654,6 +663,8 @@ class FiringService:
                 subtotal=result.subtotal,
                 capacity_exceeded=result.capacity_exceeded,
                 batches=result.batches,
+                days_per_batch=kilns[result.kiln_id].firing_days_per_batch,
+                days=result.days,
                 sort_order=item.sort_order,
             )
             for result, item in zip(math.sessions, payload.sessions, strict=True)
@@ -700,6 +711,7 @@ class FiringService:
             occupancy_percentage=math.occupancy_percentage,
             occupancy_factor=math.occupancy_factor,
             total_batches=math.total_batches,
+            total_days=math.total_days,
             capacity_exceeded=math.capacity_exceeded,
             sessions=session_out,
             lines=line_out,

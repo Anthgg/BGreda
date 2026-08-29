@@ -193,6 +193,11 @@ class SessionInput:
     firing_type: str
     rate: Decimal
     capacity: Decimal
+    #: Dias que ocupa CADA hornada en este horno (Fase 009C). Lo trae quien
+    #: llama, leido de ``kilns.firing_days_per_batch``: aqui no se deduce del
+    #: tamano ni se asume un valor comun a todos los hornos. Cero significa
+    #: "esta llamada no planifica dias" —el caso de una hoja de quema real.
+    days_per_batch: int = 0
 
 
 @dataclass(frozen=True)
@@ -239,6 +244,11 @@ class SessionResult:
     #: ``multi_batch=False`` siempre es 1: es lo que ve una hoja de quema
     #: real, donde la hoja describe UNA hornada fisica.
     batches: int = 1
+    #: ``batches * days_per_batch`` del horno de ESTA sesion. Se calcula por
+    #: sesion y no sobre el total de hornadas porque baja y alta pueden ir en
+    #: hornos de duracion distinta: sumar primero las hornadas y multiplicar
+    #: despues daria un numero que no corresponde a ningun horno.
+    days: int = 0
 
 
 @dataclass(frozen=True)
@@ -255,6 +265,8 @@ class FiringMath:
     capacity_exceeded: bool
     #: Suma de hornadas de todas las sesiones (Fase 009C).
     total_batches: int = 0
+    #: Suma de los dias de cada sesion, cada una con la duracion de su horno.
+    total_days: int = 0
 
 
 def compute_firing(
@@ -396,6 +408,7 @@ def compute_firing(
                 # resuelve con mas hornadas, no con una alerta.
                 capacity_exceeded=(not multi_batch) and occupancy > Decimal(100),
                 batches=batches,
+                days=batches * session.days_per_batch,
             )
         )
 
@@ -415,4 +428,5 @@ def compute_firing(
         sessions=tuple(session_results),
         capacity_exceeded=(not multi_batch) and any_capacity_exceeded,
         total_batches=sum(session_batches.values()),
+        total_days=sum(result.days for result in session_results),
     )

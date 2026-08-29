@@ -105,12 +105,24 @@ class Kiln(Base, TimestampMixin):
     code: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     capacity_volume_cm3: Mapped[Decimal] = mapped_column(volume_numeric(), nullable=False)
+    #: Dias que el horno queda ocupado por CADA hornada (Fase 009C).
+    #:
+    #: Vive aqui, y no como constante, porque la duracion es una propiedad
+    #: fisica del horno: el pequeno tarda 3 dias y el grande 4. Ponerlo en
+    #: codigo obligaria a desplegar para dar de alta un horno, y a deducir el
+    #: tamano de un umbral de capacidad que el negocio nunca definio.
+    firing_days_per_batch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default=text("3")
+    )
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true"), index=True
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    __table_args__ = (CheckConstraint("capacity_volume_cm3 > 0", name="capacity_positive"),)
+    __table_args__ = (
+        CheckConstraint("capacity_volume_cm3 > 0", name="capacity_positive"),
+        CheckConstraint("firing_days_per_batch >= 1", name="firing_days_per_batch_positive"),
+    )
 
     rates: Mapped[list[KilnRate]] = relationship(
         "KilnRate",

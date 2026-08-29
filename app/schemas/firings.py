@@ -101,6 +101,9 @@ class KilnOccupancyFactorOut(_Out):
 class KilnCreate(_In):
     name: Annotated[str, Field(min_length=1, max_length=120)]
     capacity_volume_cm3: Annotated[Decimal, Field(gt=Decimal(0))]
+    #: Fase 009C: dias que el horno queda ocupado por cada hornada. El 3 por
+    #: omision es la duracion historica, no una regla: el horno grande son 4.
+    firing_days_per_batch: Annotated[int, Field(ge=1)] = 3
     active: bool = True
     notes: Annotated[str | None, Field(max_length=1000)] = None
     occupancy_factors: list[KilnOccupancyFactorIn] | None = None
@@ -116,6 +119,7 @@ class KilnUpdate(_In):
 
     name: Annotated[str | None, Field(min_length=1, max_length=120)] = None
     capacity_volume_cm3: Annotated[Decimal | None, Field(gt=Decimal(0))] = None
+    firing_days_per_batch: Annotated[int | None, Field(ge=1)] = None
     active: bool | None = None
     notes: Annotated[str | None, Field(max_length=1000)] = None
 
@@ -130,6 +134,7 @@ class KilnOut(_Out):
     code: str
     name: str
     capacity_volume_cm3: Decimal
+    firing_days_per_batch: int
     active: bool
     notes: str | None = None
     created_at: datetime
@@ -223,6 +228,12 @@ class FiringSessionOut(_Out):
     #: Hornadas necesarias para esta sesion (Fase 009C). En una hoja de quema
     #: real siempre es 1: la hoja describe UNA hornada fisica.
     batches: int = 1
+    #: Duracion de UNA hornada en este horno, copiada de
+    #: ``kilns.firing_days_per_batch``. Viaja al frontend para que la interfaz
+    #: explique el numero en vez de volver a calcularlo por su cuenta.
+    days_per_batch: int = 0
+    #: ``batches * days_per_batch``: dias que ocupa esta sesion.
+    days: int = 0
     sort_order: int = 0
 
 
@@ -270,6 +281,8 @@ class FiringCalculateOut(_Out):
     capacity_exceeded: bool
     #: Suma de hornadas de todas las sesiones (Fase 009C).
     total_batches: int = 0
+    #: Suma de los dias de cada sesion, cada una con la duracion de SU horno.
+    total_days: int = 0
     sessions: list[FiringSessionOut]
     lines: list[FiringLineOut]
 
