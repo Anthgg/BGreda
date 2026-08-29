@@ -273,11 +273,13 @@ async def test_el_porcentaje_de_esmalte_llega_como_quince(
 ) -> None:
     """ESTIMATED_GLAZE_PERCENT: 15, no 0.15."""
     _upgrade("0015")
-    async with migration_engine.begin() as connection:
-        await connection.execute(text("INSERT INTO commercial_settings (id) VALUES (1)"))
+    # La fila singleton ya existe: la siembra una migracion anterior. Lo que se
+    # comprueba es que la 0015 le puso el valor por omision, no que se pueda
+    # crear otra.
     value = await _scalar(
-        migration_engine, "SELECT estimated_glaze_percent FROM commercial_settings WHERE id = 1"
+        migration_engine, "SELECT estimated_glaze_percent FROM commercial_settings LIMIT 1"
     )
+    assert value is not None, "no hay fila de commercial_settings que comprobar"
     assert Decimal(str(value)) == Decimal(15)
 
     clause = await _check_clause(
