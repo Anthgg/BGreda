@@ -72,9 +72,10 @@ steps:
   - id: migrate
     name: $_IMAGE:main-latest
     entrypoint: bash
-    # `secretEnv` ya inyecta DATABASE_URL en el entorno del step desde Secret
-    # Manager. Declararla ademas en `env` la duplica, y Cloud Build rechaza el
-    # build: "step 2 has secret and non-secret env DATABASE_URL".
+    # Cloud Build ejecuta cada step en /workspace e IGNORA el WORKDIR de la
+    # imagen. Sin esto alembic no encuentra alembic.ini y falla con
+    # "No 'script_location' key found in configuration".
+    dir: /app
     secretEnv:
       - DATABASE_URL
     args:
@@ -83,10 +84,20 @@ steps:
         echo "======================================================"
         echo " Alembic: verificando estado de migración"
         echo "======================================================"
+        echo "WORKDIR: $$(pwd)"
 
-        # Verificar que solo hay un head
-        HEAD_COUNT=$$(python -m alembic heads 2>/dev/null | wc -l | tr -d ' ')
-        echo "Alembic heads encontrados: $$HEAD_COUNT"
+        # Sin `2>/dev/null`: tapar el stderr de alembic fue lo que permitio
+        # que este job informara "no hay nada que migrar" mientras alembic
+        # fallaba en todas sus invocaciones.
+        if ! HEADS_OUT=$$(python -m alembic heads 2>&1); then
+          echo "ERROR: 'alembic heads' fallo:"
+          echo "$$HEADS_OUT"
+          echo "STATUS: MIGRATION_ABORTED_ALEMBIC_ERROR"
+          exit 1
+        fi
+
+        HEAD_COUNT=$$(echo "$$HEADS_OUT" | grep -c .)
+        echo "ALEMBIC_HEADS: $$HEAD_COUNT"
         if [ "$$HEAD_COUNT" -ne 1 ]; then
           echo "ERROR: Se encontraron $$HEAD_COUNT heads de Alembic."
           echo "MÚLTIPLES HEADS detectados. Resolver manualmente antes de migrar."
@@ -94,26 +105,65 @@ steps:
           exit 1
         fi
 
-        CODE_HEAD=$$(python -m alembic heads 2>/dev/null | awk '{print $$1}')
+        CODE_HEAD=$$(echo "$$HEADS_OUT" | awk '{print $$1}')
         echo "CODE_HEAD: $$CODE_HEAD"
 
-        CURRENT=$$(python -m alembic current 2>/dev/null | awk '{print $$1}' | head -1)
-        echo "PRODUCTION_CURRENT: $$CURRENT"
+        # Una revision es alfanumerica. Cualquier otra cosa —"FAILED:", vacio—
+        # significa que alembic no respondio, y comparar dos respuestas rotas
+        # entre si daria "iguales" y por tanto un falso "ya esta al dia".
+        case "$$CODE_HEAD" in
+          '' | *[!0-9A-Za-z_]* )
+            echo "ERROR: CODE_HEAD no es una revisión válida: '$$CODE_HEAD'"
+            echo "STATUS: MIGRATION_ABORTED_INVALID_CODE_HEAD"
+            exit 1
+            ;;
+        esac
+
+        if ! CURRENT_OUT=$$(python -m alembic current 2>&1); then
+          echo "ERROR: 'alembic current' fallo:"
+          echo "$$CURRENT_OUT"
+          echo "STATUS: MIGRATION_ABORTED_ALEMBIC_ERROR"
+          exit 1
+        fi
+        CURRENT=$$(echo "$$CURRENT_OUT" | awk '{print $$1}' | head -1)
+        echo "PRODUCTION_CURRENT: $${CURRENT:-<sin sellar>}"
+
+        # Vacio es legitimo: base nunca sellada, hay que migrar. Cualquier
+        # otro valor no alfanumerico es un fallo disfrazado.
+        case "$$CURRENT" in
+          '' ) : ;;
+          *[!0-9A-Za-z_]* )
+            echo "ERROR: PRODUCTION_CURRENT no es una revisión válida: '$$CURRENT'"
+            echo "STATUS: MIGRATION_ABORTED_INVALID_CURRENT"
+            exit 1
+            ;;
+        esac
 
         if [ "$$CURRENT" = "$$CODE_HEAD" ]; then
           echo ""
           echo "PRODUCTION_CURRENT == CODE_HEAD"
-          echo "STATUS: MIGRATION_REQUIRED=NO — No se ejecuta migración."
+          echo "MIGRATION_REQUIRED: NO"
+          echo "ALEMBIC_UPGRADE_EXECUTED: NO"
+          echo "STATUS: MIGRATION_COMPLETE"
           exit 0
         fi
 
         echo ""
-        echo "PRODUCTION_CURRENT ($$CURRENT) != CODE_HEAD ($$CODE_HEAD)"
+        echo "PRODUCTION_CURRENT ($${CURRENT:-<sin sellar>}) != CODE_HEAD ($$CODE_HEAD)"
+        echo "MIGRATION_REQUIRED: YES"
         echo "Ejecutando alembic upgrade head..."
         python -m alembic upgrade head
+        echo "ALEMBIC_UPGRADE_EXECUTED: YES"
+
         echo ""
         echo "Verificando estado post-migración..."
-        python -m alembic current
+        POST=$$(python -m alembic current 2>&1 | awk '{print $$1}' | head -1)
+        echo "PRODUCTION_CURRENT: $$POST"
+        if [ "$$POST" != "$$CODE_HEAD" ]; then
+          echo "ERROR: tras migrar, PRODUCTION_CURRENT ($$POST) sigue sin ser CODE_HEAD ($$CODE_HEAD)."
+          echo "STATUS: MIGRATION_FAILED_POST_CHECK"
+          exit 1
+        fi
         echo "STATUS: MIGRATION_COMPLETE"
     waitFor:
       - check-migration-preconditions
