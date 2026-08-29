@@ -41,12 +41,21 @@ depends_on: str | Sequence[str] | None = None
 #: Convencion documental ya usada por CTZ y HR.
 SEQUENCE_PATTERN = "{PREFIX}-{YYYY}-{NUMBER}"
 
+# Nota sobre `op.f(...)`: el proyecto define la convencion
+# `ck_%(table_name)s_%(constraint_name)s`, y alembic la aplica tambien a los
+# nombres que se le pasan aqui. Sin `op.f()`, pedir
+# "ck_units_of_measure_dimension_allowed" acaba buscando
+# "ck_units_of_measure_ck_units_of_measure_dimension_allowed" y el DROP falla.
+# `op.f()` marca el nombre como definitivo.
+
 
 def upgrade() -> None:
     # ---- 1. Unidades de volumen -----------------------------------------
-    op.drop_constraint("ck_units_of_measure_dimension_allowed", "units_of_measure", type_="check")
+    op.drop_constraint(
+        op.f("ck_units_of_measure_dimension_allowed"), "units_of_measure", type_="check"
+    )
     op.create_check_constraint(
-        "ck_units_of_measure_dimension_allowed",
+        op.f("ck_units_of_measure_dimension_allowed"),
         "units_of_measure",
         "dimension IN ('MASS', 'COUNT', 'VOLUME')",
     )
@@ -128,22 +137,26 @@ def upgrade() -> None:
         sa.UniqueConstraint("code", name=op.f("uq_recipe_preparations_code")),
         sa.UniqueConstraint("idempotency_key", name=op.f("uq_recipe_preparations_idempotency_key")),
         sa.CheckConstraint(
-            "total_dry_weight_g > 0", name="ck_recipe_preparations_dry_weight_positive"
+            "total_dry_weight_g > 0", name=op.f("ck_recipe_preparations_dry_weight_positive")
         ),
         sa.CheckConstraint(
-            "water_amount_ml >= 0", name="ck_recipe_preparations_water_not_negative"
-        ),
-        sa.CheckConstraint("final_yield_ml > 0", name="ck_recipe_preparations_yield_positive"),
-        sa.CheckConstraint(
-            "solids_g_per_ml > 0", name="ck_recipe_preparations_concentration_positive"
+            "water_amount_ml >= 0", name=op.f("ck_recipe_preparations_water_not_negative")
         ),
         sa.CheckConstraint(
-            "batch_total_cost >= 0", name="ck_recipe_preparations_cost_not_negative"
+            "final_yield_ml > 0", name=op.f("ck_recipe_preparations_yield_positive")
         ),
         sa.CheckConstraint(
-            "unit_cost_per_ml >= 0", name="ck_recipe_preparations_unit_cost_not_negative"
+            "solids_g_per_ml > 0", name=op.f("ck_recipe_preparations_concentration_positive")
         ),
-        sa.CheckConstraint("status IN ('COMPLETED')", name="ck_recipe_preparations_status_allowed"),
+        sa.CheckConstraint(
+            "batch_total_cost >= 0", name=op.f("ck_recipe_preparations_cost_not_negative")
+        ),
+        sa.CheckConstraint(
+            "unit_cost_per_ml >= 0", name=op.f("ck_recipe_preparations_unit_cost_not_negative")
+        ),
+        sa.CheckConstraint(
+            "status IN ('COMPLETED')", name=op.f("ck_recipe_preparations_status_allowed")
+        ),
     )
     op.create_index(
         "ix_recipe_preparations_recipe_version_id", "recipe_preparations", ["recipe_version_id"]
@@ -166,12 +179,15 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["preparation_id"], ["recipe_preparations.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["component_product_id"], ["products.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
-        sa.CheckConstraint("quantity_g > 0", name="ck_recipe_preparation_lines_quantity_positive"),
         sa.CheckConstraint(
-            "unit_cost_snapshot >= 0", name="ck_recipe_preparation_lines_unit_cost_not_negative"
+            "quantity_g > 0", name=op.f("ck_recipe_preparation_lines_quantity_positive")
         ),
         sa.CheckConstraint(
-            "line_cost >= 0", name="ck_recipe_preparation_lines_line_cost_not_negative"
+            "unit_cost_snapshot >= 0",
+            name=op.f("ck_recipe_preparation_lines_unit_cost_not_negative"),
+        ),
+        sa.CheckConstraint(
+            "line_cost >= 0", name=op.f("ck_recipe_preparation_lines_line_cost_not_negative")
         ),
     )
     op.create_index(
@@ -194,9 +210,11 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
     op.create_index("ix_stock_movements_preparation_id", "stock_movements", ["preparation_id"])
-    op.drop_constraint("ck_stock_movements_movement_type_allowed", "stock_movements", type_="check")
+    op.drop_constraint(
+        op.f("ck_stock_movements_movement_type_allowed"), "stock_movements", type_="check"
+    )
     op.create_check_constraint(
-        "ck_stock_movements_movement_type_allowed",
+        op.f("ck_stock_movements_movement_type_allowed"),
         "stock_movements",
         "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT', "
         "'PREPARATION_OUT', 'PREPARATION_IN')",
@@ -213,7 +231,7 @@ def upgrade() -> None:
         ),
     )
     op.create_check_constraint(
-        "ck_commercial_settings_estimated_glaze_percent_range",
+        op.f("ck_commercial_settings_estimated_glaze_percent_range"),
         "commercial_settings",
         "estimated_glaze_percent > 0 AND estimated_glaze_percent <= 100",
     )
@@ -254,15 +272,17 @@ def downgrade() -> None:
     )
 
     op.drop_constraint(
-        "ck_commercial_settings_estimated_glaze_percent_range",
+        op.f("ck_commercial_settings_estimated_glaze_percent_range"),
         "commercial_settings",
         type_="check",
     )
     op.drop_column("commercial_settings", "estimated_glaze_percent")
 
-    op.drop_constraint("ck_stock_movements_movement_type_allowed", "stock_movements", type_="check")
+    op.drop_constraint(
+        op.f("ck_stock_movements_movement_type_allowed"), "stock_movements", type_="check"
+    )
     op.create_check_constraint(
-        "ck_stock_movements_movement_type_allowed",
+        op.f("ck_stock_movements_movement_type_allowed"),
         "stock_movements",
         "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT')",
     )
@@ -278,9 +298,11 @@ def downgrade() -> None:
     op.drop_table("recipe_preparations")
 
     op.execute(sa.text("DELETE FROM units_of_measure WHERE code IN ('ml', 'l')"))
-    op.drop_constraint("ck_units_of_measure_dimension_allowed", "units_of_measure", type_="check")
+    op.drop_constraint(
+        op.f("ck_units_of_measure_dimension_allowed"), "units_of_measure", type_="check"
+    )
     op.create_check_constraint(
-        "ck_units_of_measure_dimension_allowed",
+        op.f("ck_units_of_measure_dimension_allowed"),
         "units_of_measure",
         "dimension IN ('MASS', 'COUNT')",
     )
