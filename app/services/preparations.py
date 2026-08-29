@@ -252,6 +252,34 @@ class PreparationService:
             )
         return settings.estimated_glaze_percent
 
+    async def most_expensive_preparation(self) -> RecipePreparation | None:
+        """El preparado mas caro disponible, o `None` si no hay ninguno.
+
+        La metrica es `unit_cost_per_ml`, que es la unica comparable entre
+        lotes: todos la llevan porque es `batch_total_cost / final_yield_ml`.
+        NO se compara contra el costo de los ingredientes crudos —eso es por
+        gramo de materia prima y mide otra cosa— ni entre unidades distintas.
+
+        Por que el mas caro y no el primero de la lista: una cotizacion
+        preliminar tiene que pecar por arriba. Si al final se usa un esmalte
+        mas barato, el taller gana; al reves, pierde dinero en un precio ya
+        comprometido. El desempate por id descendente hace la eleccion
+        reproducible cuando dos lotes cuestan igual.
+        """
+        return await self._session.scalar(
+            select(RecipePreparation)
+            .where(
+                RecipePreparation.status == PreparationStatus.COMPLETED,
+                RecipePreparation.unit_cost_per_ml > 0,
+            )
+            .options(joinedload(RecipePreparation.prepared_product))
+            .order_by(
+                RecipePreparation.unit_cost_per_ml.desc(),
+                RecipePreparation.id.desc(),
+            )
+            .limit(1)
+        )
+
     async def estimate_glaze(
         self,
         *,

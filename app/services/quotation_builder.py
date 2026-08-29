@@ -374,7 +374,11 @@ def _glaze_inputs(snapshot: dict[str, Any]) -> list[GlazeSelectionItemIn]:
 
 
 def _glaze_plan_snapshot(
-    estimate: GlazeEstimate, *, unit: str, piece_weight_g: Decimal
+    estimate: GlazeEstimate,
+    *,
+    unit: str,
+    piece_weight_g: Decimal,
+    default_applied: bool = False,
 ) -> dict[str, Any]:
     """Serializa el plan para `production_snapshot["glaze_plan"]`.
 
@@ -386,6 +390,7 @@ def _glaze_plan_snapshot(
     """
     return {
         "unit": unit,
+        "default_applied": default_applied,
         "estimated_glaze_percent_snapshot": estimate.estimated_glaze_percent,
         "piece_weight_g_snapshot": piece_weight_g,
         "grams_per_piece": estimate.grams_per_piece,
@@ -454,7 +459,25 @@ class QuotationBuilderService:
         un borrador tiene que poder abrirse y arreglarse. El aviso impide
         completar, que es lo que de verdad hace falta bloquear.
         """
-        if not item.glazes:
+        glazes = list(item.glazes)
+        default_applied = False
+        if not glazes and not item.glaze_selection_touched:
+            # Cotizacion preliminar: se propone el preparado mas caro. Pecar
+            # por arriba es recuperable —si al final se usa uno mas barato, el
+            # taller gana—; al reves se pierde dinero en un precio que ya se
+            # comprometio. En cuanto el usuario toca la seleccion deja de
+            # proponerse, incluso si la deja vacia a proposito.
+            suggested = await self._preparations.most_expensive_preparation()
+            if suggested is not None:
+                glazes = [
+                    GlazeSelectionItemIn(
+                        preparation_id=suggested.id,
+                        prepared_product_id=suggested.prepared_product_id,
+                        share=Decimal(1),
+                    )
+                ]
+                default_applied = True
+        if not glazes:
             return None, []
         if item.quantity is None:
             # Ya lo bloquea QUANTITY_REQUIRED; anadir otro aviso solo repetiria
@@ -463,6 +486,14 @@ class QuotationBuilderService:
         if product.grammage is None or product.grammage <= ZERO:
             # Sin peso de pieza no hay nada que estimar. Inventar un peso daria
             # un costo de esmalte creible y falso.
+            #
+            # Pero una SUGERENCIA no puede bloquear: si el aviso saltara
+            # tambien cuando el esmalte lo propuso el sistema, cualquier
+            # producto sin gramaje dejaria de poder cotizarse en cuanto
+            # existiera un preparado en la base. El aviso es para quien pidio
+            # el esmalte, no para quien no pidio nada.
+            if default_applied:
+                return None, []
             return None, ["GLAZE_PIECE_WEIGHT_REQUIRED"]
 
         choices = [
@@ -471,7 +502,7 @@ class QuotationBuilderService:
                 preparation_id=glaze.preparation_id,
                 prepared_product_id=glaze.prepared_product_id,
             )
-            for glaze in item.glazes
+            for glaze in glazes
         ]
         try:
             estimate = await self._preparations.estimate_glaze(
@@ -492,11 +523,21 @@ class QuotationBuilderService:
                 unit="g",
             )
             return (
-                _glaze_plan_snapshot(estimate, unit="g", piece_weight_g=product.grammage),
+                _glaze_plan_snapshot(
+                    estimate,
+                    unit="g",
+                    piece_weight_g=product.grammage,
+                    default_applied=default_applied,
+                ),
                 ["GLAZE_ML_REQUIRES_PREPARATION"],
             )
         return (
-            _glaze_plan_snapshot(estimate, unit=item.glaze_unit, piece_weight_g=product.grammage),
+            _glaze_plan_snapshot(
+                estimate,
+                unit=item.glaze_unit,
+                piece_weight_g=product.grammage,
+                default_applied=default_applied,
+            ),
             [],
         )
 
@@ -865,7 +906,10 @@ class QuotationBuilderService:
                         # sigue siendo valida. Se reevalua en 009E/009H,
                         # cuando el esmalte si sea autoridad de precio o de
                         # consumo fisico.
-                        "input": item.model_dump(mode="json", exclude={"glazes", "glaze_unit"}),
+                        "input": item.model_dump(
+                            mode="json",
+                            exclude={"glazes", "glaze_unit", "glaze_selection_touched"},
+                        ),
                     }
                 )
             )
@@ -898,6 +942,7 @@ class QuotationBuilderService:
                     material_grams_per_piece=item.material_grams_per_piece,
                     glaze_plan=GlazePlanOut.model_validate(glaze_plan) if glaze_plan else None,
                     glaze_unit=item.glaze_unit,
+                    glaze_selection_touched=(item.glaze_selection_touched or bool(item.glazes)),
                     firing_id=calculation.firing_id if calculation else None,
                     firing_line_id=calculation.firing_line_id if calculation else None,
                     firing_code_snapshot=(
@@ -952,6 +997,13 @@ class QuotationBuilderService:
                         # sueltas junto a base_cost y occupancy_factor.
                         **({"glaze_plan": glaze_plan} if glaze_plan is not None else {}),
                         "glaze_unit": item.glaze_unit,
+                        # Se guarda la INTENCION de haber elegido, no solo lo
+                        # elegido: una lista vacia con la bandera puesta
+                        # significa "no quiero esmalte", y sin ella el
+                        # sugerido volveria en el siguiente recalculo.
+                        "glaze_selection_touched": (
+                            item.glaze_selection_touched or bool(item.glazes)
+                        ),
                         "glazes_input": [
                             {
                                 "preparation_id": glaze.preparation_id,
@@ -1473,6 +1525,9 @@ class QuotationBuilderService:
                         if item.production_snapshot.get("glaze_unit") in ("g", "ml")
                         else "g"
                     ),
+                    glaze_selection_touched=bool(
+                        item.production_snapshot.get("glaze_selection_touched", False)
+                    ),
                     techniques=[self._technique_input(value) for value in item.techniques_snapshot],
                     additionals=[
                         self._additional_input(value) for value in item.additionals_snapshot
@@ -1586,6 +1641,9 @@ class QuotationBuilderService:
                 # mover una cotizacion ya cerrada.
                 glaze_plan=_stored_glaze_plan(item.production_snapshot),
                 glaze_unit=str(item.production_snapshot.get("glaze_unit", "g")),
+                glaze_selection_touched=bool(
+                    item.production_snapshot.get("glaze_selection_touched", False)
+                ),
                 techniques=item.techniques_snapshot,
                 additionals=item.additionals_snapshot,
                 other_costs=item.other_costs_snapshot,
