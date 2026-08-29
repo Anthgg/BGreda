@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -45,6 +45,67 @@ class ProductDimensionCompletionIn(_Strict):
     depth: Dimension | None = None
 
 
+class GlazeSelectionItemIn(_Strict):
+    """Intencion del usuario sobre un esmalte de la linea. Nada derivado.
+
+    El navegador manda QUE esmalte y CON CUANTO PESO RELATIVO. No manda gramos,
+    ni mililitros, ni concentracion, ni costo: todo eso lo calcula el backend a
+    partir de la configuracion vigente y del lote. Si el cliente pudiera
+    mandarlos, dos cotizaciones podrian discrepar sin que nadie lo decidiera.
+    """
+
+    preparation_id: PositiveInt | None = None
+    prepared_product_id: PositiveInt | None = None
+    #: Peso relativo, NO porcentaje. 1 y 1 son mitad y mitad; 2 y 1 son dos
+    #: tercios y un tercio. El backend resuelve el porcentaje.
+    share: Annotated[Decimal, Field(gt=0, le=1_000_000, max_digits=18, decimal_places=6)] = Decimal(
+        1
+    )
+
+    @model_validator(mode="after")
+    def at_least_one_reference(self) -> GlazeSelectionItemIn:
+        if self.preparation_id is None and self.prepared_product_id is None:
+            raise ValueError("Indique el preparado o el lote de cada esmalte")
+        return self
+
+
+class GlazeAllocationOut(BaseModel):
+    """Una asignacion ya resuelta por el backend. Todo salvo `share` es derivado."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    prepared_product_id: int
+    prepared_product_internal_reference: str | None = None
+    prepared_product_name: str | None = None
+    preparation_id: int | None = None
+    preparation_code: str | None = None
+    share: Decimal
+    allocation_percent: Decimal
+    grams: Decimal
+    millilitres: Decimal | None = None
+    solids_g_per_ml_snapshot: Decimal | None = None
+    unit_cost_per_ml_snapshot: Decimal | None = None
+    estimated_cost: Decimal | None = None
+
+
+class GlazePlanOut(BaseModel):
+    """El plan tecnico de esmaltes de una linea, tal como quedo guardado.
+
+    En un borrador se recalcula con la configuracion vigente; en una cotizacion
+    confirmada es historia y no vuelve a tocarse.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    unit: str = "g"
+    estimated_glaze_percent_snapshot: Decimal
+    piece_weight_g_snapshot: Decimal
+    grams_per_piece: Decimal
+    total_estimated_solids_g: Decimal
+    allocations: list[GlazeAllocationOut] = Field(default_factory=list)
+    total_estimated_cost: Decimal | None = None
+
+
 class QuotationBuilderItemIn(_Strict):
     id: PositiveInt | None = None
     product_id: PositiveInt
@@ -77,6 +138,11 @@ class QuotationBuilderItemIn(_Strict):
     factor_kiln_id: PositiveInt | None = None
     techniques: list[TechniqueSelectionIn] = Field(default_factory=list, max_length=100)
     additionals: list[AdditionalSelectionIn] = Field(default_factory=list, max_length=100)
+    #: Fase 009D. Esmaltes de esta pieza y su reparto. Estimar no consume
+    #: inventario: el descuento real al vender pertenece a 009H.
+    glazes: list[GlazeSelectionItemIn] = Field(default_factory=list, max_length=20)
+    #: Unidad en la que el usuario quiere leer el plan de esmaltes.
+    glaze_unit: Literal["g", "ml"] = "g"
     days_adjustment: Annotated[int, Field(strict=True, ge=-10_000, le=10_000)] = 0
     waiting_days: Annotated[int, Field(strict=True, ge=0, le=10_000)] = 0
     other_costs: list[OtherCostSelectionIn] | None = Field(default=None, max_length=100)
@@ -162,6 +228,10 @@ class QuotationBuilderItemOut(BaseModel):
     high_kiln_selected: bool = True
     factor_kiln_id: int | None = None
     production_snapshot: dict[str, Any] = Field(default_factory=dict)
+    #: Fase 009D. El frontend consume ESTE campo tipado, nunca el JSON crudo
+    #: de production_snapshot.
+    glaze_plan: GlazePlanOut | None = None
+    glaze_unit: str = "g"
     techniques: list[dict[str, Any]] = Field(default_factory=list)
     additionals: list[dict[str, Any]] = Field(default_factory=list)
     other_costs: list[dict[str, Any]] = Field(default_factory=list)

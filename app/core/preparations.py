@@ -188,6 +188,33 @@ def estimated_glaze_grams(
     return _quantize_quantity(per_piece * Decimal(quantity))
 
 
+def resolve_allocation_percents(shares: Sequence[Decimal]) -> tuple[Decimal, ...]:
+    """Convierte los pesos relativos que teclea el usuario en porcentajes.
+
+    `share` NO es un porcentaje. Es un peso relativo: 1 y 1 son mitad y mitad,
+    2 y 1 son dos tercios y un tercio, y 70 y 30 dan 70 % y 30 % solo porque
+    esos numeros ya suman 100. Tratar el share como porcentaje directo
+    convertiria "1 y 1" en "1 % y 1 %" y perderia el 98 % restante.
+
+    El resto de la cuantizacion se acumula en el ultimo tramo para que la suma
+    sea exactamente 100: repartir entre tres da 33,33 + 33,33 + 33,34.
+    """
+    if not shares:
+        raise PreparationError("Hace falta al menos un esmalte para repartir")
+    total = sum(shares, ZERO)
+    if total <= 0:
+        raise PreparationError("Las participaciones deben sumar mas que cero")
+
+    percents: list[Decimal] = []
+    running = ZERO
+    for share in shares[:-1]:
+        value = _quantize_quantity(share * Decimal(100) / total)
+        percents.append(value)
+        running += value
+    percents.append(_quantize_quantity(Decimal(100) - running))
+    return tuple(percents)
+
+
 def glaze_cost(millilitres: Decimal, unit_cost_per_ml: Decimal) -> Decimal:
     """Costo estimado de una asignacion de esmalte.
 

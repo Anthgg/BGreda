@@ -29,6 +29,8 @@ from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
 from app.schemas.quotation_builder import (
+    GlazePlanOut,
+    GlazeSelectionItemIn,
     ProductDimensionCompletionIn,
     QuotationBuilderCreateIn,
     QuotationBuilderDraftIn,
@@ -44,6 +46,12 @@ from app.schemas.quotations import (
 )
 from app.services.audit import AuditRecorder
 from app.services.firings import FiringService
+from app.services.preparations import (
+    GlazeChoice,
+    GlazeEstimate,
+    PreparationService,
+    PreparationValidationError,
+)
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import FiringEstimateOverride, QuotationService
 from app.services.sequences import SequenceService
@@ -53,6 +61,28 @@ BUILDER_ENTITY = "quotation_builder"
 PRODUCTION_DIMENSIONS = ("length", "width", "height")
 ALL_DIMENSIONS = ("width", "height", "length", "depth")
 HIDDEN_WARNING_CODES = {"DISCOUNT_RULE_BLOCKED_BY_SOURCE"}
+#: Avisos que impiden dar una linea por completa.
+#:
+#: Vive en un solo sitio a proposito. Antes estaba duplicado entre `preview()`
+#: y `_item_complete()`, y una lista que hay que recordar actualizar dos veces
+#: acaba divergiendo: el preview daria la linea por incompleta y la lectura de
+#: lo guardado por completa, o al reves.
+BLOCKING_WARNING_CODES = frozenset(
+    {
+        "QUANTITY_REQUIRED",
+        "PRODUCTION_DIMENSIONS_REQUIRED",
+        "KILN_REQUIRED",
+        "FIRING_REQUIRED",
+        "FIRING_KILN_REQUIRED",
+        "KILN_CAPACITY_EXCEEDED",
+        "RECIPE_REQUIRED",
+        "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
+        "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
+        # Fase 009D
+        "GLAZE_PIECE_WEIGHT_REQUIRED",
+        "GLAZE_ML_REQUIRES_PREPARATION",
+    }
+)
 _DIMENSION_QUANTUM = Decimal(1).scaleb(-QUANTITY_SCALE)
 
 
@@ -306,6 +336,89 @@ def _confirmed_production_summary(
     return enriched
 
 
+def _stored_glaze_plan(snapshot: dict[str, Any]) -> GlazePlanOut | None:
+    plan = snapshot.get("glaze_plan")
+    if not isinstance(plan, dict):
+        return None
+    return GlazePlanOut.model_validate(plan)
+
+
+def _glaze_inputs(snapshot: dict[str, Any]) -> list[GlazeSelectionItemIn]:
+    """Recupera la eleccion de esmaltes guardada en el snapshot.
+
+    Se lee `glazes_input` —lo que el usuario mando— y solo si falta se cae a
+    las asignaciones ya resueltas, que es como quedaron guardados los
+    borradores de antes de que existiera el plan. En ese caso el `share` se
+    recupera del propio reparto: no hay nada mejor de donde sacarlo.
+    """
+    raw = snapshot.get("glazes_input")
+    if not isinstance(raw, list):
+        plan = snapshot.get("glaze_plan")
+        raw = plan.get("allocations", []) if isinstance(plan, dict) else []
+    selections: list[GlazeSelectionItemIn] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        preparation_id = entry.get("preparation_id")
+        prepared_product_id = entry.get("prepared_product_id")
+        if preparation_id is None and prepared_product_id is None:
+            continue
+        selections.append(
+            GlazeSelectionItemIn(
+                preparation_id=preparation_id,
+                prepared_product_id=prepared_product_id,
+                share=_snapshot_decimal(entry.get("share")) or Decimal(1),
+            )
+        )
+    return selections
+
+
+def _glaze_plan_snapshot(
+    estimate: GlazeEstimate, *, unit: str, piece_weight_g: Decimal
+) -> dict[str, Any]:
+    """Serializa el plan para `production_snapshot["glaze_plan"]`.
+
+    Se guardan tanto la ENTRADA del usuario (`share`, `unit`, los ids) como los
+    DERIVADOS congelados (`allocation_percent`, gramos, mililitros,
+    concentracion y costo por mililitro). Los derivados no son redundancia: al
+    confirmar, la cotizacion tiene que poder explicarse sola aunque despues
+    cambien el porcentaje configurado, la receta o el lote.
+    """
+    return {
+        "unit": unit,
+        "estimated_glaze_percent_snapshot": estimate.estimated_glaze_percent,
+        "piece_weight_g_snapshot": piece_weight_g,
+        "grams_per_piece": estimate.grams_per_piece,
+        "total_estimated_solids_g": estimate.total_grams,
+        "total_estimated_cost": (
+            sum((a.cost for a in estimate.allocations if a.cost is not None), ZERO)
+            if any(a.cost is not None for a in estimate.allocations)
+            else None
+        ),
+        "allocations": [
+            {
+                "prepared_product_id": allocation.prepared_product.id,
+                "prepared_product_internal_reference": (
+                    allocation.prepared_product.internal_reference
+                ),
+                "prepared_product_name": allocation.prepared_product.name,
+                "preparation_id": (allocation.preparation.id if allocation.preparation else None),
+                "preparation_code": (
+                    allocation.preparation.code if allocation.preparation else None
+                ),
+                "share": allocation.share,
+                "allocation_percent": allocation.allocation_percent,
+                "grams": allocation.grams,
+                "millilitres": allocation.millilitres,
+                "solids_g_per_ml_snapshot": allocation.solids_g_per_ml,
+                "unit_cost_per_ml_snapshot": allocation.unit_cost_per_ml,
+                "estimated_cost": allocation.cost,
+            }
+            for allocation in estimate.allocations
+        ],
+    }
+
+
 class QuotationBuilderService:
     def __init__(
         self,
@@ -322,6 +435,70 @@ class QuotationBuilderService:
         self._firings = firings
         self._quotations = quotations
         self._pdf = pdf or QuotationPdfService(session)
+        # Fase 009D: el plan de esmaltes se calcula con el mismo motor que
+        # la estimacion suelta. Duplicar la matematica aqui la haria
+        # divergir en silencio en cuanto una de las dos cambiara.
+        self._preparations = PreparationService(session, audit)
+
+    async def _glaze_plan(
+        self, item: QuotationBuilderItemIn, product: Product
+    ) -> tuple[dict[str, Any] | None, list[str]]:
+        """Resuelve el plan de esmaltes de una linea y sus avisos.
+
+        El peso de la pieza sale de `Product.grammage`, no de un campo que el
+        usuario teclee en el Cotizador: es el mismo dato del maestro con el que
+        se calcula todo lo demas de la pieza, y tenerlo en dos sitios lo haria
+        divergir.
+
+        Los errores de eleccion se devuelven como AVISOS y no como excepciones:
+        un borrador tiene que poder abrirse y arreglarse. El aviso impide
+        completar, que es lo que de verdad hace falta bloquear.
+        """
+        if not item.glazes:
+            return None, []
+        if item.quantity is None:
+            # Ya lo bloquea QUANTITY_REQUIRED; anadir otro aviso solo repetiria
+            # el mismo problema con dos nombres distintos.
+            return None, []
+        if product.grammage is None or product.grammage <= ZERO:
+            # Sin peso de pieza no hay nada que estimar. Inventar un peso daria
+            # un costo de esmalte creible y falso.
+            return None, ["GLAZE_PIECE_WEIGHT_REQUIRED"]
+
+        choices = [
+            GlazeChoice(
+                share=glaze.share,
+                preparation_id=glaze.preparation_id,
+                prepared_product_id=glaze.prepared_product_id,
+            )
+            for glaze in item.glazes
+        ]
+        try:
+            estimate = await self._preparations.estimate_glaze(
+                piece_weight_g=product.grammage,
+                quantity=item.quantity,
+                glazes=choices,
+                unit=item.glaze_unit,
+            )
+        except PreparationValidationError:
+            if item.glaze_unit != "ml":
+                raise
+            # Pedir mililitros sin lote elegido no invalida el borrador: se
+            # muestra el plan en gramos y se avisa de lo que falta.
+            estimate = await self._preparations.estimate_glaze(
+                piece_weight_g=product.grammage,
+                quantity=item.quantity,
+                glazes=choices,
+                unit="g",
+            )
+            return (
+                _glaze_plan_snapshot(estimate, unit="g", piece_weight_g=product.grammage),
+                ["GLAZE_ML_REQUIRES_PREPARATION"],
+            )
+        return (
+            _glaze_plan_snapshot(estimate, unit=item.glaze_unit, piece_weight_g=product.grammage),
+            [],
+        )
 
     async def _get(self, quotation_id: int, *, for_update: bool = False) -> Quotation:
         stmt = (
@@ -582,6 +759,11 @@ class QuotationBuilderService:
             if "KILN_CAPACITY_EXCEEDED" in production_warnings:
                 warnings.append("KILN_CAPACITY_EXCEEDED")
 
+            # Fase 009D: el plan de esmaltes es una estimacion tecnica. No
+            # entra en el costo (eso es 009E) ni descuenta inventario (009H).
+            glaze_plan, glaze_warnings = await self._glaze_plan(item, product)
+            warnings.extend(glaze_warnings)
+
             line_snapshot = production_lines.get(product.id, {})
             source_key = {
                 "simulation": _fingerprint(production),
@@ -675,7 +857,15 @@ class QuotationBuilderService:
                         "product": [product.id, product.updated_at],
                         "recipe": [recipe_id, version_id, version_fingerprint],
                         "production": source_key,
-                        "input": item.model_dump(mode="json"),
+                        # Fase 009D: el plan de esmaltes NO entra en la
+                        # huella. Todavia es una estimacion tecnica y no
+                        # participa del costo comercial, asi que cambiar
+                        # `estimated_glaze_percent` no debe bloquear con
+                        # SOURCE_CHANGED una confirmacion que por lo demas
+                        # sigue siendo valida. Se reevalua en 009E/009H,
+                        # cuando el esmalte si sea autoridad de precio o de
+                        # consumo fisico.
+                        "input": item.model_dump(mode="json", exclude={"glazes", "glaze_unit"}),
                     }
                 )
             )
@@ -706,6 +896,8 @@ class QuotationBuilderService:
                     recipe_auto_selected=auto_selected,
                     materials_applied_input=item.materials_applied,
                     material_grams_per_piece=item.material_grams_per_piece,
+                    glaze_plan=GlazePlanOut.model_validate(glaze_plan) if glaze_plan else None,
+                    glaze_unit=item.glaze_unit,
                     firing_id=calculation.firing_id if calculation else None,
                     firing_line_id=calculation.firing_line_id if calculation else None,
                     firing_code_snapshot=(
@@ -755,6 +947,19 @@ class QuotationBuilderService:
                         # el horno puede cambiar de duracion despues.
                         "firing_plan": item_plan,
                         "calculated_firing_days": item_days,
+                        # Clave con espacio de nombres propio, como firing_plan:
+                        # dos planes legibles en vez de una sopa de claves
+                        # sueltas junto a base_cost y occupancy_factor.
+                        **({"glaze_plan": glaze_plan} if glaze_plan is not None else {}),
+                        "glaze_unit": item.glaze_unit,
+                        "glazes_input": [
+                            {
+                                "preparation_id": glaze.preparation_id,
+                                "prepared_product_id": glaze.prepared_product_id,
+                                "share": glaze.share,
+                            }
+                            for glaze in item.glazes
+                        ],
                     },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
@@ -818,20 +1023,7 @@ class QuotationBuilderService:
                     ),
                     source_fingerprint=item_fingerprint,
                     warnings=_output_warnings(warnings),
-                    complete=not any(
-                        code in warnings
-                        for code in (
-                            "QUANTITY_REQUIRED",
-                            "PRODUCTION_DIMENSIONS_REQUIRED",
-                            "KILN_REQUIRED",
-                            "FIRING_REQUIRED",
-                            "FIRING_KILN_REQUIRED",
-                            "KILN_CAPACITY_EXCEEDED",
-                            "RECIPE_REQUIRED",
-                            "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
-                            "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
-                        )
-                    ),
+                    complete=not BLOCKING_WARNING_CODES.intersection(warnings),
                     sort_order=position,
                 )
             )
@@ -883,7 +1075,28 @@ class QuotationBuilderService:
         source = _fingerprint(
             {
                 "customer": [customer.id, customer.updated_at] if customer else None,
-                "settings": [settings.id, settings.version, settings.updated_at],
+                # Se hashean los VALORES comerciales que el calculo usa de
+                # verdad, no `version`/`updated_at` de la fila.
+                #
+                # Con la version, cualquier edicion de la configuracion
+                # invalidaba todos los borradores: cambiar el texto de las
+                # condiciones de pago, o los datos del banco, dejaba
+                # cotizaciones correctas sin poder confirmarse con
+                # SOURCE_CHANGED. Con 009D eso ademas contradice la regla
+                # explicita de que tocar `estimated_glaze_percent` no puede
+                # bloquear una confirmacion mientras el esmalte no sea
+                # autoridad de precio.
+                #
+                # Estos cuatro son los unicos campos de la configuracion que
+                # entran en el importe (ver los usos de `settings.` mas abajo);
+                # cambiar cualquiera de ellos SIGUE invalidando la huella, que
+                # es justo lo que debe hacer.
+                "settings": [
+                    settings.tax_percent,
+                    settings.default_quotation_factor,
+                    settings.currency_code,
+                    settings.currency_symbol,
+                ],
                 "production": production,
                 "items": [item.source_fingerprint for item in item_outputs],
             }
@@ -1249,6 +1462,17 @@ class QuotationBuilderService:
                         )
                     ),
                     factor_kiln_id=item.production_snapshot.get("factor_kiln_id") or item.kiln_id,
+                    # Fase 009D: se reconstruyen las ENTRADAS del usuario, no
+                    # los derivados. Los gramos y mililitros guardados son el
+                    # resultado de un calculo, no una eleccion: reinyectarlos
+                    # como entrada los congelaria en un borrador que deberia
+                    # recalcularse con la configuracion vigente.
+                    glazes=_glaze_inputs(item.production_snapshot),
+                    glaze_unit=(
+                        item.production_snapshot.get("glaze_unit", "g")
+                        if item.production_snapshot.get("glaze_unit") in ("g", "ml")
+                        else "g"
+                    ),
                     techniques=[self._technique_input(value) for value in item.techniques_snapshot],
                     additionals=[
                         self._additional_input(value) for value in item.additionals_snapshot
@@ -1281,17 +1505,6 @@ class QuotationBuilderService:
             item.product_width_snapshot,
             item.product_height_snapshot,
         )
-        blocked = {
-            "KILN_CAPACITY_EXCEEDED",
-            "RECIPE_REQUIRED",
-            "MATERIAL_GRAMS_PER_PIECE_REQUIRED",
-            "PRODUCTION_DIMENSIONS_REQUIRED",
-            "QUANTITY_REQUIRED",
-            "KILN_REQUIRED",
-            "FIRING_REQUIRED",
-            "FIRING_KILN_REQUIRED",
-            "CUSTOM_DIMENSIONS_NOT_ALLOWED_FOR_CONFIRMED_FIRING",
-        }
         firing_complete = bool(
             item.kiln_id or item.production_snapshot.get("source") == "CONFIRMED_FIRING_LINE"
         )
@@ -1307,7 +1520,7 @@ class QuotationBuilderService:
             all(value is not None for value in required)
             and firing_complete
             and materials_complete
-            and not blocked.intersection(item.calculation_warnings)
+            and not BLOCKING_WARNING_CODES.intersection(item.calculation_warnings)
         )
 
     def _stored_output(self, row: Quotation) -> QuotationBuilderOut:
@@ -1368,6 +1581,11 @@ class QuotationBuilderService:
                 ),
                 factor_kiln_id=item.production_snapshot.get("factor_kiln_id") or item.kiln_id,
                 production_snapshot=_confirmed_item_snapshot(item.production_snapshot),
+                # CONFIRMED lee el snapshot guardado y no vuelve a calcular:
+                # cambiar despues el porcentaje, la receta o el lote no puede
+                # mover una cotizacion ya cerrada.
+                glaze_plan=_stored_glaze_plan(item.production_snapshot),
+                glaze_unit=str(item.production_snapshot.get("glaze_unit", "g")),
                 techniques=item.techniques_snapshot,
                 additionals=item.additionals_snapshot,
                 other_costs=item.other_costs_snapshot,
