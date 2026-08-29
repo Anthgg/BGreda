@@ -863,7 +863,19 @@ class QuotationService:
         source_data: dict[str, object] = {
             "customer": [customer.id, customer.updated_at] if customer else None,
             "product": [product.id, product.updated_at],
-            "settings": [settings.id, settings.version, settings.updated_at],
+            # Los VALORES comerciales que este calculo usa, no `version`.
+            #
+            # Con la version, cualquier edicion de la configuracion cambiaba la
+            # huella de todas las cotizaciones: retocar el texto de las
+            # condiciones de pago dejaba borradores correctos sin poder
+            # confirmarse. Desde 009D ademas contradiria la regla de que tocar
+            # `estimated_glaze_percent` no puede bloquear una confirmacion
+            # mientras el esmalte no sea autoridad de precio.
+            #
+            # Estos dos son los unicos campos de la configuracion que entran en
+            # el importe (ver `default_factor` y `_resolve_tax` mas arriba);
+            # cambiar cualquiera de ellos SIGUE invalidando la huella.
+            "settings": [settings.tax_percent, settings.default_quotation_factor],
             "recipe": [
                 recipe_version.id if recipe_version else None,
                 recipe_version.fingerprint if recipe_version else None,
