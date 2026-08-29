@@ -17,8 +17,10 @@ from app.core.preparations import (
     component_amounts,
     distribute_glaze,
     estimated_glaze_grams,
+    glaze_cost,
     grams_to_ml,
     ml_to_grams,
+    resolve_allocation_percents,
     solids_concentration_g_per_ml,
     unit_cost_per_ml,
 )
@@ -180,3 +182,45 @@ class TestGlazeDistribution:
     def test_participaciones_en_cero_son_un_error(self) -> None:
         with pytest.raises(PreparationError):
             distribute_glaze(D("75"), [D("0"), D("0")])
+
+
+class TestAllocationPercents:
+    """`share` es un peso relativo; el porcentaje lo resuelve el backend."""
+
+    def test_setenta_treinta_ya_son_porcentajes(self) -> None:
+        assert resolve_allocation_percents([D("70"), D("30")]) == (D("70"), D("30"))
+
+    def test_uno_y_uno_son_mitad_y_mitad(self) -> None:
+        # Es el caso que delata tratar el share como porcentaje: si se tomara
+        # literal, "1 y 1" seria 1 % y 1 %, y se perderia el 98 % restante.
+        assert resolve_allocation_percents([D("1"), D("1")]) == (D("50"), D("50"))
+
+    def test_dos_y_uno_son_dos_tercios_y_un_tercio(self) -> None:
+        percents = resolve_allocation_percents([D("2"), D("1")])
+        assert percents[0] == D("66.666666666667")
+        assert sum(percents) == D("100")
+
+    def test_siempre_suman_cien_exacto(self) -> None:
+        for shares in ([D("1")], [D("1")] * 3, [D("1")] * 7, [D("5"), D("3"), D("1")]):
+            assert sum(resolve_allocation_percents(shares)) == D("100")
+
+    def test_sin_participaciones_es_un_error(self) -> None:
+        with pytest.raises(PreparationError):
+            resolve_allocation_percents([])
+
+    def test_participaciones_en_cero_son_un_error(self) -> None:
+        with pytest.raises(PreparationError):
+            resolve_allocation_percents([D("0"), D("0")])
+
+
+class TestGlazeCost:
+    def test_el_costo_va_por_mililitro_no_por_gramo(self) -> None:
+        # El costo congelado del lote es por ml: el agua ya esta descontada de
+        # esa cifra. Cobrar por gramo contaria el agua como materia.
+        assert glaze_cost(D("7500"), D("0.05")) == D("375")
+
+    def test_no_admite_negativos(self) -> None:
+        with pytest.raises(PreparationError):
+            glaze_cost(D("-1"), D("0.05"))
+        with pytest.raises(PreparationError):
+            glaze_cost(D("7500"), D("-0.05"))

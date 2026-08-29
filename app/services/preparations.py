@@ -36,6 +36,7 @@ from app.core.preparations import (
     estimated_glaze_grams,
     glaze_cost,
     grams_to_ml,
+    resolve_allocation_percents,
     solids_concentration_g_per_ml,
     unit_cost_per_ml,
 )
@@ -105,14 +106,49 @@ class InsufficientStockError(APIError):
 
 
 @dataclass(frozen=True)
+class _ResolvedChoice:
+    prepared_product: Product
+    preparation: RecipePreparation | None
+
+
+def resolved_pairs(
+    choices: Sequence[_ResolvedChoice],
+) -> list[tuple[Product, RecipePreparation | None]]:
+    return [(c.prepared_product, c.preparation) for c in choices]
+
+
+@dataclass(frozen=True)
+class GlazeChoice:
+    """Lo UNICO que elige el usuario: que esmalte y con cuanto peso relativo.
+
+    `preparation_id` es opcional a proposito. Se puede querer cotizar "este
+    esmalte" antes de que exista un lote preparado del que sacar la
+    concentracion; en ese caso hay gramos estimados pero no mililitros, porque
+    los mililitros dependen de cuanta agua llevaba un lote concreto.
+    """
+
+    share: Decimal
+    preparation_id: int | None = None
+    prepared_product_id: int | None = None
+
+
+@dataclass(frozen=True)
 class GlazeAllocation:
     """Lo que le toca a un esmalte del consumo estimado de la pieza."""
 
-    preparation: RecipePreparation
+    prepared_product: Product
+    preparation: RecipePreparation | None
+    #: Lo que tecleo el usuario, literal. No es un porcentaje.
     share: Decimal
+    #: El porcentaje que ese share representa una vez resuelto contra el resto.
+    allocation_percent: Decimal
     grams: Decimal
-    millilitres: Decimal
-    cost: Decimal
+    #: `None` cuando no hay lote elegido: sin concentracion no hay conversion,
+    #: y suponer densidad 1 seria inventarse el dato.
+    millilitres: Decimal | None
+    solids_g_per_ml: Decimal | None
+    unit_cost_per_ml: Decimal | None
+    cost: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -221,7 +257,8 @@ class PreparationService:
         *,
         piece_weight_g: Decimal,
         quantity: int,
-        glazes: Sequence[tuple[int, Decimal]],
+        glazes: Sequence[GlazeChoice],
+        unit: str = "g",
     ) -> GlazeEstimate:
         """Estima el esmalte de una cotizacion y lo reparte entre los elegidos.
 
@@ -231,58 +268,116 @@ class PreparationService:
         El total sale del peso de la pieza, no de los esmaltes: usar dos
         esmaltes no gasta el doble, gasta lo mismo repartido. Por eso el
         porcentaje se aplica UNA vez y `distribute_glaze` reparte el resultado.
+
+        `unit` es la unidad en la que el usuario quiere LEER el plan. Pedir
+        mililitros sin un lote elegido se rechaza en vez de responder con un
+        hueco: el factor g -> ml vive en el lote, y sin el la unica respuesta
+        honesta es "todavia no se puede".
         """
+        if unit not in ("g", "ml"):
+            raise PreparationValidationError(f"Unidad no admitida: {unit}. Solo se admiten g y ml.")
         percent = await self.estimated_glaze_percent()
         try:
             total_grams = estimated_glaze_grams(piece_weight_g, quantity, percent)
+            per_piece = estimated_glaze_grams(piece_weight_g, 1, percent)
         except PreparationError as error:
             raise PreparationValidationError(str(error)) from error
 
-        ids = [preparation_id for preparation_id, _ in glazes]
-        if len(ids) != len(set(ids)):
-            raise PreparationValidationError(
-                "Un mismo preparado no puede aparecer dos veces en el reparto"
-            )
         if not glazes:
+            if unit == "ml":
+                raise PreparationValidationError(
+                    "Para expresar el plan en mililitros hay que elegir al menos "
+                    "un preparado: la concentracion es del lote, no de la unidad."
+                )
             # Sin esmaltes elegidos todavia se puede decir CUANTO hara falta.
             # Es el estado normal mientras el usuario aun no ha elegido.
             return GlazeEstimate(
                 estimated_glaze_percent=percent,
-                grams_per_piece=estimated_glaze_grams(piece_weight_g, 1, percent),
+                grams_per_piece=per_piece,
                 total_grams=total_grams,
                 allocations=(),
                 total_cost=Decimal(0),
             )
 
-        preparations = [await self.get(preparation_id) for preparation_id in ids]
+        resolved = [await self._resolve_choice(choice) for choice in glazes]
+        keys = [
+            (choice.preparation.id if choice.preparation else None, choice.prepared_product.id)
+            for choice in resolved
+        ]
+        if len(keys) != len(set(keys)):
+            raise PreparationValidationError(
+                "Un mismo preparado no puede aparecer dos veces en el reparto"
+            )
+
         try:
-            shares = distribute_glaze(total_grams, [share for _, share in glazes])
+            grams_per_glaze = distribute_glaze(total_grams, [c.share for c in glazes])
+            percents = resolve_allocation_percents([c.share for c in glazes])
         except PreparationError as error:
             raise PreparationValidationError(str(error)) from error
 
         allocations: list[GlazeAllocation] = []
-        for preparation, (_, share), grams in zip(preparations, glazes, shares, strict=True):
-            try:
-                millilitres = grams_to_ml(grams, preparation.solids_g_per_ml)
-                cost = glaze_cost(millilitres, preparation.unit_cost_per_ml)
-            except PreparationError as error:
-                raise PreparationValidationError(str(error)) from error
+        for (product, preparation), share, grams, allocation_percent in zip(
+            resolved_pairs(resolved),
+            (c.share for c in glazes),
+            grams_per_glaze,
+            percents,
+            strict=True,
+        ):
+            millilitres: Decimal | None = None
+            cost: Decimal | None = None
+            if preparation is not None:
+                try:
+                    millilitres = grams_to_ml(grams, preparation.solids_g_per_ml)
+                    cost = glaze_cost(millilitres, preparation.unit_cost_per_ml)
+                except PreparationError as error:
+                    raise PreparationValidationError(str(error)) from error
+            elif unit == "ml":
+                raise PreparationValidationError(
+                    f"«{product.name}» no tiene un lote preparado elegido: sin "
+                    "concentracion no se puede expresar el plan en mililitros."
+                )
             allocations.append(
                 GlazeAllocation(
+                    prepared_product=product,
                     preparation=preparation,
                     share=share,
+                    allocation_percent=allocation_percent,
                     grams=grams,
                     millilitres=millilitres,
+                    solids_g_per_ml=preparation.solids_g_per_ml if preparation else None,
+                    unit_cost_per_ml=preparation.unit_cost_per_ml if preparation else None,
                     cost=cost,
                 )
             )
         return GlazeEstimate(
             estimated_glaze_percent=percent,
-            grams_per_piece=estimated_glaze_grams(piece_weight_g, 1, percent),
+            grams_per_piece=per_piece,
             total_grams=total_grams,
             allocations=tuple(allocations),
-            total_cost=sum((a.cost for a in allocations), Decimal(0)),
+            total_cost=sum((a.cost for a in allocations if a.cost is not None), Decimal(0)),
         )
+
+    async def _resolve_choice(self, choice: GlazeChoice) -> _ResolvedChoice:
+        """Resuelve un esmalte elegido a (producto preparado, lote o None)."""
+        if choice.share <= 0:
+            raise PreparationValidationError("El reparto de cada esmalte debe ser mayor que cero")
+        if choice.preparation_id is not None:
+            preparation = await self.get(choice.preparation_id)
+            product = preparation.prepared_product
+            if choice.prepared_product_id is not None and choice.prepared_product_id != product.id:
+                raise PreparationValidationError(
+                    f"El lote {preparation.code} no es del preparado indicado"
+                )
+            return _ResolvedChoice(prepared_product=product, preparation=preparation)
+
+        if choice.prepared_product_id is None:
+            raise PreparationValidationError("Indique el preparado o el lote de cada esmalte")
+        loose = await self._session.get(Product, choice.prepared_product_id)
+        if loose is None:
+            raise PreparationNotFoundError("El material preparado no existe")
+        if loose.product_type is not ProductType.PREPARED_MATERIAL:
+            raise PreparationValidationError(f"«{loose.name}» no es un material preparado")
+        return _ResolvedChoice(prepared_product=loose, preparation=None)
 
     async def prepare(
         self,

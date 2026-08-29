@@ -39,7 +39,7 @@ from app.schemas.recipes import (
     UnitConversionIn,
     UnitConversionOut,
 )
-from app.services.preparations import PreparationValidationError
+from app.services.preparations import GlazeChoice, PreparationValidationError
 
 router = APIRouter(tags=["recetas"])
 
@@ -365,28 +365,38 @@ async def estimate_glaze(
     estimate = await service.estimate_glaze(
         piece_weight_g=payload.piece_weight_g,
         quantity=payload.quantity,
-        glazes=[(glaze.preparation_id, glaze.share) for glaze in payload.glazes],
+        unit=payload.unit,
+        glazes=[
+            GlazeChoice(
+                share=glaze.share,
+                preparation_id=glaze.preparation_id,
+                prepared_product_id=glaze.prepared_product_id,
+            )
+            for glaze in payload.glazes
+        ],
     )
     return GlazeEstimateOut(
         estimated_glaze_percent=estimate.estimated_glaze_percent,
         piece_weight_g=payload.piece_weight_g,
         quantity=payload.quantity,
+        unit=payload.unit,
         grams_per_piece=estimate.grams_per_piece,
         total_estimated_grams=estimate.total_grams,
         allocations=[
             GlazeAllocationOut(
-                preparation_id=allocation.preparation.id,
-                preparation_code=allocation.preparation.code,
-                prepared_product_id=allocation.preparation.prepared_product_id,
+                preparation_id=(allocation.preparation.id if allocation.preparation else None),
+                preparation_code=(allocation.preparation.code if allocation.preparation else None),
+                prepared_product_id=allocation.prepared_product.id,
                 prepared_product_internal_reference=(
-                    allocation.preparation.prepared_product.internal_reference
+                    allocation.prepared_product.internal_reference
                 ),
-                prepared_product_name=allocation.preparation.prepared_product.name,
+                prepared_product_name=allocation.prepared_product.name,
                 share=allocation.share,
+                allocation_percent=allocation.allocation_percent,
                 grams=allocation.grams,
-                solids_g_per_ml=allocation.preparation.solids_g_per_ml,
+                solids_g_per_ml=allocation.solids_g_per_ml,
                 millilitres=allocation.millilitres,
-                unit_cost_per_ml=allocation.preparation.unit_cost_per_ml,
+                unit_cost_per_ml=allocation.unit_cost_per_ml,
                 estimated_cost=allocation.cost,
             )
             for allocation in estimate.allocations

@@ -301,9 +301,14 @@ class RecipePreparationPage(_Out):
 
 
 class GlazeSelectionIn(_In):
-    """Un esmalte concreto (un lote preparado) y su participacion en la pieza."""
+    """Un esmalte concreto y su participacion en la pieza.
 
-    preparation_id: int
+    `preparation_id` es opcional: se puede cotizar un preparado antes de que
+    exista un lote suyo. Sin lote hay gramos pero no mililitros.
+    """
+
+    preparation_id: int | None = None
+    prepared_product_id: int | None = None
     #: Peso relativo del reparto. Dos esmaltes a 1 y 1 se llevan mitad y mitad;
     #: a 70 y 30 se llevan ese reparto. NO es un porcentaje del peso de la
     #: pieza: el porcentaje total ya lo fija la configuracion comercial.
@@ -322,23 +327,29 @@ class GlazeEstimateIn(_In):
     piece_weight_g: Annotated[Decimal, Field(gt=Decimal(0))]
     quantity: Annotated[int, Field(gt=0)]
     glazes: list[GlazeSelectionIn] = Field(default_factory=list, max_length=20)
+    #: Unidad en la que se quiere LEER el plan. Pedir ml sin lote elegido se
+    #: rechaza: la concentracion es del lote, no de la unidad.
+    unit: Literal["g", "ml"] = "g"
 
 
 class GlazeAllocationOut(_Out):
-    preparation_id: int
-    preparation_code: str
+    preparation_id: int | None = None
+    preparation_code: str | None = None
     prepared_product_id: int
     prepared_product_internal_reference: str
     prepared_product_name: str
+    #: Peso relativo tal como lo tecleo el usuario. NO es un porcentaje.
     share: Decimal
+    #: El porcentaje que ese share representa. 1 y 1 -> 50 y 50.
+    allocation_percent: Decimal
     #: Gramos de solidos que le tocan a este esmalte del total estimado.
     grams: Decimal
-    solids_g_per_ml: Decimal
+    solids_g_per_ml: Decimal | None = None
     #: Los mismos gramos expresados en mililitros de preparado, con la
-    #: concentracion de ESTE lote. Nunca con densidad 1.
-    millilitres: Decimal
-    unit_cost_per_ml: Decimal
-    estimated_cost: Decimal
+    #: concentracion de ESTE lote. Nunca con densidad 1. `None` sin lote.
+    millilitres: Decimal | None = None
+    unit_cost_per_ml: Decimal | None = None
+    estimated_cost: Decimal | None = None
 
 
 class GlazeEstimateOut(_Out):
@@ -347,6 +358,7 @@ class GlazeEstimateOut(_Out):
     estimated_glaze_percent: Decimal
     piece_weight_g: Decimal
     quantity: int
+    unit: str = "g"
     grams_per_piece: Decimal
     total_estimated_grams: Decimal
     allocations: list[GlazeAllocationOut] = []
