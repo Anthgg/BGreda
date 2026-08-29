@@ -21,8 +21,11 @@
 # van con `$$` para que lleguen intactas al script; `$_IMAGE` y
 # `$COMMIT_SHA` si son sustituciones de Cloud Build y llevan un solo `$`.
 
+# `_REGION` estaba declarado aqui y no se usa en ningun step: el job corre
+# alembic dentro de la imagen y no llama a gcloud, asi que no necesita region.
+# Cloud Build rechaza el envio si una sustitucion declarada no aparece en la
+# plantilla, de modo que no era decorativa: impedia ejecutar el job.
 substitutions:
-  _REGION: southamerica-west1
   _IMAGE: southamerica-west1-docker.pkg.dev/cotizador-greda/cloud-run-source-deploy/bgreda-api
 
 steps:
