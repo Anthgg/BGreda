@@ -14,6 +14,12 @@
 #   2. Compara current vs head
 #   3. Si ya está actualizado → salida exitosa sin migrar
 #   4. Si está desactualizado → alembic upgrade head
+#
+# NOTA sobre `$$`: dentro de los `args` de un step, Cloud Build sustituye
+# todo lo que parezca `$VAR` ANTES de que bash lo vea. Las variables de
+# shell (HEAD_COUNT, CODE_HEAD, CURRENT) y las sustituciones de comando
+# van con `$$` para que lleguen intactas al script; `$_IMAGE` y
+# `$COMMIT_SHA` si son sustituciones de Cloud Build y llevan un solo `$`.
 
 substitutions:
   _REGION: southamerica-west1
@@ -75,22 +81,22 @@ steps:
         echo "======================================================"
 
         # Verificar que solo hay un head
-        HEAD_COUNT=$(python -m alembic heads 2>/dev/null | wc -l | tr -d ' ')
-        echo "Alembic heads encontrados: $HEAD_COUNT"
-        if [ "$HEAD_COUNT" -ne 1 ]; then
-          echo "ERROR: Se encontraron $HEAD_COUNT heads de Alembic."
+        HEAD_COUNT=$$(python -m alembic heads 2>/dev/null | wc -l | tr -d ' ')
+        echo "Alembic heads encontrados: $$HEAD_COUNT"
+        if [ "$$HEAD_COUNT" -ne 1 ]; then
+          echo "ERROR: Se encontraron $$HEAD_COUNT heads de Alembic."
           echo "MÚLTIPLES HEADS detectados. Resolver manualmente antes de migrar."
           echo "STATUS: MIGRATION_ABORTED_MULTIPLE_HEADS"
           exit 1
         fi
 
-        CODE_HEAD=$(python -m alembic heads 2>/dev/null | awk '{print $1}')
-        echo "CODE_HEAD: $CODE_HEAD"
+        CODE_HEAD=$$(python -m alembic heads 2>/dev/null | awk '{print $$1}')
+        echo "CODE_HEAD: $$CODE_HEAD"
 
-        CURRENT=$(python -m alembic current 2>/dev/null | awk '{print $1}' | head -1)
-        echo "PRODUCTION_CURRENT: $CURRENT"
+        CURRENT=$$(python -m alembic current 2>/dev/null | awk '{print $$1}' | head -1)
+        echo "PRODUCTION_CURRENT: $$CURRENT"
 
-        if [ "$CURRENT" = "$CODE_HEAD" ]; then
+        if [ "$$CURRENT" = "$$CODE_HEAD" ]; then
           echo ""
           echo "PRODUCTION_CURRENT == CODE_HEAD"
           echo "STATUS: MIGRATION_REQUIRED=NO — No se ejecuta migración."
@@ -98,7 +104,7 @@ steps:
         fi
 
         echo ""
-        echo "PRODUCTION_CURRENT ($CURRENT) != CODE_HEAD ($CODE_HEAD)"
+        echo "PRODUCTION_CURRENT ($$CURRENT) != CODE_HEAD ($$CODE_HEAD)"
         echo "Ejecutando alembic upgrade head..."
         python -m alembic upgrade head
         echo ""
