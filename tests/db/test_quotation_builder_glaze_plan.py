@@ -456,3 +456,140 @@ async def test_planificar_esmaltes_no_mueve_inventario(
     )
     assert confirmada.status_code == 200, confirmada.text
     assert await _inventory_fingerprint(db_session) == antes
+
+
+# ---------------------------------------------------------------------------
+# Sugerencia por defecto: el preparado mas caro
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_una_linea_nueva_propone_el_preparado_mas_caro(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """DEFAULT_MOST_EXPENSIVE_GLAZE.
+
+    Una cotizacion preliminar peca por arriba a proposito: si al final se usa
+    un esmalte mas barato el taller gana, y al reves pierde dinero en un
+    precio ya comprometido.
+
+    `uno` rinde 5000 ml (0,05 por ml) y `dos` rinde 10000 (0,025). El caro es
+    `uno`, y NO es el primero de la lista: `list_preparations` ordena por id
+    descendente, asi que por orden saldria `dos`.
+    """
+    payload, uno, dos = await _scenario(api, admin_csrf, db_session)
+    assert Decimal(uno["unit_cost_per_ml"]) > Decimal(dos["unit_cost_per_ml"])
+    assert dos["id"] > uno["id"], "el barato es el mas reciente: el orden no basta"
+
+    respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    plan = respuesta.json()["items"][0]["glaze_plan"]
+
+    assert plan is not None
+    assert plan["default_applied"] is True
+    assert [a["preparation_id"] for a in plan["allocations"]] == [uno["id"]]
+
+
+@pytest.mark.asyncio
+async def test_la_eleccion_del_usuario_gana_sobre_la_sugerencia(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """USER_CAN_OVERRIDE_DEFAULT_GLAZE + OVERRIDE_PERSISTS_AFTER_REOPEN."""
+    payload, _uno, dos = await _scenario(api, admin_csrf, db_session)
+    body = _with_glazes(payload, [{"preparation_id": dos["id"], "share": "1"}])
+    body["items"][0]["glaze_selection_touched"] = True
+
+    creada = await api.post(BUILDER, json=body, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    quotation_id = creada.json()["id"]
+    plan = creada.json()["items"][0]["glaze_plan"]
+    assert plan["default_applied"] is False
+    assert [a["preparation_id"] for a in plan["allocations"]] == [dos["id"]]
+
+    # Al reabrir sigue el barato: la sugerencia no vuelve a pisar la eleccion.
+    reabierta = await api.get(f"{BUILDER}/{quotation_id}", headers=head(admin_csrf))
+    assert reabierta.status_code == 200, reabierta.text
+    guardado = reabierta.json()["items"][0]["glaze_plan"]
+    assert [a["preparation_id"] for a in guardado["allocations"]] == [dos["id"]]
+    assert guardado["default_applied"] is False
+
+    # Y tras recalcular tampoco: es el caso que delata una sugerencia que se
+    # reaplica en cada preview.
+    recalculada = await api.put(
+        f"{BUILDER}/{quotation_id}",
+        json={**body, "expected_updated_at": reabierta.json()["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert recalculada.status_code == 200, recalculada.text
+    assert [
+        a["preparation_id"] for a in recalculada.json()["items"][0]["glaze_plan"]["allocations"]
+    ] == [dos["id"]]
+
+
+@pytest.mark.asyncio
+async def test_quitar_todos_los_esmaltes_no_los_resucita(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Elegir NO llevar esmalte es una eleccion, no una ausencia de eleccion.
+
+    Es el caso que obliga a guardar la bandera: en `glazes` una lista vacia
+    se ve igual tanto si el usuario no ha elegido todavia como si quito el
+    sugerido a proposito. Sin la bandera, quitarlo lo haria reaparecer y no
+    habria forma de dejar la linea sin esmalte.
+    """
+    payload, _uno, _dos = await _scenario(api, admin_csrf, db_session)
+    items = [dict(item) for item in payload["items"]]
+    items[0] = {**items[0], "glazes": [], "glaze_selection_touched": True}
+    body = {**payload, "items": items}
+
+    creada = await api.post(BUILDER, json=body, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    assert creada.json()["items"][0]["glaze_plan"] is None
+
+    reabierta = await api.get(f"{BUILDER}/{creada.json()['id']}", headers=head(admin_csrf))
+    assert reabierta.json()["items"][0]["glaze_plan"] is None
+    assert reabierta.json()["items"][0]["glaze_selection_touched"] is True
+
+
+@pytest.mark.asyncio
+async def test_sin_preparados_no_se_propone_nada(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """No hay lote que sugerir: la linea simplemente no lleva plan."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await db_session.execute(
+        update(Product)
+        .where(Product.id.in_([item["product_id"] for item in payload["items"]]))
+        .values(grammage=PIECE_WEIGHT_G)
+    )
+    await db_session.commit()
+
+    respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    assert respuesta.json()["items"][0]["glaze_plan"] is None
+
+
+@pytest.mark.asyncio
+async def test_la_sugerencia_no_bloquea_un_producto_sin_gramaje(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Una sugerencia no puede impedir cotizar.
+
+    Si el aviso de gramaje saltara tambien cuando el esmalte lo propuso el
+    sistema, cualquier producto sin gramaje dejaria de poder cotizarse en
+    cuanto existiera un preparado en la base — que es exactamente lo que pasa
+    despues de la primera preparacion del taller.
+    """
+    payload, _uno, _dos = await _scenario(api, admin_csrf, db_session)
+    await db_session.execute(
+        update(Product)
+        .where(Product.id.in_([item["product_id"] for item in payload["items"]]))
+        .values(grammage=None)
+    )
+    await db_session.commit()
+
+    respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+
+    assert respuesta.status_code == 200, respuesta.text
+    linea = respuesta.json()["items"][0]
+    assert linea["glaze_plan"] is None
+    assert "GLAZE_PIECE_WEIGHT_REQUIRED" not in linea["warnings"]
+    assert linea["complete"], "la linea debe seguir siendo cotizable"

@@ -98,6 +98,10 @@ class GlazePlanOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     unit: str = "g"
+    #: El plan lo propuso el backend porque el usuario aun no habia elegido.
+    #: Es una SUGERENCIA: en cuanto el usuario toca la seleccion, deja de
+    #: proponerse y manda lo que el eligio.
+    default_applied: bool = False
     estimated_glaze_percent_snapshot: Decimal
     piece_weight_g_snapshot: Decimal
     grams_per_piece: Decimal
@@ -143,6 +147,13 @@ class QuotationBuilderItemIn(_Strict):
     glazes: list[GlazeSelectionItemIn] = Field(default_factory=list, max_length=20)
     #: Unidad en la que el usuario quiere leer el plan de esmaltes.
     glaze_unit: Literal["g", "ml"] = "g"
+    #: El usuario ya toco la seleccion de esmaltes de esta linea.
+    #:
+    #: Distingue "todavia no ha elegido" de "eligio no llevar ninguno", que
+    #: en `glazes` se ven igual (lista vacia). Sin esta bandera, quitar el
+    #: esmalte sugerido lo haria reaparecer en el siguiente recalculo y el
+    #: usuario no podria quitarlo nunca.
+    glaze_selection_touched: bool = False
     days_adjustment: Annotated[int, Field(strict=True, ge=-10_000, le=10_000)] = 0
     waiting_days: Annotated[int, Field(strict=True, ge=0, le=10_000)] = 0
     other_costs: list[OtherCostSelectionIn] | None = Field(default=None, max_length=100)
@@ -232,6 +243,7 @@ class QuotationBuilderItemOut(BaseModel):
     #: de production_snapshot.
     glaze_plan: GlazePlanOut | None = None
     glaze_unit: str = "g"
+    glaze_selection_touched: bool = False
     techniques: list[dict[str, Any]] = Field(default_factory=list)
     additionals: list[dict[str, Any]] = Field(default_factory=list)
     other_costs: list[dict[str, Any]] = Field(default_factory=list)
