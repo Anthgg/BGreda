@@ -11,6 +11,7 @@ conserva al actualizar.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -144,3 +145,62 @@ async def test_altas_sucesivas_no_repiten_codigo(api: httpx.AsyncClient, admin_c
         assert response.status_code == 201, response.text
         codes.append(response.json()["code"])
     assert len(set(codes)) == len(codes), codes
+
+
+@pytest.mark.parametrize(
+    ("url", "payload", "prefix"),
+    [
+        (TECHNIQUES, _technique(), "TEC-"),
+        (ADDITIONALS, _additional(), "ADI-"),
+        (OTHER_COSTS, _other_cost(), "OTH-"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dos_altas_simultaneas_obtienen_codigos_distintos_y_ambas_triunfan(
+    api: httpx.AsyncClient, admin_csrf: str, url: str, payload: dict[str, Any], prefix: str
+) -> None:
+    """CONCURRENT_CREATE_UNIQUE_CODES.
+
+    Un bucle secuencial no probaria nada: la carrera solo aparece cuando dos
+    altas leen la numeracion a la vez. Cada peticion abre su propia sesion de
+    base de datos (ver el override de `get_db_session` en conftest), asi que
+    `asyncio.gather` las solapa de verdad.
+
+    Lo que se exige no es solo que los codigos salgan distintos —eso lo daria
+    la restriccion `unique` reventando una de las dos—, sino que **las dos
+    altas terminen en 201**. Un alta legitima que falla por una carrera interna
+    es un defecto, no una proteccion.
+    """
+    first, second = await asyncio.gather(
+        api.post(url, json={**payload, "name": "Simultanea A"}, headers=head(admin_csrf)),
+        api.post(url, json={**payload, "name": "Simultanea B"}, headers=head(admin_csrf)),
+    )
+
+    statuses = [first.status_code, second.status_code]
+    assert statuses == [201, 201], f"{statuses} -> {first.text} | {second.text}"
+
+    code_a, code_b = first.json()["code"], second.json()["code"]
+    assert code_a.startswith(prefix) and code_b.startswith(prefix)
+    assert code_a != code_b, f"dos altas simultaneas recibieron el mismo codigo: {code_a}"
+
+
+@pytest.mark.asyncio
+async def test_el_lock_de_una_familia_no_bloquea_a_las_otras(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """Cada familia lleva su propia clave de lock.
+
+    Si las tres compartieran una, dar de alta tecnicas frenaria a los
+    adicionales sin ninguna razon de negocio. Se comprueba que las tres altas
+    simultaneas terminan bien.
+    """
+    results = await asyncio.gather(
+        api.post(TECHNIQUES, json=_technique(name="Cruzada TEC"), headers=head(admin_csrf)),
+        api.post(ADDITIONALS, json=_additional(name="Cruzada ADI"), headers=head(admin_csrf)),
+        api.post(OTHER_COSTS, json=_other_cost(name="Cruzada OTH"), headers=head(admin_csrf)),
+    )
+    assert [r.status_code for r in results] == [201, 201, 201], [r.text for r in results]
+    codes = [r.json()["code"] for r in results]
+    assert (
+        codes[0].startswith("TEC-") and codes[1].startswith("ADI-") and codes[2].startswith("OTH-")
+    )

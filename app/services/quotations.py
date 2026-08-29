@@ -185,6 +185,18 @@ MASTER_CODE_PREFIX: Final[Mapping[type[Technique] | type[Additional] | type[Othe
     OtherCost: "OTH",
 }
 
+#: Espacio de nombres de los advisory locks de este modulo. Con la variante de
+#: dos enteros, el primero separa a los locks de esta familia de los de
+#: cualquier otro modulo que use el mismo mecanismo.
+MASTER_CODE_LOCK_NAMESPACE: Final = 9_0031
+
+#: Una clave por familia: numerar tecnicas no debe bloquear a los adicionales.
+MASTER_CODE_LOCK_KEY: Final[Mapping[type[Technique] | type[Additional] | type[OtherCost], int]] = {
+    Technique: 1,
+    Additional: 2,
+    OtherCost: 3,
+}
+
 
 class QuotationService:
     def __init__(
@@ -287,10 +299,25 @@ class QuotationService:
 
         No usa `SequenceService` a proposito: sus contadores viven en
         `document_sequences` y dar de alta tres tipos nuevos exigiria una
-        migracion. Aqui basta con continuar la numeracion existente, que la
-        restriccion `unique` de la columna respalda.
+        migracion.
+
+        Leer el maximo y sumarle uno es una carrera: dos altas simultaneas leen
+        el mismo TEC-010 y las dos proponen TEC-011. La restriccion `unique`
+        evitaria el duplicado, pero a costa de reventar un alta legitima, y eso
+        no es correccion sino suerte.
+
+        Por eso se serializa la ASIGNACION con un advisory lock de transaccion,
+        tomado ANTES de leer: quien entra segundo espera, lee la numeracion ya
+        actualizada y obtiene el siguiente. Al ser `xact`, se suelta solo al
+        cerrar la transaccion, incluso si algo falla por el camino. La clave es
+        por familia, de modo que numerar tecnicas no bloquea a los adicionales.
         """
         prefix = MASTER_CODE_PREFIX[model]
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(MASTER_CODE_LOCK_NAMESPACE, MASTER_CODE_LOCK_KEY[model])
+            )
+        )
         rows = await self._session.execute(select(model.code))
         highest = 0
         for (code,) in rows:
