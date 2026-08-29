@@ -24,6 +24,7 @@ from typing import Final
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.core.errors import APIError
 from app.core.preparations import (
@@ -39,6 +40,7 @@ from app.models.inventory import MovementType, StockBalance, StockLocation
 from app.models.masters import Product, ProductType
 from app.models.recipes import (
     PreparationStatus,
+    RecipeLine,
     RecipePreparation,
     RecipePreparationLine,
     RecipeVersion,
@@ -132,7 +134,16 @@ class PreparationService:
         )
 
     async def get(self, preparation_id: int) -> RecipePreparation:
-        row = await self._session.get(RecipePreparation, preparation_id)
+        row = await self._session.scalar(
+            select(RecipePreparation)
+            .where(RecipePreparation.id == preparation_id)
+            .options(
+                joinedload(RecipePreparation.prepared_product),
+                selectinload(RecipePreparation.lines).joinedload(
+                    RecipePreparationLine.component_product
+                ),
+            )
+        )
         if row is None:
             raise PreparationNotFoundError()
         return row
@@ -145,7 +156,13 @@ class PreparationService:
             stmt = stmt.join(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id)
         total = await self._session.scalar(select(func.count()).select_from(stmt.subquery()))
         rows = await self._session.execute(
-            stmt.order_by(RecipePreparation.id.desc())
+            stmt.options(
+                joinedload(RecipePreparation.prepared_product),
+                selectinload(RecipePreparation.lines).joinedload(
+                    RecipePreparationLine.component_product
+                ),
+            )
+            .order_by(RecipePreparation.id.desc())
             .limit(max(1, min(limit, 200)))
             .offset(max(0, offset))
         )
@@ -187,7 +204,18 @@ class PreparationService:
         if existing is not None:
             return existing, False
 
-        version = await self._session.get(RecipeVersion, recipe_version_id)
+        # Se cargan receta y lineas de una vez: `RecipeVersion.recipe` y
+        # `.lines` son perezosas, y tocarlas despues en contexto async dispara
+        # IO sincrono (MissingGreenlet). Aqui se sabe exactamente que hace
+        # falta, asi que se pide explicitamente.
+        version = await self._session.scalar(
+            select(RecipeVersion)
+            .where(RecipeVersion.id == recipe_version_id)
+            .options(
+                joinedload(RecipeVersion.recipe),
+                selectinload(RecipeVersion.lines).joinedload(RecipeLine.component_product),
+            )
+        )
         if version is None:
             raise PreparationNotFoundError("La version de receta no existe")
 
