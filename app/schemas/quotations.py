@@ -27,12 +27,26 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+#: Codigo interno de un maestro de costos, aceptado pero IGNORADO.
+#:
+#: El codigo lo emite el backend: es identidad interna y una secuencia de
+#: negocio, no un dato que el usuario invente. Antes se exigia en el payload y
+#: el cliente lo escribia a mano, con lo que dos instalaciones podian numerar
+#: distinto y editar una tecnica permitia cambiarle el codigo.
+#:
+#: El campo sigue aceptandose —sin usarse— para no romper a un cliente
+#: desplegado que todavia lo envie; `extra="forbid"` lo rechazaria. Puede
+#: retirarse cuando ningun cliente lo mande.
+LegacyClientCode = Annotated[str | None, Field(max_length=64, deprecated=True)]
+
+
 class _Out(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
 class TechniqueBase(_Strict):
-    code: Annotated[str, Field(min_length=1, max_length=64)]
+    #: Aceptado y descartado: lo genera el backend. Ver `LegacyClientCode`.
+    code: LegacyClientCode = None
     name: Annotated[str, Field(min_length=1, max_length=200)]
     unit_price: Money
     formula_type: TechniqueFormulaType
@@ -80,7 +94,8 @@ class TechniquePage(_Out):
 
 
 class AdditionalBase(_Strict):
-    code: Annotated[str, Field(min_length=1, max_length=64)]
+    #: Aceptado y descartado: lo genera el backend. Ver `LegacyClientCode`.
+    code: LegacyClientCode = None
     name: Annotated[str, Field(min_length=1, max_length=200)]
     unit_price: Money
     formula_type: AdditionalFormulaType
@@ -127,7 +142,8 @@ class AdditionalPage(_Out):
 
 
 class OtherCostBase(_Strict):
-    code: Annotated[str, Field(min_length=1, max_length=64)]
+    #: Aceptado y descartado: lo genera el backend. Ver `LegacyClientCode`.
+    code: LegacyClientCode = None
     name: Annotated[str, Field(min_length=1, max_length=200)]
     unit_price: Money
     calculation_type: OtherCostCalculationType

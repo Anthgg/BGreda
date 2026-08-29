@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal, TypeVar, cast
+from typing import Final, Literal, TypeVar, cast
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -175,6 +176,28 @@ class FiringEstimateOverride:
 MasterT = TypeVar("MasterT", Technique, Additional, OtherCost)
 
 
+#: Prefijo del codigo interno de cada maestro de costos. Continua la numeracion
+#: que ya existe en produccion (TEC-001, ADI-001, OTH-001): la emite el
+#: backend, el usuario no la escribe.
+MASTER_CODE_PREFIX: Final[Mapping[type[Technique] | type[Additional] | type[OtherCost], str]] = {
+    Technique: "TEC",
+    Additional: "ADI",
+    OtherCost: "OTH",
+}
+
+#: Espacio de nombres de los advisory locks de este modulo. Con la variante de
+#: dos enteros, el primero separa a los locks de esta familia de los de
+#: cualquier otro modulo que use el mismo mecanismo.
+MASTER_CODE_LOCK_NAMESPACE: Final = 9_0031
+
+#: Una clave por familia: numerar tecnicas no debe bloquear a los adicionales.
+MASTER_CODE_LOCK_KEY: Final[Mapping[type[Technique] | type[Additional] | type[OtherCost], int]] = {
+    Technique: 1,
+    Additional: 2,
+    OtherCost: 3,
+}
+
+
 class QuotationService:
     def __init__(
         self,
@@ -269,10 +292,49 @@ class QuotationService:
             metadata={"code": row.code, "name": row.name, "active": row.active},
         )
 
+    async def _next_master_code(
+        self, model: type[Technique] | type[Additional] | type[OtherCost]
+    ) -> str:
+        """Siguiente codigo libre de un maestro de costos.
+
+        No usa `SequenceService` a proposito: sus contadores viven en
+        `document_sequences` y dar de alta tres tipos nuevos exigiria una
+        migracion.
+
+        Leer el maximo y sumarle uno es una carrera: dos altas simultaneas leen
+        el mismo TEC-010 y las dos proponen TEC-011. La restriccion `unique`
+        evitaria el duplicado, pero a costa de reventar un alta legitima, y eso
+        no es correccion sino suerte.
+
+        Por eso se serializa la ASIGNACION con un advisory lock de transaccion,
+        tomado ANTES de leer: quien entra segundo espera, lee la numeracion ya
+        actualizada y obtiene el siguiente. Al ser `xact`, se suelta solo al
+        cerrar la transaccion, incluso si algo falla por el camino. La clave es
+        por familia, de modo que numerar tecnicas no bloquea a los adicionales.
+        """
+        prefix = MASTER_CODE_PREFIX[model]
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(MASTER_CODE_LOCK_NAMESPACE, MASTER_CODE_LOCK_KEY[model])
+            )
+        )
+        rows = await self._session.execute(select(model.code))
+        highest = 0
+        for (code,) in rows:
+            if not code or not code.startswith(f"{prefix}-"):
+                continue
+            suffix = code[len(prefix) + 1 :]
+            if suffix.isdigit():
+                highest = max(highest, int(suffix))
+        return f"{prefix}-{highest + 1:03d}"
+
     async def create_technique(
         self, payload: TechniqueCreate, user: AuthenticatedUser
     ) -> Technique:
-        row = Technique(**payload.model_dump())
+        row = Technique(
+            **payload.model_dump(exclude={"code"}),
+            code=await self._next_master_code(Technique),
+        )
         self._session.add(row)
         await self._flush_master()
         self._audit_master(row, AuditAction.CREATE, user)
@@ -282,7 +344,8 @@ class QuotationService:
         self, row_id: int, payload: TechniqueUpdate, user: AuthenticatedUser
     ) -> Technique:
         row = await self._get_master(Technique, row_id, for_update=True)
-        for field, value in payload.model_dump().items():
+        # `code` fuera: es identidad interna y no cambia al editar.
+        for field, value in payload.model_dump(exclude={"code"}).items():
             setattr(row, field, value)
         await self._flush_master()
         self._audit_master(row, AuditAction.UPDATE, user)
@@ -291,7 +354,10 @@ class QuotationService:
     async def create_additional(
         self, payload: AdditionalCreate, user: AuthenticatedUser
     ) -> Additional:
-        row = Additional(**payload.model_dump())
+        row = Additional(
+            **payload.model_dump(exclude={"code"}),
+            code=await self._next_master_code(Additional),
+        )
         self._session.add(row)
         await self._flush_master()
         self._audit_master(row, AuditAction.CREATE, user)
@@ -301,7 +367,8 @@ class QuotationService:
         self, row_id: int, payload: AdditionalUpdate, user: AuthenticatedUser
     ) -> Additional:
         row = await self._get_master(Additional, row_id, for_update=True)
-        for field, value in payload.model_dump().items():
+        # `code` fuera: es identidad interna y no cambia al editar.
+        for field, value in payload.model_dump(exclude={"code"}).items():
             setattr(row, field, value)
         await self._flush_master()
         self._audit_master(row, AuditAction.UPDATE, user)
@@ -310,7 +377,10 @@ class QuotationService:
     async def create_other_cost(
         self, payload: OtherCostCreate, user: AuthenticatedUser
     ) -> OtherCost:
-        row = OtherCost(**payload.model_dump())
+        row = OtherCost(
+            **payload.model_dump(exclude={"code"}),
+            code=await self._next_master_code(OtherCost),
+        )
         self._session.add(row)
         await self._flush_master()
         self._audit_master(row, AuditAction.CREATE, user)
@@ -320,7 +390,8 @@ class QuotationService:
         self, row_id: int, payload: OtherCostUpdate, user: AuthenticatedUser
     ) -> OtherCost:
         row = await self._get_master(OtherCost, row_id, for_update=True)
-        for field, value in payload.model_dump().items():
+        # `code` fuera: es identidad interna y no cambia al editar.
+        for field, value in payload.model_dump(exclude={"code"}).items():
             setattr(row, field, value)
         await self._flush_master()
         self._audit_master(row, AuditAction.UPDATE, user)
