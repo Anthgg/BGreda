@@ -60,7 +60,13 @@ _DIMENSION_QUANTUM = Decimal(1).scaleb(-QUANTITY_SCALE)
 #: Regla secuencial simple: el sistema no modela actividades en paralelo
 #: (calculated_days = suma de dias de tecnicas, sin scheduling), asi que las
 #: hornadas se suman una tras otra en vez de inventar planificacion avanzada.
-DAYS_PER_FIRING_BATCH = 3
+#: Fase 009C: la duracion de una hornada NO es una constante. Vive en
+#: ``kilns.firing_days_per_batch`` porque depende del horno (el pequeno tarda 3
+#: dias y el grande 4), y el negocio la edita desde Configuracion sin
+#: desplegar. Este valor solo se usa como ultimo recurso cuando el preview no
+#: trae la duracion —un borrador a medio llenar, sin horno todavia elegido—, y
+#: nunca decide los dias de una cotizacion completa.
+FALLBACK_DAYS_PER_BATCH = 3
 
 
 def _selected_kilns(
@@ -582,16 +588,37 @@ class QuotationBuilderService:
                 "product_id": product.id,
                 "line": line_snapshot,
             }
-            # Fase 009C: 3 dias por hornada. Las hornadas se cuentan sobre las
-            # SESIONES que realmente queman esta pieza (baja y/o alta), asi que
-            # una pieza de solo-baja con 2 hornadas son 6 dias, y una de baja +
-            # alta con 2 hornadas cada una son 12.
+            # Fase 009C: los dias salen de las SESIONES que realmente queman
+            # esta pieza (baja y/o alta), y cada sesion aporta
+            # ``hornadas * dias_por_hornada de SU horno``.
+            #
+            # Se suma sesion a sesion, y no "total de hornadas x dias", porque
+            # baja y alta pueden ir en hornos de duracion distinta: 27 hornadas
+            # en el pequeno (3 dias) mas 3 en el grande (4 dias) son 81 + 12 =
+            # 93 dias, no 30 x nada.
             item_routes = _selected_routes(item, payload.kiln_id)
-            item_batches = sum(
-                int(session.get("batches", 1))
+            item_sessions = [
+                session
                 for session in production.get("sessions", [])
                 if (session.get("kiln_id"), session.get("firing_type")) in item_routes
-            )
+            ]
+            item_plan = [
+                {
+                    "kiln_id": session.get("kiln_id"),
+                    "kiln_code": session.get("kiln_code"),
+                    "kiln_name": session.get("kiln_name"),
+                    "firing_type": session.get("firing_type"),
+                    "firing_days_per_batch": int(
+                        session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH)
+                    ),
+                    "required_batches": int(session.get("batches", 1)),
+                    "calculated_firing_days": int(session.get("batches", 1))
+                    * int(session.get("days_per_batch", FALLBACK_DAYS_PER_BATCH)),
+                }
+                for session in item_sessions
+            ]
+            item_batches = sum(entry["required_batches"] for entry in item_plan)
+            item_days = sum(entry["calculated_firing_days"] for entry in item_plan)
             estimate = FiringEstimateOverride(
                 cost=Decimal(str(line_snapshot.get("allocated_cost", "0"))),
                 snapshot={
@@ -599,12 +626,13 @@ class QuotationBuilderService:
                     "kiln": kiln_snapshot,
                     "production": line_snapshot,
                     "batches": item_batches,
-                    "days_per_batch": DAYS_PER_FIRING_BATCH,
+                    "firing_plan": item_plan,
+                    "calculated_firing_days": item_days,
                 }
                 if line_snapshot
                 else {"estimated": True},
                 source_key=source_key,
-                days=item_batches * DAYS_PER_FIRING_BATCH,
+                days=item_days,
             )
 
             calculation = None
@@ -722,6 +750,11 @@ class QuotationBuilderService:
                         "low_kiln_id_input": item.low_kiln_id,
                         "high_kiln_id_input": item.high_kiln_id,
                         "firing_batches": item_batches,
+                        # Requisito 8: al confirmar hay que poder explicar los
+                        # dias sin volver a consultar la configuracion, porque
+                        # el horno puede cambiar de duracion despues.
+                        "firing_plan": item_plan,
+                        "calculated_firing_days": item_days,
                     },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
