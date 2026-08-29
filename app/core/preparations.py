@@ -95,9 +95,7 @@ def component_amounts(
 
     amounts: list[ComponentAmount] = []
     for component in components:
-        quantity = _quantize_quantity(
-            total_dry_weight_g * component.percentage / total_percentage
-        )
+        quantity = _quantize_quantity(total_dry_weight_g * component.percentage / total_percentage)
         if quantity <= 0:
             continue
         amounts.append(
@@ -123,9 +121,7 @@ def batch_total_cost(amounts: Sequence[ComponentAmount]) -> Decimal:
     return _quantize_money(sum((a.line_cost for a in amounts), ZERO))
 
 
-def solids_concentration_g_per_ml(
-    total_dry_weight_g: Decimal, final_yield_ml: Decimal
-) -> Decimal:
+def solids_concentration_g_per_ml(total_dry_weight_g: Decimal, final_yield_ml: Decimal) -> Decimal:
     """Gramos de solidos por mililitro de preparado."""
     if total_dry_weight_g <= 0:
         raise PreparationError("El peso seco debe ser mayor que cero")
