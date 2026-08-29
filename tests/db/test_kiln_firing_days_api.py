@@ -143,9 +143,7 @@ async def test_small_kiln_3_days_y_large_kiln_4_days(
         payload = {
             "name": f"009C dias {kiln['code']}",
             "customer_id": customer["id"],
-            "items": [
-                _item(product, recipe, low_kiln_id=kiln["id"], high_kiln_selected=False)
-            ],
+            "items": [_item(product, recipe, low_kiln_id=kiln["id"], high_kiln_selected=False)],
         }
         body = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
         assert body["items"][0]["calculated_days"] == expected, (
@@ -239,9 +237,9 @@ async def test_adjustment_days_separate(
             ],
         }
 
-    base = (
-        await api.post(f"{BUILDER}/preview", json=payload(0), headers=head(admin_csrf))
-    ).json()["items"][0]
+    base = (await api.post(f"{BUILDER}/preview", json=payload(0), headers=head(admin_csrf))).json()[
+        "items"
+    ][0]
     adjusted = (
         await api.post(f"{BUILDER}/preview", json=payload(7), headers=head(admin_csrf))
     ).json()["items"][0]

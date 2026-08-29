@@ -24,6 +24,7 @@ def test_migration_0013_upgrade_downgrade_contracts() -> None:
     assert "'PRODUCT', 'COMMERCIAL_SETTINGS', 'MIXED'" in content
     assert "'PRODUCT', 'COMMERCIAL_SETTINGS'" in content
 
+
 # La cabeza unica de Alembic se comprueba junto a la migracion mas reciente
 # (tests/unit/test_migration_0014.py): es una propiedad del arbol entero, no
 # de la 0013, y dejarla aqui obligaba a editar este archivo en cada fase.

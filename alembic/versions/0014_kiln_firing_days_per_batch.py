@@ -59,9 +59,9 @@ def upgrade() -> None:
         "firing_days_per_batch >= 1",
     )
     op.execute(
-        sa.text(
-            "UPDATE kilns SET firing_days_per_batch = :days WHERE code = :code"
-        ).bindparams(days=LARGE_KILN_DAYS_PER_BATCH, code=LARGE_KILN_CODE)
+        sa.text("UPDATE kilns SET firing_days_per_batch = :days WHERE code = :code").bindparams(
+            days=LARGE_KILN_DAYS_PER_BATCH, code=LARGE_KILN_CODE
+        )
     )
 
 

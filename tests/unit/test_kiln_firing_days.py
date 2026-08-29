@@ -78,11 +78,7 @@ class TestKilnDaysAreReadFromTheKiln:
     def test_large_kiln_4_days(self) -> None:
         """LARGE_KILN_4_DAYS: la misma hornada en el grande son 4."""
         math = compute_firing(
-            [
-                _session(
-                    "2:LOW", 2, "LOW", capacity=LARGE_CAPACITY, days_per_batch=LARGE_KILN_DAYS
-                )
-            ],
+            [_session("2:LOW", 2, "LOW", capacity=LARGE_CAPACITY, days_per_batch=LARGE_KILN_DAYS)],
             [_line(1, "10", ("2:LOW",), factor_kiln_id=2)],
             FLAT_FACTORS,
             multi_batch=True,
@@ -104,11 +100,7 @@ class TestKilnDaysAreReadFromTheKiln:
             multi_batch=True,
         )
         large = compute_firing(
-            [
-                _session(
-                    "2:LOW", 2, "LOW", capacity=LARGE_CAPACITY, days_per_batch=LARGE_KILN_DAYS
-                )
-            ],
+            [_session("2:LOW", 2, "LOW", capacity=LARGE_CAPACITY, days_per_batch=LARGE_KILN_DAYS)],
             [_line(1, "10", ("2:LOW",), factor_kiln_id=2)],
             FLAT_FACTORS,
             multi_batch=True,
