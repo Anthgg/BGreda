@@ -300,6 +300,59 @@ class RecipePreparationPage(_Out):
     offset: int
 
 
+class GlazeSelectionIn(_In):
+    """Un esmalte concreto (un lote preparado) y su participacion en la pieza."""
+
+    preparation_id: int
+    #: Peso relativo del reparto. Dos esmaltes a 1 y 1 se llevan mitad y mitad;
+    #: a 70 y 30 se llevan ese reparto. NO es un porcentaje del peso de la
+    #: pieza: el porcentaje total ya lo fija la configuracion comercial.
+    share: Annotated[Decimal, Field(gt=Decimal(0))] = Decimal(1)
+
+
+class GlazeEstimateIn(_In):
+    """Estimacion de esmalte para cotizar. No toca inventario.
+
+    No lleva el porcentaje: es autoridad del backend y sale de
+    ``commercial_settings.estimated_glaze_percent``. Si el cliente pudiera
+    enviarlo, dos cotizaciones del mismo dia podrian estimar distinto sin que
+    nadie lo hubiera decidido.
+    """
+
+    piece_weight_g: Annotated[Decimal, Field(gt=Decimal(0))]
+    quantity: Annotated[int, Field(gt=0)]
+    glazes: list[GlazeSelectionIn] = Field(default_factory=list, max_length=20)
+
+
+class GlazeAllocationOut(_Out):
+    preparation_id: int
+    preparation_code: str
+    prepared_product_id: int
+    prepared_product_internal_reference: str
+    prepared_product_name: str
+    share: Decimal
+    #: Gramos de solidos que le tocan a este esmalte del total estimado.
+    grams: Decimal
+    solids_g_per_ml: Decimal
+    #: Los mismos gramos expresados en mililitros de preparado, con la
+    #: concentracion de ESTE lote. Nunca con densidad 1.
+    millilitres: Decimal
+    unit_cost_per_ml: Decimal
+    estimated_cost: Decimal
+
+
+class GlazeEstimateOut(_Out):
+    """Cuanto esmalte se estima y como se reparte. Es una simulacion."""
+
+    estimated_glaze_percent: Decimal
+    piece_weight_g: Decimal
+    quantity: int
+    grams_per_piece: Decimal
+    total_estimated_grams: Decimal
+    allocations: list[GlazeAllocationOut] = []
+    total_estimated_cost: Decimal
+
+
 class UnitConversionIn(_In):
     """Conversion g <-> ml apoyada en una preparacion concreta."""
 

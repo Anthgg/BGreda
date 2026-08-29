@@ -14,7 +14,12 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models.settings import MAX_TAX_PERCENT, MAX_VALIDITY_DAYS
+from app.models.settings import (
+    DEFAULT_ESTIMATED_GLAZE_PERCENT,
+    MAX_GLAZE_PERCENT,
+    MAX_TAX_PERCENT,
+    MAX_VALIDITY_DAYS,
+)
 
 # ---------------------------------------------------------------------------
 # Texto seguro
@@ -199,6 +204,21 @@ class CommercialSettingsBase(_StrictModel):
     ] = Decimal(2)
 
     quote_validity_days: Annotated[int | None, Field(ge=1, le=MAX_VALIDITY_DAYS)] = None
+
+    #: Fase 009D. Porcentaje del peso de la pieza que se estima de esmalte al
+    #: cotizar. Misma convencion que ``tax_percent``: 15 significa 15 %, no
+    #: 0,15. Guardar la fraccion daria una estimacion cien veces menor sin que
+    #: nada la delate, asi que el rango obliga a la convencion: 0,15 se admite
+    #: como "0,15 %", que es absurdo pero visible, y 0 o mas de 100 se rechazan.
+    #:
+    #: No admite ``None``: la columna es NOT NULL y el Cotizador necesita
+    #: siempre un porcentaje con el que estimar. Igual que
+    #: ``default_quotation_factor``, un PUT que lo omita lo devuelve al valor
+    #: por omision; el formulario envia la configuracion completa.
+    estimated_glaze_percent: Annotated[
+        Decimal,
+        Field(gt=0, le=MAX_GLAZE_PERCENT, max_digits=9, decimal_places=6),
+    ] = DEFAULT_ESTIMATED_GLAZE_PERCENT
 
     general_conditions: PlainText = None
     payment_notes: PlainText = None

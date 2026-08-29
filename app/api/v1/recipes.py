@@ -19,6 +19,9 @@ from app.core.preparations import PreparationError, grams_to_ml, ml_to_grams
 from app.models.importing import ImportEntity, ImportRow
 from app.models.recipes import RecipePreparation
 from app.schemas.recipes import (
+    GlazeAllocationOut,
+    GlazeEstimateIn,
+    GlazeEstimateOut,
     RecipeCalculateIn,
     RecipeCalculateOut,
     RecipeCreate,
@@ -258,10 +261,16 @@ async def list_recipe_preparations(
     service: PreparationServiceDep,
     _: CurrentUserDep,
     recipe_id: int | None = Query(None),
+    prepared_product_id: int | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> RecipePreparationPage:
-    items, total = await service.list_preparations(recipe_id=recipe_id, limit=limit, offset=offset)
+    items, total = await service.list_preparations(
+        recipe_id=recipe_id,
+        prepared_product_id=prepared_product_id,
+        limit=limit,
+        offset=offset,
+    )
     return RecipePreparationPage(
         items=[_preparation_out(row) for row in items], total=total, limit=limit, offset=offset
     )
@@ -336,4 +345,51 @@ async def convert_units(
         from_unit=payload.from_unit,
         converted=converted,
         to_unit=to_unit,
+    )
+
+
+@router.post("/recipe-preparations/glaze-estimate", response_model=GlazeEstimateOut)
+async def estimate_glaze(
+    payload: GlazeEstimateIn,
+    service: PreparationServiceDep,
+    _: CurrentUserDep,
+) -> GlazeEstimateOut:
+    """Estima el esmalte de una cotizacion y lo reparte entre los elegidos.
+
+    Es una simulacion pura: no descuenta existencias ni crea movimientos.
+    Cotizar no consume material.
+
+    El porcentaje no viaja en la peticion: lo pone
+    ``commercial_settings.estimated_glaze_percent``.
+    """
+    estimate = await service.estimate_glaze(
+        piece_weight_g=payload.piece_weight_g,
+        quantity=payload.quantity,
+        glazes=[(glaze.preparation_id, glaze.share) for glaze in payload.glazes],
+    )
+    return GlazeEstimateOut(
+        estimated_glaze_percent=estimate.estimated_glaze_percent,
+        piece_weight_g=payload.piece_weight_g,
+        quantity=payload.quantity,
+        grams_per_piece=estimate.grams_per_piece,
+        total_estimated_grams=estimate.total_grams,
+        allocations=[
+            GlazeAllocationOut(
+                preparation_id=allocation.preparation.id,
+                preparation_code=allocation.preparation.code,
+                prepared_product_id=allocation.preparation.prepared_product_id,
+                prepared_product_internal_reference=(
+                    allocation.preparation.prepared_product.internal_reference
+                ),
+                prepared_product_name=allocation.preparation.prepared_product.name,
+                share=allocation.share,
+                grams=allocation.grams,
+                solids_g_per_ml=allocation.preparation.solids_g_per_ml,
+                millilitres=allocation.millilitres,
+                unit_cost_per_ml=allocation.preparation.unit_cost_per_ml,
+                estimated_cost=allocation.cost,
+            )
+            for allocation in estimate.allocations
+        ],
+        total_estimated_cost=estimate.total_cost,
     )
