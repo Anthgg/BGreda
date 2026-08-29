@@ -2,9 +2,6 @@
 
 from pathlib import Path
 
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-
 MIGRATION_FILE = (
     Path(__file__).parents[2] / "alembic" / "versions" / "0014_kiln_firing_days_per_batch.py"
 )
@@ -32,8 +29,5 @@ def test_migration_0014_upgrade_downgrade_contracts() -> None:
     assert "drop_column" in content
 
 
-def test_alembic_single_head_is_0014() -> None:
-    """Una sola cabeza: dos harian fallar `alembic upgrade head` en el deploy."""
-    alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    script = ScriptDirectory.from_config(alembic_cfg)
-    assert script.get_heads() == ["0014"]
+# La cabeza unica se comprueba junto a la migracion mas reciente
+# (tests/unit/test_migration_0015.py): es una propiedad del arbol entero.

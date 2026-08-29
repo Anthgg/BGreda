@@ -115,6 +115,14 @@ class CommercialSettings(Base, VersionedSingletonMixin):
     #: Vigencia por defecto de una cotizacion, en dias.
     quote_validity_days: Mapped[int | None] = mapped_column(Integer)
 
+    #: Fase 009D: porcentaje del peso de la pieza que se estima de esmalte al
+    #: cotizar. Misma convencion que `tax_percent`: 15 significa 15 %, no 0.15.
+    #: Es una ESTIMACION comercial para cotizar, no consumo real de inventario;
+    #: el descuento real de material pertenece a 009H.
+    estimated_glaze_percent: Mapped[Decimal] = mapped_column(
+        percentage_numeric(), nullable=False, default=Decimal(15), server_default=text("15")
+    )
+
     # ---- Textos de documentos (texto plano, jamas HTML) ------------------
     general_conditions: Mapped[str | None] = mapped_column(Text)
     payment_notes: Mapped[str | None] = mapped_column(Text)
@@ -134,6 +142,10 @@ class CommercialSettings(Base, VersionedSingletonMixin):
             name="tax_percent_range",
         ),
         CheckConstraint("default_quotation_factor > 0", name="default_quotation_factor_positive"),
+        CheckConstraint(
+            "estimated_glaze_percent > 0 AND estimated_glaze_percent <= 100",
+            name="estimated_glaze_percent_range",
+        ),
         CheckConstraint(
             f"quote_validity_days IS NULL OR "
             f"(quote_validity_days > 0 AND quote_validity_days <= {MAX_VALIDITY_DAYS})",

@@ -55,10 +55,17 @@ UOM_ALIASES: dict[str, str] = {
 
 
 class UomDimension(StrEnum):
-    """Magnitud fisica. Solo se convierte dentro de la misma dimension."""
+    """Magnitud fisica. Solo se convierte dentro de la misma dimension.
+
+    Convertir gramos a mililitros NO es una conversion de unidad: depende de la
+    concentracion de una preparacion concreta (`recipe_preparations`), no de un
+    factor fijo. Por eso MASS y VOLUME siguen siendo dimensiones separadas y el
+    puente vive en el dominio, no aqui.
+    """
 
     MASS = "MASS"
     COUNT = "COUNT"
+    VOLUME = "VOLUME"
 
 
 class ProductType(StrEnum):
@@ -156,7 +163,7 @@ class UnitOfMeasure(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint("factor_to_base > 0", name="factor_positive"),
-        CheckConstraint("dimension IN ('MASS', 'COUNT')", name="dimension_allowed"),
+        CheckConstraint("dimension IN ('MASS', 'COUNT', 'VOLUME')", name="dimension_allowed"),
         CheckConstraint("NOT is_base OR factor_to_base = 1", name="base_factor_is_one"),
         Index("ix_units_of_measure_dimension", "dimension"),
     )
