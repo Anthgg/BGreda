@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
@@ -15,10 +15,18 @@ from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
 from app.core.precision import QUANTITY_SCALE
+from app.core.pricing import (
+    DEFAULT_PRODUCTION_FACTOR,
+    DEFAULT_ROUNDING_STEP,
+    LinePricingInput,
+    allocate_fixed_costs,
+    price_line,
+)
 from app.models.audit import AuditAction
 from app.models.firings import FiringType
 from app.models.masters import Partner, Product
 from app.models.quotations import (
+    OtherCost,
     Quotation,
     QuotationItem,
     QuotationStatus,
@@ -336,6 +344,65 @@ def _confirmed_production_summary(
     return enriched
 
 
+def _stored_production_factor(plan: object) -> Decimal | None:
+    """Factor de produccion guardado, o `None` si la linea es anterior a 009E."""
+    if not isinstance(plan, dict):
+        return None
+    factor = _snapshot_decimal(plan.get("production_factor"))
+    return factor if factor > ZERO else None
+
+
+def _stored_rounding_step(plan: object) -> Literal["0.50", "1.00"] | None:
+    """Normaliza el paso de redondeo guardado al literal del contrato.
+
+    El snapshot pasa por `jsonable_encoder`, que puede dejar el Decimal como
+    0.5 en vez de "0.50". Devolverlo tal cual haria fallar la validacion al
+    reabrir el borrador, asi que se compara por VALOR y se devuelve la forma
+    canonica.
+    """
+    if not isinstance(plan, dict):
+        return None
+    valor = _snapshot_decimal(plan.get("rounding_step"))
+    if valor == Decimal("0.50"):
+        return "0.50"
+    if valor == Decimal("1.00"):
+        return "1.00"
+    return None
+
+
+def _stored_commercial_plan(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Devuelve el plan comercial guardado, listo para el esquema de salida.
+
+    Una cotizacion confirmada se LEE, no se recalcula: cambiar despues el IGV,
+    el factor o los costos fijos no puede mover un precio ya comprometido.
+    Los borradores anteriores a 009E no lo tienen; para ellos se devuelven los
+    campos en cero y la linea se vuelve a costear al recalcular.
+    """
+    plan = snapshot.get("commercial_plan")
+    if not isinstance(plan, dict):
+        return {}
+    campos = (
+        "production_factor",
+        "technical_cost",
+        "factored_cost",
+        "fixed_cost_allocation",
+        "commercial_base_cost",
+        "commercial_base_unit_cost",
+        "raw_net_unit",
+        "raw_tax_unit",
+        "raw_gross_unit",
+        "rounding_step",
+        "rounding_adjustment_unit",
+        "final_gross_unit",
+        "final_net_unit",
+        "final_tax_unit",
+        "line_total_net",
+        "line_total_tax",
+        "line_total_gross",
+    )
+    return {campo: _snapshot_decimal(plan.get(campo)) for campo in campos}
+
+
 def _stored_glaze_plan(snapshot: dict[str, Any]) -> GlazePlanOut | None:
     plan = snapshot.get("glaze_plan")
     if not isinstance(plan, dict):
@@ -540,6 +607,92 @@ class QuotationBuilderService:
             ),
             [],
         )
+
+    async def _total_fixed_cost(self) -> Decimal:
+        """Costos fijos de la cotizacion: se suman UNA vez, no por linea.
+
+        Son los maestros de otros gastos activos. `calculation_type` ya no es
+        autoridad de calculo en 009E: alquiler, servicios y administrativo son
+        importes totales de la cotizacion, no importes por dia ni por pieza.
+        Multiplicarlos por los dias del lote en cada linea cobraba el taller
+        entero tantas veces como productos tuviera el pedido.
+        """
+        rows = (
+            (await self._session.execute(select(OtherCost).where(OtherCost.active.is_(True))))
+            .scalars()
+            .all()
+        )
+        return sum((row.unit_price for row in rows), ZERO)
+
+    @staticmethod
+    def _apply_commercial_engine(
+        items: list[QuotationBuilderItemOut],
+        *,
+        production_factor: Decimal,
+        rounding_step: Decimal,
+        total_fixed_cost: Decimal,
+    ) -> list[QuotationBuilderItemOut]:
+        """Aplica factor, reparto de fijos, margen, IGV y redondeo a cada linea.
+
+        Las lineas sin cantidad todavia no se pueden costear, asi que no
+        participan del reparto: darles peso repartiria costos fijos hacia una
+        linea que aun no existe como tal.
+        """
+        priceable = [item for item in items if item.quantity and item.quantity > 0]
+        if not priceable:
+            return items
+
+        factored = [item.technical_cost * production_factor for item in priceable]
+        if sum(factored, ZERO) <= ZERO:
+            # Sin base factorada no hay con que repartir. Se deja el reparto en
+            # cero en vez de inventar partes iguales; la linea sigue viendose.
+            allocations = [ZERO] * len(priceable)
+        else:
+            allocations = list(allocate_fixed_costs(factored, total_fixed_cost))
+
+        priced: dict[int, QuotationBuilderItemOut] = {}
+        for item, allocation in zip(priceable, allocations, strict=True):
+            pricing = price_line(
+                LinePricingInput(
+                    quantity=cast(int, item.quantity),
+                    technical_cost=item.technical_cost,
+                    production_factor=production_factor,
+                    fixed_cost_allocation=allocation,
+                    markup_percent=item.markup_percent,
+                    tax_percent=item.tax_percentage_snapshot,
+                    rounding_step=rounding_step,
+                )
+            )
+            priced[item.sort_order] = item.model_copy(
+                update={
+                    "production_factor": pricing.production_factor,
+                    "factored_cost": pricing.factored_cost,
+                    "fixed_cost_allocation": pricing.fixed_cost_allocation,
+                    "commercial_base_cost": pricing.commercial_base_cost,
+                    "commercial_base_unit_cost": pricing.commercial_base_unit_cost,
+                    "raw_net_unit": pricing.raw_net_unit,
+                    "raw_tax_unit": pricing.raw_tax_unit,
+                    "raw_gross_unit": pricing.raw_gross_unit,
+                    "rounding_step": pricing.rounding_step,
+                    "rounding_adjustment_unit": pricing.rounding_adjustment_unit,
+                    "final_gross_unit": pricing.final_gross_unit,
+                    "final_net_unit": pricing.final_net_unit,
+                    "final_tax_unit": pricing.final_tax_unit,
+                    "line_total_gross": pricing.line_total_gross,
+                    "line_total_net": pricing.line_total_net,
+                    "line_total_tax": pricing.line_total_tax,
+                    # Los campos historicos siguen poblados con la MISMA
+                    # semantica nueva, para que nada quede leyendo dos motores
+                    # comerciales a la vez.
+                    "commercial_sale_unit_price": pricing.final_net_unit,
+                    "commercial_unit_price_with_tax": pricing.final_gross_unit,
+                    "commercial_subtotal": pricing.line_total_net,
+                    "tax_amount": pricing.line_total_tax,
+                    "commercial_total": pricing.line_total_gross,
+                    "space_cost": pricing.fixed_cost_allocation,
+                }
+            )
+        return [priced.get(item.sort_order, item) for item in items]
 
     async def _get(self, quotation_id: int, *, for_update: bool = False) -> Quotation:
         stmt = (
@@ -874,7 +1027,12 @@ class QuotationBuilderService:
                     additionals=item.additionals,
                     days_adjustment=item.days_adjustment,
                     waiting_days=item.waiting_days,
-                    other_costs=item.other_costs,
+                    # Fase 009E: los costos fijos son de la COTIZACION, no de
+                    # la linea. Se pasa una lista vacia para que el motor
+                    # tecnico no los sume aqui: antes cada linea cobraba el
+                    # alquiler y el administrativo enteros, asi que anadir un
+                    # segundo producto duplicaba el alquiler del taller.
+                    other_costs=[],
                     markup_percent=item.markup_percent,
                     commercial_sale_unit_price=item.commercial_sale_unit_price,
                 )
@@ -1037,6 +1195,13 @@ class QuotationBuilderService:
                     waiting_days=item.waiting_days,
                     total_days=calculation.total_days if calculation else 0,
                     space_cost=calculation.space_cost if calculation else ZERO,
+                    technical_cost=(
+                        calculation.materials_applied
+                        + calculation.firing_cost
+                        + calculation.labor_cost
+                        if calculation
+                        else ZERO
+                    ),
                     final_unit_cost=calculation.final_unit_cost if calculation else ZERO,
                     final_total_cost=calculation.final_total_cost if calculation else ZERO,
                     markup_percent=item.markup_percent,
@@ -1080,9 +1245,28 @@ class QuotationBuilderService:
                 )
             )
 
-        subtotal = sum((item.commercial_subtotal for item in item_outputs), ZERO)
-        tax_amount = sum((item.tax_amount for item in item_outputs), ZERO)
-        total = subtotal + tax_amount
+        # ------------------------------------------------------------------
+        # Fase 009E: motor comercial. Va DESPUES del bucle porque el reparto
+        # de costos fijos necesita ver todas las lineas: el peso de cada una
+        # es su costo factorado sobre el total factorado de la cotizacion.
+        # ------------------------------------------------------------------
+        production_factor = payload.production_factor or DEFAULT_PRODUCTION_FACTOR
+        rounding_step = (
+            Decimal(payload.rounding_step) if payload.rounding_step else DEFAULT_ROUNDING_STEP
+        )
+        total_fixed_cost = await self._total_fixed_cost()
+        item_outputs = self._apply_commercial_engine(
+            item_outputs,
+            production_factor=production_factor,
+            rounding_step=rounding_step,
+            total_fixed_cost=total_fixed_cost,
+        )
+
+        subtotal = sum((item.line_total_net for item in item_outputs), ZERO)
+        tax_amount = sum((item.line_total_tax for item in item_outputs), ZERO)
+        # No se vuelve a redondear: el total es la suma de las lineas que el
+        # propio documento enumera.
+        total = sum((item.line_total_gross for item in item_outputs), ZERO)
         if production.get("source") == "CONFIRMED_FIRING_LINES":
             production = _confirmed_production_summary(production, item_outputs)
             firing_total = sum((item.firing_cost for item in item_outputs), ZERO)
@@ -1175,6 +1359,12 @@ class QuotationBuilderService:
             items=item_outputs,
             item_count=len(item_outputs),
             commercial_subtotal=subtotal,
+            quotation_net_total=subtotal,
+            quotation_tax_total=tax_amount,
+            quotation_gross_total=total,
+            production_factor=production_factor,
+            rounding_step=rounding_step,
+            total_fixed_cost=total_fixed_cost,
             tax_percentage_snapshot=header_tax_percentage,
             tax_rate_source_snapshot=(
                 next(iter(tax_sources))
@@ -1284,7 +1474,38 @@ class QuotationBuilderService:
                     material_grams_per_piece=item.material_grams_per_piece,
                     kiln_id=item.kiln_id,
                     kiln_snapshot=preview.kiln_snapshot,
-                    production_snapshot=jsonable_encoder(item.production_snapshot),
+                    production_snapshot=jsonable_encoder(
+                        {
+                            **item.production_snapshot,
+                            # Fase 009E. Politica y resultado comercial de la
+                            # linea. Al confirmar queda congelado: cambiar
+                            # despues el IGV, el factor o los costos fijos no
+                            # puede mover una cotizacion ya cerrada.
+                            "commercial_plan": {
+                                "production_factor": item.production_factor,
+                                "rounding_step": item.rounding_step,
+                                "rounding_mode": "CEILING",
+                                "technical_cost": item.technical_cost,
+                                "factored_cost": item.factored_cost,
+                                "fixed_cost_allocation": item.fixed_cost_allocation,
+                                "commercial_base_cost": item.commercial_base_cost,
+                                "commercial_base_unit_cost": item.commercial_base_unit_cost,
+                                "markup_percent": item.markup_percent,
+                                "tax_percent": item.tax_percentage_snapshot,
+                                "raw_net_unit": item.raw_net_unit,
+                                "raw_tax_unit": item.raw_tax_unit,
+                                "raw_gross_unit": item.raw_gross_unit,
+                                "rounding_adjustment_unit": item.rounding_adjustment_unit,
+                                "final_gross_unit": item.final_gross_unit,
+                                "final_net_unit": item.final_net_unit,
+                                "final_tax_unit": item.final_tax_unit,
+                                "quantity": item.quantity,
+                                "line_total_net": item.line_total_net,
+                                "line_total_tax": item.line_total_tax,
+                                "line_total_gross": item.line_total_gross,
+                            },
+                        }
+                    ),
                     techniques_snapshot=item.techniques,
                     additionals_snapshot=item.additionals,
                     other_costs_snapshot=item.other_costs,
@@ -1457,6 +1678,33 @@ class QuotationBuilderService:
             name=row.name,
             customer_id=row.customer_id,
             kiln_id=next((item.kiln_id for item in row.items if item.kiln_id), None),
+            # Fase 009E: la politica comercial vuelve como ENTRADA. Sin esto,
+            # confirmar recalcularia con el factor por defecto y el override
+            # guardado se perderia justo en el momento de congelarlo.
+            production_factor=next(
+                (
+                    factor
+                    for item in row.items
+                    if (
+                        factor := _stored_production_factor(
+                            item.production_snapshot.get("commercial_plan")
+                        )
+                    )
+                ),
+                None,
+            ),
+            rounding_step=next(
+                (
+                    paso
+                    for item in row.items
+                    if (
+                        paso := _stored_rounding_step(
+                            item.production_snapshot.get("commercial_plan")
+                        )
+                    )
+                ),
+                None,
+            ),
             items=[
                 QuotationBuilderItemIn(
                     product_id=item.product_id,
@@ -1639,6 +1887,7 @@ class QuotationBuilderService:
                 # CONFIRMED lee el snapshot guardado y no vuelve a calcular:
                 # cambiar despues el porcentaje, la receta o el lote no puede
                 # mover una cotizacion ya cerrada.
+                **_stored_commercial_plan(item.production_snapshot),
                 glaze_plan=_stored_glaze_plan(item.production_snapshot),
                 glaze_unit=str(item.production_snapshot.get("glaze_unit", "g")),
                 glaze_selection_touched=bool(
@@ -1718,6 +1967,16 @@ class QuotationBuilderService:
             items=item_outputs,
             item_count=len(item_outputs),
             commercial_subtotal=row.commercial_subtotal,
+            quotation_net_total=sum((item.line_total_net for item in item_outputs), ZERO),
+            quotation_tax_total=sum((item.line_total_tax for item in item_outputs), ZERO),
+            quotation_gross_total=sum((item.line_total_gross for item in item_outputs), ZERO),
+            production_factor=next(
+                (item.production_factor for item in item_outputs if item.production_factor),
+                ZERO,
+            ),
+            rounding_step=next(
+                (item.rounding_step for item in item_outputs if item.rounding_step), ZERO
+            ),
             tax_percentage_snapshot=row.tax_percentage_snapshot,
             tax_rate_source_snapshot=row.tax_rate_source_snapshot,
             tax_amount=row.tax_amount,

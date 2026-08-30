@@ -172,6 +172,13 @@ class QuotationBuilderDraftIn(_Strict):
     name: Annotated[str | None, Field(max_length=200)] = None
     customer_id: PositiveInt | None = None
     kiln_id: PositiveInt | None = None
+    #: Fase 009E. Factor de PRODUCCION de esta cotizacion. Multiplica el costo
+    #: tecnico y no tiene nada que ver con el margen. `None` usa el canonico.
+    production_factor: Annotated[
+        Decimal | None, Field(gt=0, le=1_000, max_digits=18, decimal_places=6)
+    ] = None
+    #: Paso del redondeo contractual: 0.50 o 1.00. `None` usa el canonico.
+    rounding_step: Literal["0.50", "1.00"] | None = None
     items: list[QuotationBuilderItemIn] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
@@ -256,6 +263,27 @@ class QuotationBuilderItemOut(BaseModel):
     waiting_days: int = 0
     total_days: int = 0
     space_cost: Decimal = Decimal(0)
+    # ---- Fase 009E: motor comercial, paso a paso -----------------------
+    #: Materiales + quema asignada + mano de obra. SIN costos fijos: esos son
+    #: de la cotizacion entera y se reparten aparte.
+    technical_cost: Decimal = Decimal(0)
+    production_factor: Decimal = Decimal(0)
+    factored_cost: Decimal = Decimal(0)
+    fixed_cost_allocation: Decimal = Decimal(0)
+    commercial_base_cost: Decimal = Decimal(0)
+    commercial_base_unit_cost: Decimal = Decimal(0)
+    raw_net_unit: Decimal = Decimal(0)
+    raw_tax_unit: Decimal = Decimal(0)
+    raw_gross_unit: Decimal = Decimal(0)
+    rounding_step: Decimal = Decimal(0)
+    #: Lo que el CEILING contractual anadio al bruto crudo. Siempre >= 0.
+    rounding_adjustment_unit: Decimal = Decimal(0)
+    final_gross_unit: Decimal = Decimal(0)
+    final_net_unit: Decimal = Decimal(0)
+    final_tax_unit: Decimal = Decimal(0)
+    line_total_gross: Decimal = Decimal(0)
+    line_total_net: Decimal = Decimal(0)
+    line_total_tax: Decimal = Decimal(0)
     final_unit_cost: Decimal = Decimal(0)
     final_total_cost: Decimal = Decimal(0)
     markup_percent: Decimal = Decimal(100)
@@ -298,6 +326,17 @@ class QuotationBuilderOut(BaseModel):
     tax_rate_source_snapshot: str = "COMMERCIAL_SETTINGS"
     tax_amount: Decimal = Decimal(0)
     total_with_tax: Decimal = Decimal(0)
+    # ---- Fase 009E: los tres totales, sin ambiguedad -------------------
+    #: Suma de `line_total_net`. Es EL neto de la cotizacion.
+    quotation_net_total: Decimal = Decimal(0)
+    #: Suma de `line_total_tax`.
+    quotation_tax_total: Decimal = Decimal(0)
+    #: Suma de `line_total_gross`. Es EL total: el que se firma. No se
+    #: vuelve a redondear — el cliente suma las lineas del documento.
+    quotation_gross_total: Decimal = Decimal(0)
+    production_factor: Decimal = Decimal(0)
+    rounding_step: Decimal = Decimal(0)
+    total_fixed_cost: Decimal = Decimal(0)
     currency_code_snapshot: str = "PEN"
     currency_symbol_snapshot: str = "S/"
     warnings: list[str] = Field(default_factory=list)

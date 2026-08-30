@@ -240,21 +240,31 @@ def test_negative_total_days_is_rejected() -> None:
 @pytest.mark.parametrize(
     ("input_val", "expected"),
     [
+        # Fase 009E cambio la regla: antes era al multiplo de 0,50 mas CERCANO
+        # y ahora es CEILING, siempre hacia arriba. Los cuatro casos que antes
+        # BAJABAN (8.10, 8.24, 8.60, 8.74) son justamente los que cambian.
         (Decimal("8.00"), Decimal("8.00")),
-        (Decimal("8.10"), Decimal("8.00")),
-        (Decimal("8.24"), Decimal("8.00")),
+        (Decimal("8.10"), Decimal("8.50")),  # antes 8.00
+        (Decimal("8.24"), Decimal("8.50")),  # antes 8.00
         (Decimal("8.25"), Decimal("8.50")),
         (Decimal("8.30"), Decimal("8.50")),
         (Decimal("8.49"), Decimal("8.50")),
         (Decimal("8.50"), Decimal("8.50")),
-        (Decimal("8.60"), Decimal("8.50")),
-        (Decimal("8.74"), Decimal("8.50")),
+        (Decimal("8.60"), Decimal("9.00")),  # antes 8.50
+        (Decimal("8.74"), Decimal("9.00")),  # antes 8.50
         (Decimal("8.75"), Decimal("9.00")),
         (Decimal("8.90"), Decimal("9.00")),
         (Decimal("9.00"), Decimal("9.00")),
     ],
 )
 def test_round_to_commercial_half_exact_cases(input_val: Decimal, expected: Decimal) -> None:
+    """El redondeo contractual nunca baja.
+
+    Bajar regala dinero en cada pieza de cada cotizacion y no vuelve; subir
+    cobra como mucho un centimo de mas, que se negocia. La via heredada usa el
+    mismo motor que el Cotizador para que no haya dos precios posibles para la
+    misma pieza.
+    """
     from app.core.quotations import round_to_commercial_half
 
     assert round_to_commercial_half(input_val) == expected
@@ -331,9 +341,13 @@ def test_control_case_validated_20_pieces() -> None:
     assert result.final_total_cost == Decimal("3886.24")
     assert result.final_unit_cost.quantize(Decimal("0.01")) == Decimal("194.31")
     assert result.markup_percent == Decimal("100")
-    assert result.suggested_commercial_unit_price == Decimal("388.50")
-    assert result.commercial_sale_unit_price == Decimal("388.50")
-    assert result.commercial_subtotal == Decimal("7770.00")
-    assert result.commercial_total - result.commercial_subtotal == Decimal("1398.60")
-    assert result.commercial_total == Decimal("9168.60")
-    assert result.commercial_unit_price_with_tax == Decimal("458.43")
+    # Fase 009E: el precio crudo es 388,62 y el redondeo contractual sube a
+    # 389,00. El Excel original bajaba a 388,50 porque redondeaba al 0,50 mas
+    # cercano; esa regla quedo superada. La diferencia es de 50 centimos por
+    # pieza a favor del taller, que es el sentido del cambio.
+    assert result.suggested_commercial_unit_price == Decimal("389.00")
+    assert result.commercial_sale_unit_price == Decimal("389.00")
+    assert result.commercial_subtotal == Decimal("7780.00")
+    assert result.commercial_total - result.commercial_subtotal == Decimal("1400.40")
+    assert result.commercial_total == Decimal("9180.40")
+    assert result.commercial_unit_price_with_tax == Decimal("459.02")

@@ -1,0 +1,291 @@
+"""Fase 009E — el motor comercial extremo a extremo.
+
+La matematica pura esta en tests/unit/test_pricing_math.py. Aqui se comprueba
+lo que solo se ve con la cotizacion entera: que los costos fijos son de la
+COTIZACION y no de la linea, que el reparto reconcilia, que el total es la
+suma de las lineas sin volver a redondear, y que una cotizacion confirmada no
+se mueve cuando cambia la configuracion.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any
+
+import httpx
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.db.test_quotation_builder_api import BUILDER, _complete_payload, head
+
+OTHER_COSTS = "/api/v1/other-costs"
+COMMERCIAL = "/api/v1/settings/commercial"
+
+#: Los tres costos fijos del taller. Suman 320, el caso del enunciado.
+FIXED_COSTS = (
+    ("Alquiler / uso de espacio", "110"),
+    ("Servicios", "10"),
+    ("Costo administrativo", "200"),
+)
+TOTAL_FIXED = Decimal(320)
+
+
+async def _seed_fixed_costs(api: httpx.AsyncClient, csrf: str) -> None:
+    """Crea los maestros de costo fijo. El tipo ya no es autoridad de calculo."""
+    for name, price in FIXED_COSTS:
+        response = await api.post(
+            OTHER_COSTS,
+            json={"name": name, "unit_price": price, "calculation_type": "FIXED"},
+            headers=head(csrf),
+        )
+        assert response.status_code == 201, response.text
+
+
+def _with_policy(payload: dict[str, Any], **policy: Any) -> dict[str, Any]:
+    return {**payload, **policy}
+
+
+# ---------------------------------------------------------------------------
+# Costos fijos: una vez por cotizacion
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_los_costos_fijos_no_se_duplican_por_producto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """FIXED_COST_DUPLICATED_PER_PRODUCT: NO.
+
+    Es la regresion del defecto que 009E corrige. Antes, cada linea cobraba el
+    alquiler y el administrativo enteros: dos productos en la misma quema
+    pagaban el taller dos veces. Con el comportamiento antiguo la suma daria
+    640 y este test fallaria.
+    """
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await _seed_fixed_costs(api, admin_csrf)
+
+    respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    body = respuesta.json()
+
+    assert len(body["items"]) == 2
+    asignado = [Decimal(item["fixed_cost_allocation"]) for item in body["items"]]
+    assert sum(asignado) == TOTAL_FIXED, "el taller se cobra una vez, no una por producto"
+    assert Decimal(body["total_fixed_cost"]) == TOTAL_FIXED
+
+
+@pytest.mark.asyncio
+async def test_el_costo_fijo_no_se_multiplica_por_los_dias(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PER_DAY_FIXED_COST_MULTIPLICATION: NO.
+
+    `calculation_type` dejo de ser autoridad de calculo. Un maestro marcado
+    PER_DAY suma su importe UNA vez, no una por cada dia del lote: antes, un
+    lote de doce dias facturaba doce dias de servicios en cada linea.
+    """
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    creado = await api.post(
+        OTHER_COSTS,
+        json={"name": "Servicios", "unit_price": "10", "calculation_type": "PER_DAY"},
+        headers=head(admin_csrf),
+    )
+    assert creado.status_code == 201, creado.text
+
+    respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    body = respuesta.json()
+
+    assert Decimal(body["total_fixed_cost"]) == Decimal(10)
+    assert sum(Decimal(item["fixed_cost_allocation"]) for item in body["items"]) == Decimal(10)
+    # Y el lote dura varios dias, asi que el 10 no es una casualidad de un dia.
+    assert any(item["total_days"] > 1 for item in body["items"])
+
+
+@pytest.mark.asyncio
+async def test_el_reparto_es_proporcional_al_costo_factorado(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """FIXED_COST_ALLOCATION: el peso es el costo factorado de cada linea."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await _seed_fixed_costs(api, admin_csrf)
+
+    respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    body = respuesta.json()
+    lineas = body["items"]
+
+    total_factorado = sum(Decimal(item["factored_cost"]) for item in lineas)
+    for item in lineas:
+        esperado = (TOTAL_FIXED * Decimal(item["factored_cost"]) / total_factorado).quantize(
+            Decimal("0.01")
+        )
+        # La ultima linea absorbe el residuo de la cuantizacion, asi que se
+        # admite un centimo de diferencia; la SUMA sigue siendo exacta.
+        assert abs(Decimal(item["fixed_cost_allocation"]) - esperado) <= Decimal("0.01")
+    assert sum(Decimal(item["fixed_cost_allocation"]) for item in lineas) == TOTAL_FIXED
+
+
+# ---------------------------------------------------------------------------
+# Factor, margen, IGV y redondeo
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_el_factor_de_produccion_por_defecto_es_tres(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """DEFAULT_PRODUCTION_FACTOR + PRODUCTION_FACTOR_DOUBLE_COUNT: 0."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+
+    body = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+
+    assert Decimal(body["production_factor"]) == Decimal(3)
+    for item in body["items"]:
+        # El factor entra UNA vez: factorado = tecnico x 3, exacto.
+        assert Decimal(item["factored_cost"]) == Decimal(item["technical_cost"]) * Decimal(3)
+
+
+@pytest.mark.asyncio
+async def test_la_cotizacion_puede_sobreescribir_el_factor(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """QUOTE_FACTOR_OVERRIDE, y sobrevive a guardar y reabrir."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    body = _with_policy(payload, production_factor="4")
+
+    creada = await api.post(BUILDER, json=body, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    assert Decimal(creada.json()["production_factor"]) == Decimal(4)
+
+    reabierta = await api.get(f"{BUILDER}/{creada.json()['id']}", headers=head(admin_csrf))
+    assert Decimal(reabierta.json()["production_factor"]) == Decimal(4)
+    for item in reabierta.json()["items"]:
+        assert Decimal(item["production_factor"]) == Decimal(4)
+
+
+@pytest.mark.asyncio
+async def test_el_redondeo_contractual_sube_y_admite_los_dos_pasos(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CEILING_GROSS_ROUNDING + ROUNDING_STEP."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+
+    for paso in ("0.50", "1.00"):
+        body = _with_policy(payload, rounding_step=paso)
+        respuesta = await api.post(f"{BUILDER}/preview", json=body, headers=head(admin_csrf))
+        assert respuesta.status_code == 200, respuesta.text
+        cuerpo = respuesta.json()
+
+        assert Decimal(cuerpo["rounding_step"]) == Decimal(paso)
+        for item in cuerpo["items"]:
+            bruto = Decimal(item["final_gross_unit"])
+            assert bruto % Decimal(paso) == 0, f"{bruto} no es multiplo de {paso}"
+            # Nunca baja: el precio final es >= al crudo.
+            assert bruto >= Decimal(item["raw_gross_unit"]).quantize(Decimal("0.01"))
+            assert Decimal(item["rounding_adjustment_unit"]) >= 0
+
+
+@pytest.mark.asyncio
+async def test_neto_mas_igv_es_exactamente_el_bruto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """RECONSTRUCT_NET_TAX: el bruto redondeado manda y el neto se deriva."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+
+    body = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+
+    for item in body["items"]:
+        neto = Decimal(item["final_net_unit"])
+        igv = Decimal(item["final_tax_unit"])
+        assert neto + igv == Decimal(item["final_gross_unit"])
+        assert Decimal(item["line_total_net"]) + Decimal(item["line_total_tax"]) == Decimal(
+            item["line_total_gross"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_cada_linea_lleva_su_propio_margen(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PER_PRODUCT_MARKUP: 100 % y 50 % en la misma cotizacion."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    items = [dict(item) for item in payload["items"]]
+    items[0]["markup_percent"] = "100"
+    items[1]["markup_percent"] = "50"
+
+    body = (
+        await api.post(
+            f"{BUILDER}/preview", json={**payload, "items": items}, headers=head(admin_csrf)
+        )
+    ).json()
+
+    a, b = body["items"]
+    assert Decimal(a["markup_percent"]) == Decimal(100)
+    assert Decimal(b["markup_percent"]) == Decimal(50)
+    assert Decimal(a["raw_net_unit"]) == Decimal(a["commercial_base_unit_cost"]) * Decimal(2)
+    assert Decimal(b["raw_net_unit"]) == Decimal(b["commercial_base_unit_cost"]) * Decimal("1.5")
+
+
+# ---------------------------------------------------------------------------
+# Totales
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_el_total_es_la_suma_de_las_lineas_sin_segundo_redondeo(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NO_SECOND_TOTAL_ROUNDING + MULTIPRODUCT_TOTAL + autoridad del backend."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await _seed_fixed_costs(api, admin_csrf)
+
+    body = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+
+    neto = sum(Decimal(item["line_total_net"]) for item in body["items"])
+    igv = sum(Decimal(item["line_total_tax"]) for item in body["items"])
+    bruto = sum(Decimal(item["line_total_gross"]) for item in body["items"])
+
+    # El backend expone los tres con semantica unica: el frontend no elige.
+    assert Decimal(body["quotation_net_total"]) == neto
+    assert Decimal(body["quotation_tax_total"]) == igv
+    assert Decimal(body["quotation_gross_total"]) == bruto
+    assert neto + igv == bruto
+
+
+# ---------------------------------------------------------------------------
+# Confirmada: inmutable
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_una_cotizacion_confirmada_no_se_mueve(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CONFIRMED_COMMERCIAL_IMMUTABLE.
+
+    Se confirma con el IGV al 18 %, se cambia al 10 %, y la cotizacion sigue
+    diciendo lo mismo. Un precio comprometido no se recalcula al leerlo.
+    """
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await _seed_fixed_costs(api, admin_csrf)
+
+    creada = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    quotation_id = creada.json()["id"]
+
+    reabierta = await api.get(f"{BUILDER}/{quotation_id}", headers=head(admin_csrf))
+    confirmada = await api.post(
+        f"{BUILDER}/{quotation_id}/confirm",
+        json={"expected_updated_at": reabierta.json()["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert confirmada.status_code == 200, confirmada.text
+    congelado = confirmada.json()
+
+    cambio = await api.put(
+        COMMERCIAL,
+        json={"version": 1, "tax_percent": "10", "estimated_glaze_percent": "15"},
+        headers=head(admin_csrf),
+    )
+    assert cambio.status_code == 200, cambio.text
+
+    despues = (await api.get(f"{BUILDER}/{quotation_id}", headers=head(admin_csrf))).json()
+
+    assert despues["quotation_gross_total"] == congelado["quotation_gross_total"]
+    assert despues["quotation_net_total"] == congelado["quotation_net_total"]
+    for antes_item, despues_item in zip(congelado["items"], despues["items"], strict=True):
+        assert despues_item["final_gross_unit"] == antes_item["final_gross_unit"]
+        assert despues_item["fixed_cost_allocation"] == antes_item["fixed_cost_allocation"]
+        assert despues_item["production_factor"] == antes_item["production_factor"]
