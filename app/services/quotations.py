@@ -1035,6 +1035,8 @@ class QuotationService:
             effective_profit_total=result.effective_profit_total,
             effective_markup_percent=result.effective_markup_percent,
             commercial_subtotal=result.commercial_subtotal,
+            subtotal=result.commercial_subtotal or result.calculated_total,
+            total=result.commercial_total or result.total_with_tax,
             commercial_total=result.commercial_total,
             commercial_unit_price_with_tax=result.commercial_unit_price_with_tax,
             currency_code_snapshot=currency_code_snap,
@@ -1678,6 +1680,8 @@ class QuotationService:
             effective_profit_total=quotation.effective_profit_total,
             effective_markup_percent=quotation.effective_markup_percent,
             commercial_subtotal=quotation.commercial_subtotal,
+            subtotal=quotation.commercial_subtotal or quotation.calculated_total,
+            total=quotation.commercial_total or quotation.total_with_tax,
             commercial_total=quotation.commercial_total,
             commercial_unit_price_with_tax=quotation.commercial_unit_price_with_tax,
             # Una cotizacion guardada no vuelve a mirar la receta: si algun

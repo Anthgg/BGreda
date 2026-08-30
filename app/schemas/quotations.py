@@ -373,6 +373,14 @@ class QuotationCalculateOut(_Out):
     tax_amount: Decimal
     total_with_tax: Decimal
     unit_price_with_tax: Decimal
+    #: Fase 009E. Los DOS importes de la cotizacion, resueltos por el backend.
+    #:
+    #: La via heredada dejaba a cada pantalla elegir entre `commercial_*` y
+    #: `calculated_*`/`total_with_tax` con un `||`. Cual es el importe real es
+    #: una regla comercial: escrita en cada componente, se escribe distinto.
+    #: Los campos anteriores siguen en el contrato; el que se muestra es este.
+    subtotal: Decimal = Decimal(0)
+    total: Decimal = Decimal(0)
     source_fingerprint: str
     warnings: list[str]
     #: La regla del IGV si esta definida: la cotizacion se emite sin impuesto y
