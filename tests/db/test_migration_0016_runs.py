@@ -200,7 +200,11 @@ async def test_0015_a_0016_a_0015_y_de_vuelta(migration_engine: AsyncEngine) -> 
     factor_check = await _check_clause(
         migration_engine, "ck_commercial_settings_production_factor_default_positive"
     )
-    assert factor_check is not None and "> 0" in factor_check
+    # PostgreSQL normaliza la clausula: `> 0` se guarda como `> (0)::numeric`,
+    # asi que se comprueba el operador y la columna, no el texto literal.
+    assert factor_check is not None
+    assert "production_factor_default" in factor_check
+    assert ">" in factor_check
     paso_check = await _check_clause(
         migration_engine, "ck_commercial_settings_rounding_step_allowed"
     )
