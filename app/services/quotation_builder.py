@@ -661,6 +661,7 @@ class QuotationBuilderService:
                     markup_percent=item.markup_percent,
                     tax_percent=item.tax_percentage_snapshot,
                     rounding_step=rounding_step,
+                    manual_net_unit=item.commercial_sale_unit_price_input,
                 )
             )
             priced[item.sort_order] = item.model_copy(
@@ -685,6 +686,9 @@ class QuotationBuilderService:
                     # semantica nueva, para que nada quede leyendo dos motores
                     # comerciales a la vez.
                     "commercial_sale_unit_price": pricing.final_net_unit,
+                    # Una sola sugerencia. Dejar la del motor anterior seria
+                    # ensenar dos precios distintos para la misma pieza.
+                    "suggested_commercial_unit_price": pricing.final_net_unit,
                     "commercial_unit_price_with_tax": pricing.final_gross_unit,
                     "commercial_subtotal": pricing.line_total_net,
                     "tax_amount": pricing.line_total_tax,

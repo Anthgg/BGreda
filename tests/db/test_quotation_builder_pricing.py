@@ -289,3 +289,37 @@ async def test_una_cotizacion_confirmada_no_se_mueve(
         assert despues_item["final_gross_unit"] == antes_item["final_gross_unit"]
         assert despues_item["fixed_cost_allocation"] == antes_item["fixed_cost_allocation"]
         assert despues_item["production_factor"] == antes_item["production_factor"]
+
+
+@pytest.mark.asyncio
+async def test_el_precio_manual_manda_pero_no_se_salta_el_redondeo(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El precio escrito a mano sustituye al del margen, no al contrato.
+
+    Es una eleccion del usuario y gana sobre el markup. Pero el bruto sigue
+    teniendo que ser redondo: dejar que un precio manual se saltara el
+    redondeo pondria en el documento una cifra con centimos arbitrarios, que
+    es justo lo que 009E vino a quitar.
+    """
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    items = [dict(item) for item in payload["items"]]
+    items[0]["commercial_sale_unit_price"] = "8.50"
+
+    body = (
+        await api.post(
+            f"{BUILDER}/preview", json={**payload, "items": items}, headers=head(admin_csrf)
+        )
+    ).json()
+    linea = body["items"][0]
+
+    # El neto crudo es exactamente lo que tecleo el usuario...
+    assert Decimal(linea["raw_net_unit"]) == Decimal("8.50")
+    # ...y el bruto final sigue siendo multiplo del paso contractual.
+    assert Decimal(linea["final_gross_unit"]) % Decimal("0.50") == 0
+    assert Decimal(linea["final_gross_unit"]) >= Decimal(linea["raw_gross_unit"]).quantize(
+        Decimal("0.01")
+    )
+    assert Decimal(linea["final_net_unit"]) + Decimal(linea["final_tax_unit"]) == Decimal(
+        linea["final_gross_unit"]
+    )

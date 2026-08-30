@@ -163,6 +163,11 @@ class LinePricingInput:
     markup_percent: Decimal
     tax_percent: Decimal
     rounding_step: Decimal
+    #: Precio neto unitario escrito a mano por el usuario. Cuando existe
+    #: sustituye al que sale del markup, pero NO se salta el redondeo: el
+    #: contrato sigue exigiendo un bruto redondo, asi que el precio tecleado
+    #: entra como neto crudo y pasa por el mismo camino que cualquier otro.
+    manual_net_unit: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +216,12 @@ def price_line(data: LinePricingInput) -> LinePricing:
     base = factored + data.fixed_cost_allocation
     base_unit = base / Decimal(data.quantity)
 
-    raw_net_unit = base_unit * (ONE + data.markup_percent / HUNDRED)
+    if data.manual_net_unit is not None:
+        if data.manual_net_unit < ZERO:
+            raise PricingError("El precio comercial no puede ser negativo")
+        raw_net_unit = data.manual_net_unit
+    else:
+        raw_net_unit = base_unit * (ONE + data.markup_percent / HUNDRED)
     raw_tax_unit = raw_net_unit * data.tax_percent / HUNDRED
     raw_gross_unit = raw_net_unit + raw_tax_unit
 

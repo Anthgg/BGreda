@@ -107,7 +107,17 @@ async def test_preview_is_pure_and_two_products_persist_confirm_and_render_pdf_m
     preview = preview_response.json()
     assert preview["item_count"] == 2
     assert [item["sort_order"] for item in preview["items"]] == [0, 1]
-    assert Decimal(preview["commercial_subtotal"]) == Decimal("3250")
+    # Fase 009E: el precio manual (8,50 y 12) entra como neto crudo y pasa por
+    # el mismo camino contractual que cualquier otro —IGV, CEILING del bruto,
+    # reconstruccion del neto—, asi que el subtotal ya no es 8,50 x 100 + 12 x
+    # 200. Se comprueba la INVARIANTE, que es lo que importa: el subtotal del
+    # encabezado es la suma de los netos de linea que calcula el backend.
+    assert Decimal(preview["commercial_subtotal"]) == sum(
+        Decimal(item["line_total_net"]) for item in preview["items"]
+    )
+    assert Decimal(preview["quotation_gross_total"]) == sum(
+        Decimal(item["line_total_gross"]) for item in preview["items"]
+    )
     assert preview["production_summary"]["estimated"] is True
     assert int((await db_session.execute(select(func.count(Firing.id)))).scalar_one()) == 0
 
