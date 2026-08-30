@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 
+from app.core.pricing import DEFAULT_ROUNDING_STEP, ceil_to_step
+
 ZERO = Decimal(0)
 
 
@@ -164,29 +166,19 @@ def _require_non_negative(value: Decimal, label: str) -> None:
 
 
 def round_to_commercial_half(value: Decimal) -> Decimal:
-    """Redondeo comercial al multiplo de S/ 0.50 mas cercano.
+    """Redondeo contractual al paso comercial. Compatibilidad de nombre.
 
-    Regla determinista con Decimal:
-    - Los puntos medios .25 y .75 suben al siguiente multiplo de 0.50.
-    Ejemplos obligatorios:
-      8.00 -> 8.00
-      8.10 -> 8.00
-      8.24 -> 8.00
-      8.25 -> 8.50
-      8.30 -> 8.50
-      8.49 -> 8.50
-      8.50 -> 8.50
-      8.60 -> 8.50
-      8.74 -> 8.50
-      8.75 -> 9.00
-      8.90 -> 9.00
-      9.00 -> 9.00
+    Fase 009E sustituyo la regla anterior —al multiplo de 0,50 mas CERCANO—
+    por CEILING: siempre hacia arriba. Bajar regala dinero en cada pieza de
+    cada cotizacion y no vuelve; subir cobra como mucho un centimo de mas, que
+    se negocia.
+
+    La implementacion vive en `app.core.pricing.ceil_to_step`, que es el unico
+    motor de redondeo del sistema. Esta funcion se conserva para que la via
+    heredada de cotizaciones no quede con una regla propia: dos motores
+    comerciales activos a la vez producen dos precios para la misma pieza.
     """
-    remainder = value % Decimal("0.50")
-    base = value - remainder
-    if remainder >= Decimal("0.25"):
-        return (base + Decimal("0.50")).quantize(Decimal("0.01"))
-    return base.quantize(Decimal("0.01"))
+    return ceil_to_step(value, DEFAULT_ROUNDING_STEP)
 
 
 def ceil_units(quantity: Decimal | int, factor: Decimal) -> int:

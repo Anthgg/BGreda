@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1136,3 +1137,34 @@ async def test_product_list_price_no_auto_update_on_confirmation(
     # Ahora si se actualizo el producto maestro
     prod_updated = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
     assert Decimal(prod_updated.json()["sale_price"]) == expected_new_price
+
+
+@pytest.mark.asyncio
+async def test_el_listado_resuelve_el_total_en_el_backend(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """COMMERCIAL_TOTAL_BACKEND_AUTHORITY.
+
+    El listado expone UN total. Antes el frontend elegia entre tres campos con
+    una cascada propia, y esa cascada es una regla comercial: si dos pantallas
+    la escriben distinto, el mismo pedido vale dos importes.
+    """
+    respuesta = await api.get(f"{QUOTATIONS}?limit=50")
+    assert respuesta.status_code == 200, respuesta.text
+
+    for fila in respuesta.json()["items"]:
+        assert "total" in fila
+        total = Decimal(fila["total"])
+        if fila["workflow"] == "COTIZADOR":
+            assert total == Decimal(fila["total_with_tax"])
+        else:
+            # Un cero no tapa un total real del siguiente campo.
+            esperado = next(
+                (
+                    Decimal(fila[campo])
+                    for campo in ("commercial_total", "total_with_tax", "calculated_total")
+                    if Decimal(fila[campo]) != 0
+                ),
+                Decimal(0),
+            )
+            assert total == esperado

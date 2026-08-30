@@ -373,6 +373,14 @@ class QuotationCalculateOut(_Out):
     tax_amount: Decimal
     total_with_tax: Decimal
     unit_price_with_tax: Decimal
+    #: Fase 009E. Los DOS importes de la cotizacion, resueltos por el backend.
+    #:
+    #: La via heredada dejaba a cada pantalla elegir entre `commercial_*` y
+    #: `calculated_*`/`total_with_tax` con un `||`. Cual es el importe real es
+    #: una regla comercial: escrita en cada componente, se escribe distinto.
+    #: Los campos anteriores siguen en el contrato; el que se muestra es este.
+    subtotal: Decimal = Decimal(0)
+    total: Decimal = Decimal(0)
     source_fingerprint: str
     warnings: list[str]
     #: La regla del IGV si esta definida: la cotizacion se emite sin impuesto y
@@ -416,6 +424,15 @@ class QuotationSummaryOut(_Out):
     commercial_sale_unit_price: Decimal = Decimal(0)
     commercial_total: Decimal = Decimal(0)
     total_with_tax: Decimal
+    #: Fase 009E. EL total de la cotizacion, con IGV, venga del Cotizador o de
+    #: la via heredada. Lo resuelve el backend.
+    #:
+    #: Existe porque el frontend estaba eligiendo entre `commercial_total`,
+    #: `total_with_tax` y `calculated_total` con una cascada propia, y esa
+    #: cascada es una regla comercial: si dos pantallas la escriben distinto,
+    #: el mismo pedido vale dos importes. Los tres campos anteriores se
+    #: conservan para no romper contratos, pero el que se muestra es este.
+    total: Decimal = Decimal(0)
     created_at: datetime
 
 

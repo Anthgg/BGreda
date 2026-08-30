@@ -38,6 +38,14 @@ MAX_TAX_PERCENT = Decimal("100")
 #: Vigencia maxima admitida para una cotizacion, en dias.
 MAX_VALIDITY_DAYS = 3650
 
+#: Fase 009E. Factor de PRODUCCION por defecto: multiplica el costo tecnico.
+#: No confundir con `default_quotation_factor`, que se deriva del markup.
+DEFAULT_PRODUCTION_FACTOR = Decimal("3")
+
+#: Pasos del redondeo contractual. Solo estos dos.
+ROUNDING_STEPS = (Decimal("0.50"), Decimal("1.00"))
+DEFAULT_ROUNDING_STEP = Decimal("0.50")
+
 #: Limite del porcentaje de esmalte estimado. Como MAX_TAX_PERCENT, es una
 #: barrera contra errores de captura, no una regla del taller.
 MAX_GLAZE_PERCENT = Decimal("100")
@@ -134,6 +142,25 @@ class CommercialSettings(Base, VersionedSingletonMixin):
         server_default=text("15"),
     )
 
+    #: Fase 009E: factor de PRODUCCION por defecto. Multiplica el costo
+    #: tecnico ANTES de los costos fijos y del margen. Es un paso distinto de
+    #: `default_quotation_factor`, que se deriva del markup: confundirlos
+    #: cobraria el margen dos veces.
+    production_factor_default: Mapped[Decimal] = mapped_column(
+        percentage_numeric(),
+        nullable=False,
+        default=DEFAULT_PRODUCTION_FACTOR,
+        server_default=text("3"),
+    )
+
+    #: Paso del redondeo contractual del precio bruto. Solo 0,50 o 1,00.
+    rounding_step: Mapped[Decimal] = mapped_column(
+        percentage_numeric(),
+        nullable=False,
+        default=DEFAULT_ROUNDING_STEP,
+        server_default=text("0.50"),
+    )
+
     # ---- Textos de documentos (texto plano, jamas HTML) ------------------
     general_conditions: Mapped[str | None] = mapped_column(Text)
     payment_notes: Mapped[str | None] = mapped_column(Text)
@@ -153,6 +180,10 @@ class CommercialSettings(Base, VersionedSingletonMixin):
             name="tax_percent_range",
         ),
         CheckConstraint("default_quotation_factor > 0", name="default_quotation_factor_positive"),
+        CheckConstraint("production_factor_default > 0", name="production_factor_default_positive"),
+        # En la base y no solo en Pydantic: una politica que admitiera 0,25
+        # produciria precios que no son multiplos de nada.
+        CheckConstraint("rounding_step IN (0.50, 1.00)", name="rounding_step_allowed"),
         CheckConstraint(
             f"estimated_glaze_percent > 0 AND estimated_glaze_percent <= {MAX_GLAZE_PERCENT}",
             name="estimated_glaze_percent_range",
