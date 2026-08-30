@@ -319,3 +319,88 @@ async def test_un_valor_invalido_no_deja_rastro(
 
     # Y la version no se ha movido: un rechazo no consume el bloqueo optimista.
     assert (await api.get(COMMERCIAL)).json()["version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Politica comercial: factor de produccion y paso de redondeo (Fase 009E)
+# ---------------------------------------------------------------------------
+async def test_el_factor_de_produccion_por_defecto_es_tres(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """GET_DEFAULT_PRODUCTION_FACTOR_3."""
+    body = (await api.get(COMMERCIAL)).json()
+
+    assert Decimal(str(body["production_factor_default"])) == Decimal("3")
+    # Y NO es el mismo campo que el factor comercial heredado, que vale 2.
+    assert Decimal(str(body["default_quotation_factor"])) == Decimal("2")
+
+
+async def test_el_factor_de_produccion_se_cambia_y_persiste(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """UPDATE_FACTOR_3_TO_4 + RELOAD_FACTOR_4."""
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, production_factor_default="4"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+
+    assert Decimal(str((await api.get(COMMERCIAL)).json()["production_factor_default"])) == (
+        Decimal("4")
+    )
+    almacenado = (
+        await db_session.execute(
+            text("SELECT production_factor_default FROM commercial_settings WHERE id = 1")
+        )
+    ).scalar_one()
+    assert Decimal(str(almacenado)) == Decimal("4")
+
+
+async def test_el_paso_de_redondeo_se_cambia_y_persiste(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """GET_ROUNDING_STEP_050 + UPDATE_ROUNDING_050_TO_100 + RELOAD_ROUNDING_100."""
+    assert Decimal(str((await api.get(COMMERCIAL)).json()["rounding_step"])) == Decimal("0.50")
+
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, rounding_step="1.00"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+    assert Decimal(str((await api.get(COMMERCIAL)).json()["rounding_step"])) == Decimal("1.00")
+
+
+async def test_una_politica_invalida_se_rechaza_y_no_deja_rastro(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """INVALID_FACTOR_* + INVALID_ROUNDING_* + RESTORE.
+
+    Un rechazo no puede consumir el bloqueo optimista: si `version` subiera,
+    el siguiente intento legitimo del usuario chocaria con un 409 sin que
+    nadie hubiera guardado nada.
+    """
+    invalidos = (
+        {"production_factor_default": "0"},
+        {"production_factor_default": "-3"},
+        {"rounding_step": "0.25"},
+        {"rounding_step": "0.75"},
+    )
+    for campos in invalidos:
+        respuesta = await api.put(
+            COMMERCIAL, json=_payload(1, **campos), headers={"X-CSRF-Token": admin_csrf}
+        )
+        assert respuesta.status_code == 422, f"{campos}: {respuesta.text}"
+
+    fila = (
+        await db_session.execute(
+            text(
+                "SELECT production_factor_default, rounding_step "
+                "FROM commercial_settings WHERE id = 1"
+            )
+        )
+    ).one()
+    assert Decimal(str(fila[0])) == Decimal("3")
+    assert Decimal(str(fila[1])) == Decimal("0.50")
+    assert (await api.get(COMMERCIAL)).json()["version"] == 1

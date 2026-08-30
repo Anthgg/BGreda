@@ -16,9 +16,12 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models.settings import (
     DEFAULT_ESTIMATED_GLAZE_PERCENT,
+    DEFAULT_PRODUCTION_FACTOR,
+    DEFAULT_ROUNDING_STEP,
     MAX_GLAZE_PERCENT,
     MAX_TAX_PERCENT,
     MAX_VALIDITY_DAYS,
+    ROUNDING_STEPS,
 )
 
 # ---------------------------------------------------------------------------
@@ -219,6 +222,27 @@ class CommercialSettingsBase(_StrictModel):
         Decimal,
         Field(gt=0, le=MAX_GLAZE_PERCENT, max_digits=9, decimal_places=6),
     ] = DEFAULT_ESTIMATED_GLAZE_PERCENT
+
+    #: Fase 009E. Factor de PRODUCCION por defecto: multiplica el costo tecnico
+    #: antes de los costos fijos y del margen. Una cotizacion puede tener su
+    #: propio override; este es el valor con el que arrancan las que no lo
+    #: tienen. No es `default_quotation_factor`, que se deriva del markup.
+    production_factor_default: Annotated[
+        Decimal,
+        Field(gt=0, le=1_000, max_digits=9, decimal_places=6),
+    ] = DEFAULT_PRODUCTION_FACTOR
+
+    #: Paso del redondeo contractual del precio bruto. Solo 0,50 o 1,00: un
+    #: tercer valor produciria precios que no son multiplos de nada.
+    rounding_step: Annotated[Decimal, Field(max_digits=9, decimal_places=6)] = DEFAULT_ROUNDING_STEP
+
+    @field_validator("rounding_step", mode="after")
+    @classmethod
+    def _validate_rounding_step(cls, value: Decimal) -> Decimal:
+        if value not in ROUNDING_STEPS:
+            admitidos = " o ".join(str(step) for step in ROUNDING_STEPS)
+            raise ValueError(f"El paso de redondeo solo admite {admitidos}")
+        return value
 
     general_conditions: PlainText = None
     payment_notes: PlainText = None

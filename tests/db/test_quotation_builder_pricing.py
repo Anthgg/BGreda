@@ -325,3 +325,164 @@ async def test_el_precio_manual_manda_pero_no_se_salta_el_redondeo(
     assert Decimal(linea["final_net_unit"]) + Decimal(linea["final_tax_unit"]) == Decimal(
         linea["final_gross_unit"]
     )
+
+
+# ---------------------------------------------------------------------------
+# La politica sale de Configuracion (Fase 009E / Alembic 0016)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_el_factor_por_defecto_sale_de_la_configuracion(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """DEFAULT_FACTOR_FROM_SETTINGS + DRAFT_DEFAULT_FACTOR_CHANGE_RECALCULATES."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+
+    antes = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+    assert Decimal(antes["production_factor"]) == Decimal(3)
+
+    cambio = await api.put(
+        COMMERCIAL,
+        json={"version": 1, "production_factor_default": "4"},
+        headers=head(admin_csrf),
+    )
+    assert cambio.status_code == 200, cambio.text
+
+    despues = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+    assert Decimal(despues["production_factor"]) == Decimal(4)
+    for item in despues["items"]:
+        assert Decimal(item["factored_cost"]) == Decimal(item["technical_cost"]) * Decimal(4)
+
+
+@pytest.mark.asyncio
+async def test_el_override_de_la_cotizacion_gana_al_default(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """QUOTE_FACTOR_OVERRIDE_WINS + DRAFT_OVERRIDE_SURVIVES_DEFAULT_CHANGE."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    body = _with_policy(payload, production_factor="2.5")
+
+    creada = await api.post(BUILDER, json=body, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    assert Decimal(creada.json()["production_factor"]) == Decimal("2.5")
+
+    # Cambiar el default NO puede mover un borrador que eligio su propio factor.
+    cambio = await api.put(
+        COMMERCIAL,
+        json={"version": 1, "production_factor_default": "4"},
+        headers=head(admin_csrf),
+    )
+    assert cambio.status_code == 200, cambio.text
+
+    reabierta = await api.get(f"{BUILDER}/{creada.json()['id']}", headers=head(admin_csrf))
+    assert Decimal(reabierta.json()["production_factor"]) == Decimal("2.5")
+
+    recalculada = await api.put(
+        f"{BUILDER}/{creada.json()['id']}",
+        json={**body, "expected_updated_at": reabierta.json()["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert recalculada.status_code == 200, recalculada.text
+    assert Decimal(recalculada.json()["production_factor"]) == Decimal("2.5")
+
+
+@pytest.mark.asyncio
+async def test_cambiar_el_paso_de_redondeo_recalcula_el_borrador(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """ROUNDING_SETTING_CHANGE_RECALCULATES."""
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+
+    antes = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+    assert Decimal(antes["rounding_step"]) == Decimal("0.50")
+
+    cambio = await api.put(
+        COMMERCIAL, json={"version": 1, "rounding_step": "1.00"}, headers=head(admin_csrf)
+    )
+    assert cambio.status_code == 200, cambio.text
+
+    despues = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
+    assert Decimal(despues["rounding_step"]) == Decimal("1.00")
+    for item in despues["items"]:
+        assert Decimal(item["final_gross_unit"]) % Decimal(1) == 0
+
+
+@pytest.mark.asyncio
+async def test_un_gasto_manual_no_puede_cobrar_dos_veces_los_fijos(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """MANUAL_SELECTION_OF_AUTO_FIXED_COSTS: 0 + AUTO_FIXED_COSTS_APPLIED_ONCE.
+
+    Los maestros de costo fijo se aplican automaticamente. Si ademas se
+    pudieran seleccionar por linea, el alquiler se cobraria dos veces. La
+    seleccion manual se acepta por compatibilidad de despliegue pero se
+    ignora: el importe no cambia.
+    """
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await _seed_fixed_costs(api, admin_csrf)
+    maestros = (await api.get(f"{OTHER_COSTS}?limit=50")).json()["items"]
+
+    sin_seleccion = (
+        await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    ).json()
+
+    items = [
+        {
+            **item,
+            "other_costs": [
+                {"other_cost_id": maestro["id"], "sort_order": index}
+                for index, maestro in enumerate(maestros)
+            ],
+        }
+        for item in payload["items"]
+    ]
+    con_seleccion = (
+        await api.post(
+            f"{BUILDER}/preview", json={**payload, "items": items}, headers=head(admin_csrf)
+        )
+    ).json()
+
+    assert Decimal(con_seleccion["total_fixed_cost"]) == TOTAL_FIXED
+    assert con_seleccion["quotation_gross_total"] == sin_seleccion["quotation_gross_total"]
+
+
+@pytest.mark.asyncio
+async def test_un_maestro_desactivado_no_entra_en_los_fijos(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El retiro del «Factor» legacy: desactivarlo lo saca del total.
+
+    PRODUCTION_FACTOR_DOUBLE_COUNT: 0 — el factor canonico es el multiplicador,
+    y un maestro llamado «Factor» sumando ademas su importe lo cobraria dos
+    veces con dos significados distintos.
+    """
+    payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    await _seed_fixed_costs(api, admin_csrf)
+    legacy = await api.post(
+        OTHER_COSTS,
+        json={"name": "Factor", "unit_price": "3", "calculation_type": "PER_PIECE"},
+        headers=head(admin_csrf),
+    )
+    assert legacy.status_code == 201, legacy.text
+    legacy_id = legacy.json()["id"]
+
+    con_legacy = (
+        await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    ).json()
+    assert Decimal(con_legacy["total_fixed_cost"]) == TOTAL_FIXED + Decimal(3)
+
+    baja = await api.put(
+        f"{OTHER_COSTS}/{legacy_id}",
+        json={
+            "name": "Factor",
+            "unit_price": "3",
+            "calculation_type": "PER_PIECE",
+            "active": False,
+        },
+        headers=head(admin_csrf),
+    )
+    assert baja.status_code == 200, baja.text
+
+    sin_legacy = (
+        await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
+    ).json()
+    assert Decimal(sin_legacy["total_fixed_cost"]) == TOTAL_FIXED

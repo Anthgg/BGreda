@@ -16,8 +16,6 @@ from sqlalchemy.orm import selectinload
 from app.core.errors import APIError
 from app.core.precision import QUANTITY_SCALE
 from app.core.pricing import (
-    DEFAULT_PRODUCTION_FACTOR,
-    DEFAULT_ROUNDING_STEP,
     LinePricingInput,
     allocate_fixed_costs,
     price_line,
@@ -1254,10 +1252,12 @@ class QuotationBuilderService:
         # de costos fijos necesita ver todas las lineas: el peso de cada una
         # es su costo factorado sobre el total factorado de la cotizacion.
         # ------------------------------------------------------------------
-        production_factor = payload.production_factor or DEFAULT_PRODUCTION_FACTOR
-        rounding_step = (
-            Decimal(payload.rounding_step) if payload.rounding_step else DEFAULT_ROUNDING_STEP
-        )
+        # Fase 009E: la politica sale de la configuracion comercial, no de una
+        # constante del codigo. El override por cotizacion gana al default; el
+        # paso de redondeo es politica de la empresa y no se sobreescribe desde
+        # una cotizacion, para que nadie se salte Configuracion pieza a pieza.
+        production_factor = payload.production_factor or settings.production_factor_default
+        rounding_step = settings.rounding_step
         total_fixed_cost = await self._total_fixed_cost()
         item_outputs = self._apply_commercial_engine(
             item_outputs,
@@ -1337,6 +1337,11 @@ class QuotationBuilderService:
                     settings.currency_code,
                     settings.currency_symbol,
                 ],
+                # Fase 009E: la politica EFECTIVA, no la version de la fila.
+                # Cambiar el factor por defecto o el paso de redondeo si altera
+                # el precio y debe invalidar el borrador; editar el banco o las
+                # condiciones de pago no.
+                "pricing": [production_factor, rounding_step, total_fixed_cost],
                 "production": production,
                 "items": [item.source_fingerprint for item in item_outputs],
             }

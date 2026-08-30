@@ -46,8 +46,13 @@ def test_migration_0015_downgrade_undoes_everything() -> None:
     assert "dimension IN ('MASS', 'COUNT')" in downgrade
 
 
-def test_alembic_single_head_is_0015() -> None:
-    """Una sola cabeza: dos harian fallar `alembic upgrade head` en el deploy."""
+def test_0015_sigue_en_la_cadena() -> None:
+    """0015 tiene que seguir siendo alcanzable desde la cabeza actual.
+
+    La comprobacion de "cabeza unica" vive con la ULTIMA migracion, no aqui:
+    dejarla anclada a 0015 obligaba a editar este archivo en cada fase.
+    """
     alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(alembic_cfg)
-    assert script.get_heads() == ["0015"]
+    revisiones = {revision.revision for revision in script.walk_revisions()}
+    assert "0015" in revisiones
