@@ -171,7 +171,10 @@ async def test_el_redondeo_contractual_sube_y_admite_los_dos_pasos(
     """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
 
-    for version, paso in enumerate(("0.50", "1.00"), start=1):
+    for paso in ("0.50", "1.00"):
+        # La version se relee: un PUT que no cambia nada no la incrementa, asi
+        # que darla por contada choca con el bloqueo optimista.
+        version = (await api.get(COMMERCIAL)).json()["version"]
         cambio = await api.put(
             COMMERCIAL,
             json={"version": version, "rounding_step": paso},

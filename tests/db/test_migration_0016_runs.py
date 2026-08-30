@@ -144,6 +144,20 @@ UNTOUCHED_COLUMNS = (
 )
 
 
+async def _policy(engine: AsyncEngine) -> tuple[Decimal, Decimal]:
+    """Las dos columnas nuevas, leidas aparte de las que no deben cambiar."""
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT production_factor_default, rounding_step "
+                    "FROM commercial_settings WHERE id = 1"
+                )
+            )
+        ).one()
+    return Decimal(str(row[0])), Decimal(str(row[1]))
+
+
 async def _settings_row(engine: AsyncEngine) -> dict[str, object]:
     columnas = ", ".join(UNTOUCHED_COLUMNS)
     async with engine.connect() as connection:
@@ -173,9 +187,10 @@ async def test_0015_a_0016_a_0015_y_de_vuelta(migration_engine: AsyncEngine) -> 
     assert await _column_exists(migration_engine, "commercial_settings", "rounding_step")
 
     # ---- Backfill comprobado con SELECT, no con server_default --------
+    factor, paso = await _policy(migration_engine)
+    assert factor == Decimal(3)
+    assert paso == Decimal("0.50")
     despues = await _settings_row(migration_engine)
-    assert Decimal(str(despues["production_factor_default"])) == Decimal(3)
-    assert Decimal(str(despues["rounding_step"])) == Decimal("0.50")
 
     # ---- El resto de la fila queda intacto -----------------------------
     for campo, valor in antes.items():
@@ -202,9 +217,9 @@ async def test_0015_a_0016_a_0015_y_de_vuelta(migration_engine: AsyncEngine) -> 
 
     _upgrade("0016")
     assert await _current(migration_engine) == "0016"
-    final = await _settings_row(migration_engine)
-    assert Decimal(str(final["production_factor_default"])) == Decimal(3)
-    assert Decimal(str(final["rounding_step"])) == Decimal("0.50")
+    factor, paso = await _policy(migration_engine)
+    assert factor == Decimal(3)
+    assert paso == Decimal("0.50")
 
 
 @pytest.mark.asyncio
