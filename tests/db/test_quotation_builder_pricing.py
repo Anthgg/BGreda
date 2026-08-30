@@ -205,7 +205,9 @@ async def test_cada_linea_lleva_su_propio_margen(
 ) -> None:
     """PER_PRODUCT_MARKUP: 100 % y 50 % en la misma cotizacion."""
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
-    items = [dict(item) for item in payload["items"]]
+    # Sin precio manual: un precio escrito a mano gana sobre el margen, asi que
+    # dejarlo puesto mediria el override, no el markup.
+    items = [{**item, "commercial_sale_unit_price": None} for item in payload["items"]]
     items[0]["markup_percent"] = "100"
     items[1]["markup_percent"] = "50"
 
