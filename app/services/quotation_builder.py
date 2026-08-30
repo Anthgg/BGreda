@@ -1702,18 +1702,6 @@ class QuotationBuilderService:
                 ),
                 None,
             ),
-            rounding_step=next(
-                (
-                    paso
-                    for item in row.items
-                    if (
-                        paso := _stored_rounding_step(
-                            item.production_snapshot.get("commercial_plan")
-                        )
-                    )
-                ),
-                None,
-            ),
             items=[
                 QuotationBuilderItemIn(
                     product_id=item.product_id,

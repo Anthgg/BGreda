@@ -125,9 +125,31 @@ async def _current(engine: AsyncEngine) -> str | None:
         return await connection.scalar(text("SELECT version_num FROM alembic_version"))
 
 
+#: Campos que 0016 NO debe tocar. Se enumeran en vez de usar `SELECT *`
+#: porque asyncpg describe la consulta una vez y `ALTER TABLE ADD COLUMN` deja
+#: esa descripcion obsoleta: la siguiente ejecucion devuelve mas columnas de
+#: las anunciadas y el driver aborta con ProtocolError.
+UNTOUCHED_COLUMNS = (
+    "id",
+    "version",
+    "currency_code",
+    "currency_symbol",
+    "tax_percent",
+    "default_quotation_factor",
+    "quote_validity_days",
+    "estimated_glaze_percent",
+    "general_conditions",
+    "payment_notes",
+    "document_footer",
+)
+
+
 async def _settings_row(engine: AsyncEngine) -> dict[str, object]:
+    columnas = ", ".join(UNTOUCHED_COLUMNS)
     async with engine.connect() as connection:
-        result = await connection.execute(text("SELECT * FROM commercial_settings WHERE id = 1"))
+        result = await connection.execute(
+            text(f"SELECT {columnas} FROM commercial_settings WHERE id = 1")  # noqa: S608
+        )
         row = result.mappings().one()
     return dict(row)
 

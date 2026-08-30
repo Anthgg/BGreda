@@ -163,12 +163,22 @@ async def test_la_cotizacion_puede_sobreescribir_el_factor(
 async def test_el_redondeo_contractual_sube_y_admite_los_dos_pasos(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """CEILING_GROSS_ROUNDING + ROUNDING_STEP."""
+    """CEILING_GROSS_ROUNDING + ROUNDING_STEP.
+
+    El paso lo fija Configuracion, NO la cotizacion: si cada cotizacion pudiera
+    mandar el suyo, la politica de precios de la empresa se saltaria pieza a
+    pieza. Por eso aqui se cambia el ajuste y no el payload.
+    """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
 
-    for paso in ("0.50", "1.00"):
-        body = _with_policy(payload, rounding_step=paso)
-        respuesta = await api.post(f"{BUILDER}/preview", json=body, headers=head(admin_csrf))
+    for version, paso in enumerate(("0.50", "1.00"), start=1):
+        cambio = await api.put(
+            COMMERCIAL,
+            json={"version": version, "rounding_step": paso},
+            headers=head(admin_csrf),
+        )
+        assert cambio.status_code == 200, cambio.text
+        respuesta = await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
         assert respuesta.status_code == 200, respuesta.text
         cuerpo = respuesta.json()
 

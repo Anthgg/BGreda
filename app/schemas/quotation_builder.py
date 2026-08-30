@@ -177,8 +177,6 @@ class QuotationBuilderDraftIn(_Strict):
     production_factor: Annotated[
         Decimal | None, Field(gt=0, le=1_000, max_digits=18, decimal_places=6)
     ] = None
-    #: Paso del redondeo contractual: 0.50 o 1.00. `None` usa el canonico.
-    rounding_step: Literal["0.50", "1.00"] | None = None
     items: list[QuotationBuilderItemIn] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
