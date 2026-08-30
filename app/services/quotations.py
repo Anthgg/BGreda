@@ -198,6 +198,28 @@ MASTER_CODE_LOCK_KEY: Final[Mapping[type[Technique] | type[Additional] | type[Ot
 }
 
 
+def _summary_total(quotation: Quotation) -> Decimal:
+    """EL total con IGV de una cotizacion, resuelto en el backend.
+
+    El Cotizador integral usa `total_with_tax`; la via heredada poblaba
+    `commercial_total` y, antes de eso, solo `calculated_total`.
+
+    Un cero NO cuenta como valor: un `commercial_total` que nunca se poblo
+    llega como el Decimal cero, que serializado es `"0E-18"` —una cadena no
+    vacia— y taparia un total real del campo siguiente.
+    """
+    if quotation.workflow is QuotationWorkflow.COTIZADOR:
+        return quotation.total_with_tax
+    for candidate in (
+        quotation.commercial_total,
+        quotation.total_with_tax,
+        quotation.calculated_total,
+    ):
+        if candidate:
+            return candidate
+    return Decimal(0)
+
+
 class QuotationService:
     def __init__(
         self,
@@ -1821,6 +1843,7 @@ class QuotationService:
         )
         items = [
             QuotationSummaryOut(
+                total=_summary_total(quotation),
                 id=quotation.id,
                 code=quotation.code,
                 name=quotation.name,
