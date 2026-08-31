@@ -27,6 +27,23 @@ def _usd(payload: dict[str, Any], tasa: str = TASA) -> dict[str, Any]:
     return {**payload, "currency_code": "USD", "exchange_rate": tasa}
 
 
+def _por_margen(payload: dict[str, Any]) -> dict[str, Any]:
+    """Quita los precios manuales del fixture compartido.
+
+    `_complete_payload` fija un precio por producto, y un precio manual YA esta
+    en moneda de emision: no se convierte. Con el puesto, la tasa no toca el
+    resultado y una prueba de conversion no probaria nada. Para ver la
+    conversion hace falta el camino del margen.
+    """
+    return {
+        **payload,
+        "items": [
+            {k: v for k, v in item.items() if k != "commercial_sale_unit_price"}
+            for item in payload["items"]
+        ],
+    }
+
+
 async def _preview(api: httpx.AsyncClient, csrf: str, payload: dict[str, Any]) -> dict[str, Any]:
     response = await api.post(f"{BUILDER}/preview", json=payload, headers=head(csrf))
     assert response.status_code == 200, response.text
@@ -53,7 +70,7 @@ async def test_el_neto_en_dolares_es_el_de_soles_dividido_por_la_tasa(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """USD_DIVIDES_BY_RATE, con la cotización real y no con una línea suelta."""
-    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
     en_soles = await _preview(api, admin_csrf, payload)
     en_dolares = await _preview(api, admin_csrf, _usd(payload))
 
@@ -227,7 +244,7 @@ async def test_cambiar_la_tasa_en_un_borrador_recalcula(
     Una tasa más alta compra menos dólares por sol, así que el precio en
     dólares baja.
     """
-    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
     a_375 = await _preview(api, admin_csrf, _usd(payload, "3.75"))
     a_400 = await _preview(api, admin_csrf, _usd(payload, "4.00"))
 
@@ -246,7 +263,7 @@ async def test_volver_a_soles_recalcula_desde_los_costos_base(
     Si la vuelta se hiciera multiplicando el precio en dólares YA redondeado
     por la tasa, el precio en soles cambiaría al pasear por otra moneda.
     """
-    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
     original = await _preview(api, admin_csrf, payload)
     await _preview(api, admin_csrf, _usd(payload))
     de_vuelta = await _preview(api, admin_csrf, payload)
@@ -309,7 +326,7 @@ async def test_los_totales_se_agrupan_por_moneda_y_nunca_se_suman(
     Sumar soles y dólares da un número impecable aritméticamente e inútil
     financieramente.
     """
-    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
     en_soles = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
     assert en_soles.status_code == 201, en_soles.text
     en_dolares = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
@@ -340,3 +357,23 @@ async def test_la_ruta_de_totales_no_se_confunde_con_un_id(
     response = await api.get("/api/v1/quotations/totals")
     assert response.status_code == 200, response.text
     assert "totals" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_un_precio_manual_en_dolares_no_depende_de_la_tasa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El corolario de que el precio manual esté en moneda de emisión.
+
+    Si el usuario fija 100 dólares, cambiar el tipo de cambio no puede mover
+    ese precio: lo que cambia es cuántos soles cuesta producirlo, no lo que se
+    factura. Esta propiedad hizo fallar tres pruebas escritas sin darse cuenta
+    de que el fixture ya traía precios manuales.
+    """
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    a_375 = await _preview(api, admin_csrf, _usd(payload, "3.75"))
+    a_400 = await _preview(api, admin_csrf, _usd(payload, "4.00"))
+
+    assert a_375["total_with_tax"] == a_400["total_with_tax"]
+    for linea_a, linea_b in zip(a_375["items"], a_400["items"], strict=True):
+        assert linea_a["final_gross_unit"] == linea_b["final_gross_unit"]
