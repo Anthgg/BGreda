@@ -115,13 +115,15 @@ async def _current(engine: AsyncEngine) -> str | None:
         return await connection.scalar(text("SELECT version_num FROM alembic_version"))
 
 
-#: Lo minimo que exige `quotations` para aceptar una fila. Se enumera porque
-#: `INSERT ... DEFAULT VALUES` no serviria: hay columnas NOT NULL sin default.
+#: Columnas NOT NULL sin default de `quotations`, derivadas del modelo y no
+#: adivinadas: `code`, los dos factores comerciales y la huella de origen.
+#: `INSERT ... DEFAULT VALUES` no serviria, y enumerar de memoria fallaba una
+#: columna cada vez.
 NUEVA_COTIZACION = (
     "INSERT INTO quotations (code, status, workflow, commercial_factor, "
-    "commercial_factor_default_snapshot, "
+    "commercial_factor_default_snapshot, source_fingerprint, "
     "currency_code_snapshot, exchange_rate_snapshot, exchange_rate_source_snapshot) "
-    "VALUES (:code, 'DRAFT', 'COTIZADOR', 1, 1, :currency, :rate, :source)"
+    "VALUES (:code, 'DRAFT', 'COTIZADOR', 1, 1, 'x', :currency, :rate, :source)"
 )
 
 
@@ -269,8 +271,9 @@ async def test_las_cotizaciones_historicas_siguen_siendo_validas(
         await connection.execute(
             text(
                 "INSERT INTO quotations (code, status, workflow, commercial_factor, "
-                "commercial_factor_default_snapshot, currency_code_snapshot) "
-                "VALUES ('CTZ-VIEJA', 'CONFIRMED', 'LEGACY', 1, 1, 'PEN')"
+                "commercial_factor_default_snapshot, source_fingerprint, "
+                "currency_code_snapshot) "
+                "VALUES ('CTZ-VIEJA', 'CONFIRMED', 'LEGACY', 1, 1, 'x', 'PEN')"
             )
         )
 

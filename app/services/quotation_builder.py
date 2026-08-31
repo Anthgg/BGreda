@@ -1400,7 +1400,16 @@ class QuotationBuilderService:
                 # Cambiar el factor por defecto o el paso de redondeo si altera
                 # el precio y debe invalidar el borrador; editar el banco o las
                 # condiciones de pago no.
-                "pricing": [production_factor, rounding_step, total_fixed_cost],
+                # Fase 009F: la moneda y la tasa cambian el precio, asi que
+                # entran en la huella. Un borrador guardado a 3,75 no puede
+                # confirmarse en silencio con otra tasa.
+                "pricing": [
+                    production_factor,
+                    rounding_step,
+                    total_fixed_cost,
+                    currency_code,
+                    exchange_rate,
+                ],
                 "production": production,
                 "items": [item.source_fingerprint for item in item_outputs],
             }
@@ -1509,6 +1518,8 @@ class QuotationBuilderService:
         row.commercial_unit_price_with_tax = ZERO
         row.currency_code_snapshot = preview.currency_code_snapshot
         row.currency_symbol_snapshot = preview.currency_symbol_snapshot
+        row.exchange_rate_snapshot = preview.exchange_rate_snapshot
+        row.exchange_rate_source_snapshot = preview.exchange_rate_source_snapshot
         row.tax_percentage_snapshot = preview.tax_percentage_snapshot
         row.tax_rate_source_snapshot = preview.tax_rate_source_snapshot
         row.tax_amount = preview.tax_amount
@@ -2041,6 +2052,8 @@ class QuotationBuilderService:
             total_with_tax=row.total_with_tax,
             currency_code_snapshot=row.currency_code_snapshot,
             currency_symbol_snapshot=row.currency_symbol_snapshot,
+            exchange_rate_snapshot=row.exchange_rate_snapshot,
+            exchange_rate_source_snapshot=row.exchange_rate_source_snapshot,
             warnings=_output_warnings(row.calculation_warnings),
             complete=complete,
             next_step=next_step,

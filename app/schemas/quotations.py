@@ -433,7 +433,42 @@ class QuotationSummaryOut(_Out):
     #: el mismo pedido vale dos importes. Los tres campos anteriores se
     #: conservan para no romper contratos, pero el que se muestra es este.
     total: Decimal = Decimal(0)
+    #: Fase 009F. La moneda de CADA fila. Sin esto el listado tiene que asumir
+    #: una moneda global, y una cotizacion en dolares aparece encabezada por
+    #: `S/` con un numero que no es el que se factura.
+    currency_code_snapshot: str = "PEN"
+    currency_symbol_snapshot: str = "S/"
+    exchange_rate_snapshot: Decimal | None = None
     created_at: datetime
+
+
+class QuotationCurrencyTotal(_Out):
+    """Lo cotizado en UNA moneda. Nunca se mezcla con otra."""
+
+    currency_code: str
+    currency_symbol: str
+    #: Suma de los totales con IGV de las cotizaciones de esa moneda.
+    total: Decimal = Decimal(0)
+    quotation_count: int = 0
+
+
+class QuotationTotalsOut(_Out):
+    """Totales cotizados, separados por moneda.
+
+    Existe porque el tablero sumaba todas las cotizaciones en una sola cifra y
+    la encabezaba con `S/`. Mientras todo estaba en soles el resultado era
+    correcto por accidente; con dolares en la misma lista, sumar soles y
+    dolares da un numero impecable aritmeticamente e inutil financieramente.
+
+    Convertir a una moneda base para el tablero exigiria decidir con QUE tasa
+    —¿la del dia?, ¿la de cada cotizacion?— y esa es una decision de negocio
+    que nadie ha tomado. Separar no la necesita.
+
+    La suma vive aqui y no en el navegador porque `parseFloat` sobre importes
+    en cadena pierde centimos: es `Decimal` de punta a punta.
+    """
+
+    totals: list[QuotationCurrencyTotal] = Field(default_factory=list)
 
 
 class QuotationPage(_Out):
