@@ -1729,6 +1729,13 @@ class QuotationBuilderService:
             raise QuotationBuilderIncompleteError(details=[{"warnings": recalculated.warnings}])
         row.status = QuotationStatus.CONFIRMED
         row.confirmed_at = datetime.now(UTC)
+        # Fase 009G. La vigencia se congela aqui y solo aqui: es el unico
+        # instante en que existe la cotizacion confirmada y todavia se sabe que
+        # decia la configuracion. Leerla al generar el PDF hacia que cambiar el
+        # ajuste moviera la vigencia de documentos ya entregados.
+        row.validity_days_snapshot = (
+            await self._quotations.commercial_settings()
+        ).quote_validity_days
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
         self._audit.record_action(

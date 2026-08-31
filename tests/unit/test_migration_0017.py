@@ -91,11 +91,18 @@ def test_migration_0017_downgrade_undoes_everything() -> None:
     assert "currency_code_snapshot" not in downgrade
 
 
-def test_alembic_single_head_is_0017() -> None:
-    """Una sola cabeza: dos harian fallar `alembic upgrade head` en el deploy."""
+def test_0017_sigue_estando_en_el_camino_a_la_cabeza() -> None:
+    """0017 se alcanza desde la cabeza actual, sea cual sea.
+
+    Antes esta prueba exigia que la cabeza FUERA 0017, y la migracion siguiente
+    la rompia sin que nada estuviera mal. Lo que 0017 necesita garantizar es que
+    su revision sigue formando parte de la cadena; que haya una sola cabeza lo
+    afirma la prueba de la migracion mas nueva, que es quien puede saberlo.
+    """
     alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(alembic_cfg)
-    assert script.get_heads() == ["0017"]
+    revisiones = {revision.revision for revision in script.walk_revisions()}
+    assert "0017" in revisiones
 
 
 def test_el_harness_cubre_todas_las_columnas_obligatorias() -> None:

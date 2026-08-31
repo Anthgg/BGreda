@@ -30,6 +30,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.precision import calculation_numeric, percentage_numeric, quantity_numeric
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
+from app.models.settings import MAX_VALIDITY_DAYS
 
 
 class TechniqueFormulaType(StrEnum):
@@ -308,6 +309,15 @@ class Quotation(Base, TimestampMixin):
     #: para que el dia que haya una fuente automatica se pueda distinguir sin
     #: adivinar mirando fechas.
     exchange_rate_source_snapshot: Mapped[str | None] = mapped_column(String(16))
+    #: Fase 009G. Dias de vigencia congelados al confirmar. Antes el PDF leia
+    #: `commercial_settings.quote_validity_days` al generarse, de modo que
+    #: cambiar el ajuste movia la vigencia de documentos ya entregados.
+    #:
+    #: Nulo en los borradores, que si pueden mostrar el ajuste vigente, y nulo
+    #: tambien en las confirmadas anteriores a 009G: no hay rastro de cuanto
+    #: valia el ajuste entonces, y escribir el de hoy seria inventarles una
+    #: vigencia. Ante NULL el documento omite la linea en vez de suponer.
+    validity_days_snapshot: Mapped[int | None] = mapped_column(Integer)
 
     #: Gramos de receta que lleva **una** pieza. Nulo mientras no se indique:
     #: no hay valor por omision, porque suponer uno daria un costo de materiales
@@ -379,6 +389,15 @@ class Quotation(Base, TimestampMixin):
             " AND exchange_rate_source_snapshot IS NOT NULL"
             " AND exchange_rate_source_snapshot = 'MANUAL')",
             name="exchange_rate_coherence",
+        ),
+        # Fase 009G: el mismo rango que acepta el ajuste del que se copia. Una
+        # copia mas permisiva que su origen admitiria plazos que la pantalla de
+        # configuracion nunca dejaria escribir.
+        CheckConstraint(
+            f"validity_days_snapshot IS NULL"
+            f" OR (validity_days_snapshot > 0"
+            f" AND validity_days_snapshot <= {MAX_VALIDITY_DAYS})",
+            name="validity_days_snapshot_range",
         ),
         Index("ix_quotations_created_at", "created_at"),
     )

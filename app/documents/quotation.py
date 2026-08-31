@@ -228,11 +228,17 @@ def _build_company_doc_info(
 
 def _build_conditions_doc(
     commercial_settings: CommercialSettings | None,
+    validity_days: int | None,
 ) -> CommercialDocConditions:
+    """Las condiciones del documento, con la vigencia que le corresponda.
+
+    `validity_days` llega decidido por quien construye el documento, y no se
+    vuelve a mirar la configuracion aqui: una confirmada trae su plazo
+    congelado y un borrador el vigente. Resolverlo dentro haria imposible que
+    los dos casos convivieran sin que uno pisara al otro.
+    """
     return CommercialDocConditions(
-        validity_text=f"Cotización válida por {commercial_settings.quote_validity_days} días."
-        if (commercial_settings and commercial_settings.quote_validity_days)
-        else None,
+        validity_text=f"Cotización válida por {validity_days} días." if validity_days else None,
         general_conditions=commercial_settings.general_conditions if commercial_settings else None,
         payment_notes=commercial_settings.payment_notes if commercial_settings else None,
         document_footer=commercial_settings.document_footer if commercial_settings else None,
@@ -297,10 +303,13 @@ def build_quotation_pdf_document(
     emission_date_val = quotation.confirmed_at or quotation.created_at
     emission_date_str = format_date_display(emission_date_val)
 
-    validity_date_str = None
-    if commercial_settings and commercial_settings.quote_validity_days and emission_date_val:
-        validity_days = commercial_settings.quote_validity_days
-        validity_date_str = f"{validity_days} días calendario"
+    # Fase 009G. La vigencia sale del snapshot congelado al confirmar, nunca de
+    # la configuracion viva: este documento ya se entrego, y cambiar hoy el
+    # ajuste no puede reescribir lo que decia. Sin snapshot —las confirmadas
+    # anteriores a 009G— no se muestra vigencia: no hay registro de cual era, y
+    # poner la de hoy seria inventarle un dato contractual.
+    validity_days = quotation.validity_days_snapshot
+    validity_date_str = f"{validity_days} días calendario" if validity_days else None
 
     document_header = DocumentHeaderInfo(
         title="COTIZACIÓN",
@@ -405,7 +414,7 @@ def build_quotation_pdf_document(
     )
 
     # 6. Condiciones comerciales
-    conditions_doc = _build_conditions_doc(commercial_settings)
+    conditions_doc = _build_conditions_doc(commercial_settings, validity_days)
 
     # 7. Cuentas bancarias comerciales
     bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
@@ -485,10 +494,11 @@ def build_draft_quotation_pdf_document(
     emission_date_val = quotation_out.updated_at or quotation_out.created_at or datetime.now()
     emission_date_str = format_date_display(emission_date_val)
 
-    validity_date_str = None
-    if commercial_settings and commercial_settings.quote_validity_days:
-        validity_days = commercial_settings.quote_validity_days
-        validity_date_str = f"{validity_days} días calendario"
+    # Un borrador no tiene vigencia congelada porque todavia no se ha emitido
+    # nada: aqui la configuracion vigente es la respuesta correcta, y el numero
+    # que se ve es el que quedara guardado si se confirma hoy.
+    validity_days = commercial_settings.quote_validity_days if commercial_settings else None
+    validity_date_str = f"{validity_days} días calendario" if validity_days else None
 
     document_header = DocumentHeaderInfo(
         title="COTIZACIÓN",
@@ -552,7 +562,7 @@ def build_draft_quotation_pdf_document(
     )
 
     # 6. Condiciones comerciales
-    conditions_doc = _build_conditions_doc(commercial_settings)
+    conditions_doc = _build_conditions_doc(commercial_settings, validity_days)
 
     # 7. Cuentas bancarias comerciales
     bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
