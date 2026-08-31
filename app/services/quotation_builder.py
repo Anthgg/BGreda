@@ -236,6 +236,16 @@ EXCHANGE_RATE_SOURCE = "MANUAL"
 CURRENCY_SYMBOLS = {"PEN": "S/", "USD": "US$"}
 
 
+def _supported_currency(code: str | None) -> Literal["PEN", "USD"] | None:
+    """Estrecha un codigo guardado a las monedas que 009F admite.
+
+    Devuelve `None` —y no el codigo tal cual— cuando no es una de las dos:
+    asi el borrador reconstruido cae al default en vez de arrastrar una moneda
+    que el motor rechazaria despues con un error mucho menos claro.
+    """
+    return code if code in ("PEN", "USD") else None  # type: ignore[return-value]
+
+
 def _resolve_currency(
     payload: QuotationBuilderDraftIn, settings: CommercialSettings
 ) -> tuple[str, Decimal | None]:
@@ -1774,6 +1784,15 @@ class QuotationBuilderService:
                 ),
                 None,
             ),
+            # Fase 009F: la moneda y la tasa tambien vuelven como ENTRADA.
+            #
+            # Al CONFIRMAR importa porque el recalculo de deriva tiene que
+            # usar la tasa guardada: si volviera al default, la huella no
+            # coincidiria y confirmar una cotizacion en dolares seria
+            # imposible. Al DUPLICAR importa porque el borrador nuevo hereda
+            # la intencion —misma moneda, misma tasa— y desde ahi es editable.
+            currency_code=_supported_currency(row.currency_code_snapshot),
+            exchange_rate=row.exchange_rate_snapshot,
             items=[
                 QuotationBuilderItemIn(
                     product_id=item.product_id,

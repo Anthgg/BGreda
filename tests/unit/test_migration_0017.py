@@ -96,3 +96,30 @@ def test_alembic_single_head_is_0017() -> None:
     alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(alembic_cfg)
     assert script.get_heads() == ["0017"]
+
+
+def test_el_harness_cubre_todas_las_columnas_obligatorias() -> None:
+    """Si mañana aparece otra columna NOT NULL, esta prueba la nombra.
+
+    Vive en las pruebas unitarias y no junto al harness a proposito: alli se
+    saltaria sin PostgreSQL, que es justo cuando mas util resulta. No necesita
+    base de datos, solo el modelo.
+
+    Sin ella el sintoma es un `IntegrityError` generico dentro de otra prueba,
+    que es como apareció `commercial_factor_default_snapshot` y luego
+    `source_fingerprint`: de una en una y despues del hecho.
+    """
+    from app.models.quotations import Quotation
+    from tests.db.test_migration_0017_runs import COLUMNAS_PROPIAS, _columnas_obligatorias
+
+    cubiertas = set(COLUMNAS_PROPIAS) | set(_columnas_obligatorias())
+    requeridas = {
+        columna.name
+        for columna in Quotation.__table__.columns
+        if not columna.primary_key
+        and not columna.nullable
+        and columna.server_default is None
+        and columna.default is None
+    }
+    faltantes = sorted(requeridas - cubiertas)
+    assert not faltantes, f"MISSING_REQUIRED_INSERT_COLUMNS: {faltantes}"

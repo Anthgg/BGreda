@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.db.session import normalize_database_url
+from app.models.quotations import Quotation
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "")
 #: Base propia, distinta de las de 0015 y 0016, para que puedan correr a la vez.
@@ -115,16 +116,70 @@ async def _current(engine: AsyncEngine) -> str | None:
         return await connection.scalar(text("SELECT version_num FROM alembic_version"))
 
 
-#: Columnas NOT NULL sin default de `quotations`, derivadas del modelo y no
-#: adivinadas: `code`, los dos factores comerciales y la huella de origen.
-#: `INSERT ... DEFAULT VALUES` no serviria, y enumerar de memoria fallaba una
-#: columna cada vez.
-NUEVA_COTIZACION = (
-    "INSERT INTO quotations (code, status, workflow, commercial_factor, "
-    "commercial_factor_default_snapshot, source_fingerprint, "
-    "currency_code_snapshot, exchange_rate_snapshot, exchange_rate_source_snapshot) "
-    "VALUES (:code, 'DRAFT', 'COTIZADOR', 1, 1, 'x', :currency, :rate, :source)"
+#: Relleno para las columnas obligatorias que esta prueba no controla. Se
+#: enumera por TIPO y no por nombre, para que una columna nueva se cubra sola.
+RELLENO_POR_TIPO: dict[str, str] = {
+    "NUMERIC": "1",
+    "VARCHAR": "'x'",
+    "TEXT": "'x'",
+    "INTEGER": "1",
+    "BOOLEAN": "false",
+}
+
+#: Lo que esta prueba SI decide: el codigo y el trio de moneda.
+COLUMNAS_PROPIAS = (
+    "code",
+    "status",
+    "workflow",
+    "currency_code_snapshot",
+    "exchange_rate_snapshot",
+    "exchange_rate_source_snapshot",
 )
+
+
+def _columnas_obligatorias() -> dict[str, str]:
+    """Columnas NOT NULL sin default, sacadas del modelo y no de la memoria.
+
+    Enumerarlas a mano fallaba una columna cada vez, y el sintoma era un
+    `IntegrityError` generico que aparecia DESPUES de que la prueba creyera
+    estar probando otra cosa. Derivarlas hace que una columna nueva se cubra
+    sola, y `test_el_harness_cubre_todas_las_columnas_obligatorias` avisa por
+    su nombre si algun dia no se puede.
+    """
+    obligatorias: dict[str, str] = {}
+    for columna in Quotation.__table__.columns:
+        if columna.primary_key or columna.nullable:
+            continue
+        if columna.server_default is not None or columna.default is not None:
+            continue
+        if columna.name in COLUMNAS_PROPIAS:
+            continue
+        familia = str(columna.type).split("(")[0].upper()
+        obligatorias[columna.name] = RELLENO_POR_TIPO.get(familia, "'x'")
+    return obligatorias
+
+
+def _insert_sql() -> str:
+    relleno = _columnas_obligatorias()
+    columnas = [*COLUMNAS_PROPIAS, *relleno]
+    valores = [
+        ":code",
+        "'DRAFT'",
+        "'COTIZADOR'",
+        ":currency",
+        ":rate",
+        ":source",
+        *relleno.values(),
+    ]
+    # S608: los nombres salen del modelo y los valores son literales de esta
+    # prueba. No hay entrada de usuario.
+    return (
+        f"INSERT INTO quotations ({', '.join(columnas)}) "  # noqa: S608
+        f"VALUES ({', '.join(valores)})"
+    )
+
+
+NUEVA_COTIZACION = _insert_sql()
 
 
 async def _insertar(
@@ -267,14 +322,12 @@ async def test_las_cotizaciones_historicas_siguen_siendo_validas(
     en vez de dejar datos que ya no cumplen su propio contrato.
     """
     _upgrade("0016")
+    relleno = _columnas_obligatorias()
+    columnas = ", ".join(["code", "status", "workflow", "currency_code_snapshot", *relleno])
+    valores = ", ".join(["'CTZ-VIEJA'", "'CONFIRMED'", "'LEGACY'", "'PEN'", *relleno.values()])
     async with migration_engine.begin() as connection:
         await connection.execute(
-            text(
-                "INSERT INTO quotations (code, status, workflow, commercial_factor, "
-                "commercial_factor_default_snapshot, source_fingerprint, "
-                "currency_code_snapshot) "
-                "VALUES ('CTZ-VIEJA', 'CONFIRMED', 'LEGACY', 1, 1, 'x', 'PEN')"
-            )
+            text(f"INSERT INTO quotations ({columnas}) VALUES ({valores})")  # noqa: S608
         )
 
     _upgrade("0017")
