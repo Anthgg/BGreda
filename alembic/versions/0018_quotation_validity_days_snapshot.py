@@ -16,13 +16,18 @@ IGV y su procedencia. Se guarda el numero de dias, no una fecha: el documento
 nunca mostro un «valida hasta», y calcular uno ahora seria inventar contenido
 contractual que nadie acordo.
 
-Nullable y sin backfill, deliberadamente. No existe ningun rastro de que valia
-el ajuste cuando se confirmaron las cotizaciones antiguas: `PUT
-/settings/commercial` no escribe en `audit_events` (COMMERCIAL_SETTINGS_AUDIT_GAP,
-pendiente y fuera del alcance de esta migracion). Rellenarlas con el valor de
-hoy no recuperaria su vigencia; le pondria a un documento historico un dato
-inventado con aspecto de dato real. NULL dice la verdad —no se capturo— y el
-PDF ya sabe callarse cuando no hay vigencia que mostrar.
+Nullable y sin backfill. Las confirmadas anteriores quedan en NULL, y el PDF ya
+sabe callarse cuando no hay vigencia que mostrar: dice «no se capturo», que es
+la verdad, en vez de afirmar un plazo que esta fila nunca guardo.
+
+Conviene dejar dicho lo que NO justifica esa decision, porque a primera vista
+lo parece: si existe rastro historico. `update_commercial` audita sus cambios
+(app/services/settings.py), y en produccion `quote_validity_days` tiene un
+unico evento —de nulo a 20, el 2026-08-22— y ninguno mas. Las 17 confirmadas
+son todas posteriores, asi que su plazo se podria DEDUCIR de evidencia real, no
+inventar. Aqui no se hace porque el backfill no esta autorizado, no porque sea
+imposible. Si algun dia se autoriza, la fuente es esa tabla de auditoria y
+nunca el valor que la configuracion tenga ese dia.
 """
 
 from __future__ import annotations

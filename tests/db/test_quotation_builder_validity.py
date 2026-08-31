@@ -16,9 +16,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.db.test_quotation_builder_api import BUILDER, _complete_payload, head
-
-COMMERCIAL = "/api/v1/settings/commercial"
+from tests.db.test_quotation_builder_api import (
+    BUILDER,
+    _complete_payload,
+    cambiar_configuracion,
+    head,
+)
 
 
 async def _snapshot(db_session: AsyncSession, quotation_id: int) -> int | None:
@@ -30,18 +33,9 @@ async def _snapshot(db_session: AsyncSession, quotation_id: int) -> int | None:
     return None if valor is None else int(valor)
 
 
-async def _fijar_vigencia(api: httpx.AsyncClient, csrf: str, dias: int) -> None:
-    actual = (await api.get(COMMERCIAL)).json()
-    respuesta = await api.put(
-        COMMERCIAL,
-        json={
-            **{k: v for k, v in actual.items() if k != "updated_at"},
-            "quote_validity_days": dias,
-            "expected_version": actual["version"],
-        },
-        headers=head(csrf),
-    )
-    assert respuesta.status_code == 200, respuesta.text
+async def _fijar_vigencia(api: httpx.AsyncClient, csrf: str, dias: int | None) -> None:
+    guardada = await cambiar_configuracion(api, csrf, quote_validity_days=dias)
+    assert guardada["quote_validity_days"] == dias, "la configuracion no llego a cambiar"
 
 
 async def _confirmar(api: httpx.AsyncClient, csrf: str, borrador: dict[str, Any]) -> None:
@@ -154,7 +148,7 @@ async def test_sin_vigencia_configurada_la_confirmada_queda_en_nulo(
     Un valor supuesto aqui seria indistinguible de uno acordado, que es
     exactamente lo que 009G prohibe.
     """
-    await _fijar_vigencia(api, admin_csrf, None)  # type: ignore[arg-type]
+    await _fijar_vigencia(api, admin_csrf, None)
     payload, _ = await _complete_payload(api, admin_csrf, db_session)
     creada = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text

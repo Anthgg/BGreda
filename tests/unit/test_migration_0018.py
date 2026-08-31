@@ -42,11 +42,13 @@ def test_migration_0018_limita_el_rango_como_su_origen() -> None:
 def test_migration_0018_no_hace_backfill() -> None:
     """La prohibicion central de 009G, escrita como prueba.
 
-    No existe ningun registro de cuanto valia el ajuste cuando se confirmaron
-    las cotizaciones antiguas: `PUT /settings/commercial` no escribe en
-    `audit_events` (COMMERCIAL_SETTINGS_AUDIT_GAP). Rellenarlas con el valor de
-    hoy no recuperaria su vigencia, le pondria a un documento historico un dato
-    inventado que despues nadie sabria distinguir de uno real.
+    Rellenar las confirmadas antiguas con el valor que la configuracion tenga
+    hoy no recuperaria su vigencia: le pondria a un documento ya entregado un
+    plazo inventado que despues nadie sabria distinguir de uno acordado.
+
+    Que exista rastro en `audit_events` no cambia esta prueba. Si algun dia se
+    autoriza rellenarlas, sera desde ahi y con una migracion propia, no
+    colandolo en esta.
     """
     content = MIGRATION_FILE.read_text(encoding="utf-8")
     upgrade = content.split("def upgrade()")[1].split("def downgrade()")[0]

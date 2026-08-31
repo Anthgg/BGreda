@@ -18,7 +18,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.db.test_quotation_builder_api import BUILDER, _complete_payload, head
+from tests.db.test_quotation_builder_api import (
+    BUILDER,
+    _complete_payload,
+    cambiar_configuracion,
+    head,
+)
 
 COMMERCIAL = "/api/v1/settings/commercial"
 TASA = "3.75"
@@ -299,16 +304,10 @@ async def test_una_confirmada_en_dolares_no_se_mueve(
     assert congelada["currency_code_snapshot"] == "USD"
     assert Decimal(congelada["exchange_rate_snapshot"]) == Decimal(TASA)
 
-    actual = await api.get(COMMERCIAL)
-    await api.put(
-        COMMERCIAL,
-        json={
-            **{k: v for k, v in actual.json().items() if k != "updated_at"},
-            "tax_percent": "21",
-            "expected_version": actual.json()["version"],
-        },
-        headers=head(admin_csrf),
-    )
+    # Antes este bloque devolvia al PUT lo que dio el GET, recibia un 422 que
+    # nadie miraba, y la configuracion nunca llegaba a cambiar: la prueba de
+    # inmutabilidad pasaba sin haber puesto nada a prueba.
+    await cambiar_configuracion(api, admin_csrf, tax_percent="21")
 
     despues = await api.get(f"{BUILDER}/{borrador['id']}")
     assert despues.json()["total_with_tax"] == congelada["total_with_tax"]
@@ -537,16 +536,10 @@ async def test_una_confirmada_conserva_su_traza_aunque_cambie_la_configuracion(
     assert confirmada.status_code == 200, confirmada.text
     antes = await _plan_guardado(db_session, borrador["id"])
 
-    actual = await api.get(COMMERCIAL)
-    await api.put(
-        COMMERCIAL,
-        json={
-            **{k: v for k, v in actual.json().items() if k != "updated_at"},
-            "tax_percent": "21",
-            "expected_version": actual.json()["version"],
-        },
-        headers=head(admin_csrf),
-    )
+    # Antes este bloque devolvia al PUT lo que dio el GET, recibia un 422 que
+    # nadie miraba, y la configuracion nunca llegaba a cambiar: la prueba de
+    # inmutabilidad pasaba sin haber puesto nada a prueba.
+    await cambiar_configuracion(api, admin_csrf, tax_percent="21")
 
     despues = await _plan_guardado(db_session, borrador["id"])
     assert despues == antes, "la configuración no puede mover un precio confirmado"

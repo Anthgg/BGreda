@@ -21,10 +21,38 @@ from tests.db.test_quotations_api import _finished_product_and_recipe
 BUILDER = "/api/v1/quotation-builder"
 PARTNERS = "/api/v1/partners"
 QUOTATIONS = "/api/v1/quotations"
+COMMERCIAL = "/api/v1/settings/commercial"
 
 
 def head(csrf: str) -> dict[str, str]:
     return {"X-CSRF-Token": csrf}
+
+
+async def cambiar_configuracion(api: httpx.AsyncClient, csrf: str, **campos: Any) -> dict[str, Any]:
+    """Cambia la configuracion comercial y COMPRUEBA que el cambio entro.
+
+    Existe porque devolverle al PUT lo que dio el GET no funciona y fallaba en
+    silencio: la salida trae `bank_accounts` y la entrada espera `version`, no
+    `expected_version`, asi que el servidor respondia 422 y la prueba que no
+    miraba el codigo seguia en verde sin haber cambiado nada. Una prueba de
+    inmutabilidad que nunca llega a mover la configuracion no prueba nada.
+
+    El PUT reemplaza: los campos que no se mandan se quedan en nulo. Por eso se
+    reenvia el estado actual completo, filtrado a lo que el esquema admite.
+    """
+    actual = (await api.get(COMMERCIAL)).json()
+    admitidos = {
+        clave: valor
+        for clave, valor in actual.items()
+        if clave not in {"updated_at", "version", "bank_accounts"}
+    }
+    respuesta = await api.put(
+        COMMERCIAL,
+        json={**admitidos, **campos, "version": actual["version"]},
+        headers=head(csrf),
+    )
+    assert respuesta.status_code == 200, respuesta.text
+    return dict(respuesta.json())
 
 
 async def _customer(api: httpx.AsyncClient, csrf: str) -> dict[str, Any]:

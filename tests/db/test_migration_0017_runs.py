@@ -354,10 +354,22 @@ async def test_las_cotizaciones_historicas_siguen_siendo_validas(
 
 @pytest.mark.asyncio
 async def test_0017_no_deja_una_sola_cabeza_rota(migration_engine: AsyncEngine) -> None:
-    """`alembic upgrade head` tiene que llegar sola a 0017."""
-    _upgrade("head")
+    """`alembic upgrade head` tiene que pasar por 0017 y llegar a una cabeza.
+
+    Antes esta prueba exigia que la cabeza FUERA 0017, y la siguiente migracion
+    la rompia sin que nada estuviera mal —es la tercera vez que ese patron
+    cuesta un CI en rojo—. Lo que 0017 debe garantizar es que sigue en el camino
+    y que ese camino termina en UNA sola cabeza; cual sea la ultima lo afirma la
+    prueba de la migracion mas nueva, que es la unica que puede saberlo.
+    """
+    _upgrade("0017")
     assert await _current(migration_engine) == "0017"
+
+    _upgrade("head")
     heads = _alembic("heads")
     assert heads.returncode == 0, heads.stderr
     assert heads.stdout.count("(head)") == 1, heads.stdout
-    assert "0017" in heads.stdout
+
+    historia = _alembic("history")
+    assert historia.returncode == 0, historia.stderr
+    assert "0017" in historia.stdout
