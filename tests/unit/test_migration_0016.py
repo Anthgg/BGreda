@@ -44,8 +44,15 @@ def test_migration_0016_downgrade_undoes_everything() -> None:
     assert 'op.drop_column("commercial_settings", "production_factor_default")' in downgrade
 
 
-def test_alembic_single_head_is_0016() -> None:
-    """Una sola cabeza: dos harian fallar `alembic upgrade head` en el deploy."""
+def test_0016_sigue_en_la_historia() -> None:
+    """0016 tiene que seguir siendo alcanzable desde la cabeza actual.
+
+    Antes esta prueba fijaba la cabeza en 0016, asi que cada fase nueva la
+    rompia y habia que reeditarla. Lo que 0016 puede garantizar es que su
+    revision sigue en la cadena; que la cabeza sea unica lo comprueba la
+    prueba de la migracion mas reciente.
+    """
     alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(alembic_cfg)
-    assert script.get_heads() == ["0016"]
+    revisiones = {revision.revision for revision in script.walk_revisions()}
+    assert "0016" in revisiones

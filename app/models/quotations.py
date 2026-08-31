@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -298,6 +299,15 @@ class Quotation(Base, TimestampMixin):
     currency_symbol_snapshot: Mapped[str] = mapped_column(
         String(8), nullable=False, default="S/", server_default=text("'S/'")
     )
+    #: Fase 009F. Cuantos soles vale UN dolar: `1 USD = X PEN`. El neto en
+    #: dolares se obtiene DIVIDIENDO por esta tasa, nunca multiplicando.
+    #: Nulo cuando se emite en PEN, porque ahi no hubo conversion: guardar un
+    #: `1` haria indistinguible «no aplica» de «alguien escribio un uno».
+    exchange_rate_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    #: De donde salio la tasa. En 009F solo existe `MANUAL`; la columna esta
+    #: para que el dia que haya una fuente automatica se pueda distinguir sin
+    #: adivinar mirando fechas.
+    exchange_rate_source_snapshot: Mapped[str | None] = mapped_column(String(16))
 
     #: Gramos de receta que lleva **una** pieza. Nulo mientras no se indique:
     #: no hay valor por omision, porque suponer uno daria un costo de materiales
@@ -348,6 +358,25 @@ class Quotation(Base, TimestampMixin):
         CheckConstraint("commercial_factor > 0", name="commercial_factor_positive"),
         CheckConstraint("status IN ('DRAFT', 'CONFIRMED', 'CANCELLED')", name="status_allowed"),
         CheckConstraint("workflow IN ('LEGACY', 'COTIZADOR')", name="workflow_allowed"),
+        # Fase 009F: dos monedas, no un mercado. Sin este CHECK, el de
+        # coherencia dejaria pasar EUR siempre que trajera tasa.
+        CheckConstraint("currency_code_snapshot IN ('PEN', 'USD')", name="currency_supported"),
+        CheckConstraint(
+            "exchange_rate_snapshot IS NULL OR exchange_rate_snapshot > 0",
+            name="exchange_rate_positive",
+        ),
+        # Los dos unicos estados con sentido, impuestos por el esquema y no
+        # solo por Pydantic: PEN sin tasa, o USD con tasa manual positiva.
+        CheckConstraint(
+            "(currency_code_snapshot = 'PEN'"
+            " AND exchange_rate_snapshot IS NULL"
+            " AND exchange_rate_source_snapshot IS NULL)"
+            " OR (currency_code_snapshot = 'USD'"
+            " AND exchange_rate_snapshot IS NOT NULL"
+            " AND exchange_rate_snapshot > 0"
+            " AND exchange_rate_source_snapshot = 'MANUAL')",
+            name="exchange_rate_coherence",
+        ),
         Index("ix_quotations_created_at", "created_at"),
     )
 
