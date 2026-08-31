@@ -437,6 +437,7 @@ def _stored_commercial_plan(snapshot: dict[str, Any]) -> dict[str, Any]:
         return {}
     campos = (
         "production_factor",
+        "raw_net_unit_base",
         "technical_cost",
         "factored_cost",
         "fixed_cost_allocation",
@@ -454,7 +455,16 @@ def _stored_commercial_plan(snapshot: dict[str, Any]) -> dict[str, Any]:
         "line_total_tax",
         "line_total_gross",
     )
-    return {campo: _snapshot_decimal(plan.get(campo)) for campo in campos}
+    guardado: dict[str, Any] = {campo: _snapshot_decimal(plan.get(campo)) for campo in campos}
+    # La moneda y su procedencia son texto, no importes: no pasan por
+    # `_snapshot_decimal`. La tasa si, porque es un Decimal.
+    moneda = plan.get("currency")
+    if isinstance(moneda, str):
+        guardado["currency_code_snapshot"] = moneda
+    tasa = plan.get("exchange_rate")
+    if tasa is not None:
+        guardado["exchange_rate_snapshot"] = _snapshot_decimal(tasa)
+    return guardado
 
 
 def _stored_glaze_plan(snapshot: dict[str, Any]) -> GlazePlanOut | None:
@@ -1573,6 +1583,19 @@ class QuotationBuilderService:
                             # despues el IGV, el factor o los costos fijos no
                             # puede mover una cotizacion ya cerrada.
                             "commercial_plan": {
+                                # Fase 009F. La moneda y la tasa se copian aqui
+                                # como TRAZA, no como autoridad: la autoridad
+                                # sigue siendo la cabecera, y sigue habiendo una
+                                # sola tasa por cotizacion. Sin esta copia, una
+                                # linea confirmada no puede explicar de donde
+                                # salio su precio sin reconstruirlo.
+                                "currency": item.currency_code_snapshot,
+                                "exchange_rate": item.exchange_rate_snapshot,
+                                "exchange_rate_source": (
+                                    EXCHANGE_RATE_SOURCE
+                                    if item.exchange_rate_snapshot is not None
+                                    else None
+                                ),
                                 "production_factor": item.production_factor,
                                 "rounding_step": item.rounding_step,
                                 "rounding_mode": "CEILING",
@@ -1583,6 +1606,10 @@ class QuotationBuilderService:
                                 "commercial_base_unit_cost": item.commercial_base_unit_cost,
                                 "markup_percent": item.markup_percent,
                                 "tax_percent": item.tax_percentage_snapshot,
+                                # El neto ANTES de convertir, siempre en PEN.
+                                # Es lo que permite explicar el precio en
+                                # dolares sin rehacer la cuenta.
+                                "raw_net_unit_base": item.raw_net_unit_base,
                                 "raw_net_unit": item.raw_net_unit,
                                 "raw_tax_unit": item.raw_tax_unit,
                                 "raw_gross_unit": item.raw_gross_unit,

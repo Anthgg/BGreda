@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.db.test_quotation_builder_api import BUILDER, _complete_payload, head
@@ -408,3 +409,171 @@ async def test_el_detalle_lee_la_moneda_de_la_fila_y_no_de_la_configuracion(
     assert data["currency_code_snapshot"] == "USD"
     assert Decimal(data["exchange_rate_snapshot"]) == Decimal(TASA)
     assert data["exchange_rate_source_snapshot"] == "MANUAL"
+
+
+# ---------------------------------------------------------------------------
+# Traza del plan comercial por línea
+# ---------------------------------------------------------------------------
+async def _plan_guardado(db_session: AsyncSession, quotation_id: int) -> list[dict[str, Any]]:
+    """Lee el `commercial_plan` tal y como quedó en la base."""
+    filas = (
+        (
+            await db_session.execute(
+                text(
+                    "SELECT sort_order, production_snapshot FROM quotation_items "
+                    "WHERE quotation_id = :qid ORDER BY sort_order"
+                ),
+                {"qid": quotation_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [(fila["production_snapshot"] or {}).get("commercial_plan") or {} for fila in filas]
+
+
+@pytest.mark.asyncio
+async def test_el_plan_guardado_conserva_moneda_tasa_y_neto_base(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_PLAN_*_PERSISTED.
+
+    El motor calculaba bien pero el plan guardado no registraba con qué tasa:
+    una línea confirmada no podía explicar su propio precio sin reconstruirlo.
+    La cabecera sigue siendo la autoridad; esto es la traza que la acompaña.
+    """
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
+    creada = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+
+    planes = await _plan_guardado(db_session, creada.json()["id"])
+    assert planes, "no se guardó ningún plan"
+    for plan in planes:
+        assert plan["currency"] == "USD"
+        assert Decimal(str(plan["exchange_rate"])) == Decimal(TASA)
+        assert plan["exchange_rate_source"] == "MANUAL"
+        assert plan["raw_net_unit_base"] is not None
+        # Y la traza cuadra: el neto en dólares sale de dividir el de soles.
+        assert Decimal(str(plan["raw_net_unit"])) == (
+            Decimal(str(plan["raw_net_unit_base"])) / Decimal(TASA)
+        )
+
+
+@pytest.mark.asyncio
+async def test_el_plan_en_soles_no_inventa_una_tasa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_PLAN_PEN_CANONICAL: PEN no lleva tasa ni fuente."""
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
+    creada = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+
+    for plan in await _plan_guardado(db_session, creada.json()["id"]):
+        assert plan["currency"] == "PEN"
+        assert plan["exchange_rate"] is None
+        assert plan["exchange_rate_source"] is None
+        # Sin conversión, el neto base y el de emisión coinciden.
+        assert Decimal(str(plan["raw_net_unit_base"])) == Decimal(str(plan["raw_net_unit"]))
+
+
+@pytest.mark.asyncio
+async def test_la_linea_no_puede_llevar_una_tasa_distinta_de_la_cabecera(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_PLAN_HEADER_*_MATCH y ONE_EXCHANGE_RATE_PER_QUOTATION.
+
+    Una línea a 3,31 con la cabecera a 3,75 daría un total que nadie puede
+    explicar. La copia es traza, no una segunda autoridad.
+    """
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
+    creada = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    cabecera = creada.json()
+
+    planes = await _plan_guardado(db_session, cabecera["id"])
+    assert len(planes) > 1, "hacen falta varias líneas para probar esto"
+    assert {plan["currency"] for plan in planes} == {cabecera["currency_code_snapshot"]}
+    assert {Decimal(str(plan["exchange_rate"])) for plan in planes} == {
+        Decimal(cabecera["exchange_rate_snapshot"])
+    }
+    assert {plan["exchange_rate_source"] for plan in planes} == {
+        cabecera["exchange_rate_source_snapshot"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_la_traza_sobrevive_a_guardar_y_reabrir(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_PLAN_SAVE_REOPEN."""
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
+    creada = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+
+    reabierta = await api.get(f"{BUILDER}/{creada.json()['id']}")
+    assert reabierta.status_code == 200
+    for linea in reabierta.json()["items"]:
+        assert linea["currency_code_snapshot"] == "USD"
+        assert Decimal(linea["exchange_rate_snapshot"]) == Decimal(TASA)
+        # El neto en soles es mayor que el de dólares: se dividió por 3,75.
+        assert Decimal(linea["raw_net_unit_base"]) > Decimal(linea["raw_net_unit"])
+
+
+@pytest.mark.asyncio
+async def test_una_confirmada_conserva_su_traza_aunque_cambie_la_configuracion(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CONFIRMED_COMMERCIAL_PLAN_IMMUTABLE."""
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
+    creada = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    borrador = creada.json()
+
+    confirmada = await api.post(
+        f"{BUILDER}/{borrador['id']}/confirm",
+        json={"expected_updated_at": borrador["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert confirmada.status_code == 200, confirmada.text
+    antes = await _plan_guardado(db_session, borrador["id"])
+
+    actual = await api.get(COMMERCIAL)
+    await api.put(
+        COMMERCIAL,
+        json={
+            **{k: v for k, v in actual.json().items() if k != "updated_at"},
+            "tax_percent": "21",
+            "expected_version": actual.json()["version"],
+        },
+        headers=head(admin_csrf),
+    )
+
+    despues = await _plan_guardado(db_session, borrador["id"])
+    assert despues == antes, "la configuración no puede mover un precio confirmado"
+
+
+@pytest.mark.asyncio
+async def test_duplicar_no_comparte_el_plan_con_el_original(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """DUPLICATE_COMMERCIAL_PLAN_NOT_SHARED."""
+    payload = _por_margen((await _complete_payload(api, admin_csrf, db_session))[0])
+    original = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
+    assert original.status_code == 201, original.text
+    origen = original.json()
+
+    copia = await api.post(f"{BUILDER}/{origen['id']}/duplicate", headers=head(admin_csrf))
+    assert copia.status_code == 200, copia.text
+    nueva = copia.json()
+
+    editada = await api.put(
+        f"{BUILDER}/{nueva['id']}",
+        json={**_usd(payload, "4.00"), "expected_updated_at": nueva["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert editada.status_code == 200, editada.text
+
+    planes_copia = await _plan_guardado(db_session, nueva["id"])
+    planes_origen = await _plan_guardado(db_session, origen["id"])
+    assert {Decimal(str(p["exchange_rate"])) for p in planes_copia} == {Decimal("4.00")}
+    assert {Decimal(str(p["exchange_rate"])) for p in planes_origen} == {Decimal(TASA)}
