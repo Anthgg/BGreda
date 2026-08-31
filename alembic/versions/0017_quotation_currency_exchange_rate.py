@@ -45,6 +45,11 @@ depends_on: str | Sequence[str] | None = None
 
 #: Los dos unicos estados con sentido. Se escribe una vez y se usa en el CHECK
 #: para que el esquema, y no solo Pydantic, sea quien los impone.
+#:
+#: El `IS NOT NULL` de la fuente NO sobra. En SQL, `NULL = 'MANUAL'` no es
+#: FALSE sino NULL, y un CHECK que evalua a NULL se da por cumplido: sin esa
+#: linea, una fila USD con tasa y sin fuente entraba tan campante. Lo mismo
+#: vale para la tasa, que ya lo lleva.
 COHERENCIA = """
     (
         currency_code_snapshot = 'PEN'
@@ -55,6 +60,7 @@ COHERENCIA = """
         currency_code_snapshot = 'USD'
         AND exchange_rate_snapshot IS NOT NULL
         AND exchange_rate_snapshot > 0
+        AND exchange_rate_source_snapshot IS NOT NULL
         AND exchange_rate_source_snapshot = 'MANUAL'
     )
 """

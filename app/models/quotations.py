@@ -374,6 +374,9 @@ class Quotation(Base, TimestampMixin):
             " OR (currency_code_snapshot = 'USD'"
             " AND exchange_rate_snapshot IS NOT NULL"
             " AND exchange_rate_snapshot > 0"
+            # `NULL = 'MANUAL'` da NULL, no FALSE, y un CHECK en NULL se da por
+            # cumplido: sin este IS NOT NULL la fila se colaba.
+            " AND exchange_rate_source_snapshot IS NOT NULL"
             " AND exchange_rate_source_snapshot = 'MANUAL')",
             name="exchange_rate_coherence",
         ),

@@ -48,6 +48,9 @@ def test_migration_0017_impone_los_dos_estados_validos() -> None:
     assert "currency_code_snapshot = 'USD'" in coherencia
     assert "exchange_rate_snapshot > 0" in coherencia
     assert "exchange_rate_source_snapshot = 'MANUAL'" in coherencia
+    # Sin este IS NOT NULL, `NULL = 'MANUAL'` evalua a NULL en vez de FALSE y
+    # el CHECK se da por cumplido: una fila USD con tasa y sin fuente entraba.
+    assert "exchange_rate_source_snapshot IS NOT NULL" in coherencia
 
 
 def test_migration_0017_no_toca_la_moneda_existente() -> None:
