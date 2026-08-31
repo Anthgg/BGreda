@@ -358,6 +358,11 @@ class QuotationCalculateOut(_Out):
     commercial_unit_price_with_tax: Decimal = Decimal(0)
     currency_code_snapshot: str = "PEN"
     currency_symbol_snapshot: str = "S/"
+    #: Fase 009F. La tasa CONGELADA de esta cotizacion. El detalle la muestra
+    #: desde aqui y nunca desde la configuracion vigente: una confirmada tiene
+    #: que explicarse con la tasa que se uso, no con la de hoy.
+    exchange_rate_snapshot: Decimal | None = None
+    exchange_rate_source_snapshot: str | None = None
     #: Componentes de la receta sin costo unitario. Suman cero y abaratan el
     #: material sin que nada lo diga, asi que se nombran.
     materials_without_cost: list[str] = []

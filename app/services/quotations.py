@@ -1613,6 +1613,13 @@ class QuotationService:
         quantity = quotation.quantity
         gramos_guardados = quotation.material_grams_per_piece
         return QuotationCalculateOut(
+            # Fase 009F: la moneda y la tasa salen de la FILA, no de la
+            # configuracion vigente. Una confirmada tiene que explicarse con
+            # la tasa que se uso, no con la de hoy.
+            currency_code_snapshot=quotation.currency_code_snapshot,
+            currency_symbol_snapshot=quotation.currency_symbol_snapshot,
+            exchange_rate_snapshot=quotation.exchange_rate_snapshot,
+            exchange_rate_source_snapshot=quotation.exchange_rate_source_snapshot,
             name=quotation.name,
             customer_id=quotation.customer_id,
             customer_name_snapshot=quotation.customer_name_snapshot,

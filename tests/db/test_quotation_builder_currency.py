@@ -377,3 +377,34 @@ async def test_un_precio_manual_en_dolares_no_depende_de_la_tasa(
     assert a_375["total_with_tax"] == a_400["total_with_tax"]
     for linea_a, linea_b in zip(a_375["items"], a_400["items"], strict=True):
         assert linea_a["final_gross_unit"] == linea_b["final_gross_unit"]
+
+
+@pytest.mark.asyncio
+async def test_el_detalle_lee_la_moneda_de_la_fila_y_no_de_la_configuracion(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CONFIRMED_DETAIL_USES_SNAPSHOT.
+
+    El detalle sacaba la moneda del calculo en vez de la fila, asi que una
+    cotizacion confirmada se habria explicado con la configuracion vigente en
+    lugar de con lo que se congelo. Mientras todo estuvo en soles no se notaba;
+    con dolares, cambiar la moneda por defecto reescribiria el pasado.
+    """
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    creada = await api.post(BUILDER, json=_usd(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    borrador = creada.json()
+
+    confirmada = await api.post(
+        f"{BUILDER}/{borrador['id']}/confirm",
+        json={"expected_updated_at": borrador["updated_at"]},
+        headers=head(admin_csrf),
+    )
+    assert confirmada.status_code == 200, confirmada.text
+
+    detalle = await api.get(f"{BUILDER}/{borrador['id']}")
+    assert detalle.status_code == 200
+    data = detalle.json()
+    assert data["currency_code_snapshot"] == "USD"
+    assert Decimal(data["exchange_rate_snapshot"]) == Decimal(TASA)
+    assert data["exchange_rate_source_snapshot"] == "MANUAL"
