@@ -126,10 +126,29 @@ LATEST_READY=$(gcloud run services describe "$SERVICE" \
   --project="$PROJECT" \
   --format="value(status.latestReadyRevisionName)")
 
-TRAFFIC_REV=$(gcloud run services describe "$SERVICE" \
+# `status.traffic` lista TAMBIEN las revisiones antiguas que conservan un tag,
+# y esas entran primero. Leer `traffic[0]` daba el nombre de una revision de
+# hace meses: en el deploy de 8b8787e imprimio bgreda-api-00005-rix cuando el
+# 100% estaba en 00048-zox. El deploy era correcto y el informe decia que no,
+# que es la peor forma de equivocarse: invita a revertir algo que esta bien.
+#
+# Se toman las entradas con percent > 0 y se comprueba que suman 100. Si el
+# reparto quedara dividido, hay que verlo, no elegir la primera y callar.
+TRAFFIC_JSON=$(gcloud run services describe "$SERVICE" \
   --region="$REGION" \
   --project="$PROJECT" \
-  --format="value(status.traffic[0].revisionName)")
+  --format="json(status.traffic)")
+
+TRAFFIC_REV=$(echo "$TRAFFIC_JSON" | python -c "
+import json, sys
+reparto = json.load(sys.stdin).get('status', {}).get('traffic', [])
+sirviendo = [t for t in reparto if t.get('percent', 0) > 0]
+total = sum(t['percent'] for t in sirviendo)
+print(' + '.join(f\"{t['revisionName']}={t['percent']}%\" for t in sirviendo) or 'NINGUNA')
+print(total)
+")
+TRAFFIC_TOTAL=$(echo "$TRAFFIC_REV" | tail -1)
+TRAFFIC_REV=$(echo "$TRAFFIC_REV" | head -1)
 
 echo ""
 echo "=================================================="
@@ -138,6 +157,13 @@ echo "=================================================="
 echo "  BUILD_ID:         $BUILD_ID"
 echo "  GIT_SHA:          $LOCAL_HEAD"
 echo "  LATEST_READY:     $LATEST_READY"
-echo "  TRAFFIC_100pct:   $TRAFFIC_REV"
+echo "  SIRVIENDO:        $TRAFFIC_REV"
 echo "=================================================="
+
+if [ "$TRAFFIC_TOTAL" != "100" ]; then
+  err "El trafico no suma 100% (suma $TRAFFIC_TOTAL)."
+  err "STATUS: DEPLOY_TRAFFIC_NOT_FULLY_MIGRATED"
+  exit 1
+fi
+
 ok "STATUS: BACKEND_DEPLOY_COMPLETE"
