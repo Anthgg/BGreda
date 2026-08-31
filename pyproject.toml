@@ -29,6 +29,10 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "types-openpyxl>=3.1",
+    # Solo pruebas: lee el texto del PDF ya renderizado. Comprobar el HTML de
+    # entrada no basta, porque WeasyPrint es quien decide que acaba impreso.
+    # Este grupo no entra en la imagen de produccion.
+    "pypdf>=5.1",
 ]
 
 [build-system]

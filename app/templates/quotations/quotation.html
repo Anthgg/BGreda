@@ -431,6 +431,14 @@
             <td class="doc-meta-label">Moneda:</td>
             <td class="doc-meta-value">{{ doc.document.currency_code or "PEN" }} ({{ doc.document.currency_symbol }})</td>
           </tr>
+          {# El texto viene ya armado desde el modelo de documento. En soles
+             llega vacio y la fila no se dibuja: no hubo conversion que contar. #}
+          {% if doc.document.exchange_rate_text %}
+          <tr>
+            <td class="doc-meta-label">Tipo de cambio:</td>
+            <td class="doc-meta-value">{{ doc.document.exchange_rate_text }}</td>
+          </tr>
+          {% endif %}
         </table>
       </div>
     </div>

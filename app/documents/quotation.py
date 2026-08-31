@@ -47,6 +47,29 @@ def format_tax_label(tax_percent: Decimal | None) -> str:
     return f"IGV ({rate_str})"
 
 
+#: Simbolo de la moneda BASE del sistema. No sale de `commercial_settings`
+#: a proposito: ese ajuste guarda el simbolo de la moneda configurada, que
+#: puede ser el dolar, y aqui hace falta siempre el del sol, que es contra lo
+#: que se cotiza la tasa.
+BASE_CURRENCY_SYMBOL = "S/"
+
+
+def format_exchange_rate(rate: Decimal | None, currency_code: str | None) -> str | None:
+    """La tasa tal y como se lee: «1 USD = S/ 3.31».
+
+    En soles devuelve None. Una cotizacion en PEN no se convirtio, y ensenarle
+    una tasa al cliente afirmaria un cambio de moneda que nunca ocurrio.
+
+    Los ceros de la escala se recortan —la columna guarda 3.310000— pero nunca
+    por debajo de dos decimales, para que 4 se lea como 4.00 y no como un
+    numero redondo sospechoso de estar truncado.
+    """
+    if rate is None or not currency_code or currency_code == "PEN":
+        return None
+    entero, _, decimales = f"{rate.normalize():f}".partition(".")
+    return f"1 {currency_code} = {BASE_CURRENCY_SYMBOL} {entero}.{decimales.ljust(2, '0')}"
+
+
 def format_dimensions(
     *,
     width: Decimal | None = None,
@@ -137,6 +160,10 @@ class DocumentHeaderInfo:
     validity_date: str | None = None
     currency_symbol: str = "S/"
     currency_code: str | None = "PEN"
+    #: Fase 009G. Ya formateado —«1 USD = S/ 3.31»— porque la plantilla solo
+    #: renderiza. Nulo en soles: ahi no hubo conversion, y ensenar una tasa
+    #: describiria un cambio de moneda que nunca ocurrio.
+    exchange_rate_text: str | None = None
 
 
 @dataclass(slots=True)
@@ -228,11 +255,17 @@ def _build_company_doc_info(
 
 def _build_conditions_doc(
     commercial_settings: CommercialSettings | None,
+    validity_days: int | None,
 ) -> CommercialDocConditions:
+    """Las condiciones del documento, con la vigencia que le corresponda.
+
+    `validity_days` llega decidido por quien construye el documento, y no se
+    vuelve a mirar la configuracion aqui: una confirmada trae su plazo
+    congelado y un borrador el vigente. Resolverlo dentro haria imposible que
+    los dos casos convivieran sin que uno pisara al otro.
+    """
     return CommercialDocConditions(
-        validity_text=f"Cotización válida por {commercial_settings.quote_validity_days} días."
-        if (commercial_settings and commercial_settings.quote_validity_days)
-        else None,
+        validity_text=f"Cotización válida por {validity_days} días." if validity_days else None,
         general_conditions=commercial_settings.general_conditions if commercial_settings else None,
         payment_notes=commercial_settings.payment_notes if commercial_settings else None,
         document_footer=commercial_settings.document_footer if commercial_settings else None,
@@ -297,10 +330,13 @@ def build_quotation_pdf_document(
     emission_date_val = quotation.confirmed_at or quotation.created_at
     emission_date_str = format_date_display(emission_date_val)
 
-    validity_date_str = None
-    if commercial_settings and commercial_settings.quote_validity_days and emission_date_val:
-        validity_days = commercial_settings.quote_validity_days
-        validity_date_str = f"{validity_days} días calendario"
+    # Fase 009G. La vigencia sale del snapshot congelado al confirmar, nunca de
+    # la configuracion viva: este documento ya se entrego, y cambiar hoy el
+    # ajuste no puede reescribir lo que decia. Sin snapshot —las confirmadas
+    # anteriores a 009G— no se muestra vigencia: no hay registro de cual era, y
+    # poner la de hoy seria inventarle un dato contractual.
+    validity_days = quotation.validity_days_snapshot
+    validity_date_str = f"{validity_days} días calendario" if validity_days else None
 
     document_header = DocumentHeaderInfo(
         title="COTIZACIÓN",
@@ -312,6 +348,12 @@ def build_quotation_pdf_document(
         validity_date=validity_date_str,
         currency_symbol=currency_symbol,
         currency_code=currency_code,
+        # Del snapshot congelado de la cotizacion, nunca de la configuracion
+        # actual: es la tasa con la que se calculo este documento. Si una
+        # confirmada en dolares no la tiene, es una incoherencia historica y se
+        # calla; poner la de hoy explicaria el precio con un numero que no lo
+        # produjo.
+        exchange_rate_text=format_exchange_rate(quotation.exchange_rate_snapshot, currency_code),
     )
 
     # 4. Items comerciales (EXCLUSIVAMENTE DESDE SNAPSHOTS)
@@ -405,7 +447,7 @@ def build_quotation_pdf_document(
     )
 
     # 6. Condiciones comerciales
-    conditions_doc = _build_conditions_doc(commercial_settings)
+    conditions_doc = _build_conditions_doc(commercial_settings, validity_days)
 
     # 7. Cuentas bancarias comerciales
     bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
@@ -485,10 +527,11 @@ def build_draft_quotation_pdf_document(
     emission_date_val = quotation_out.updated_at or quotation_out.created_at or datetime.now()
     emission_date_str = format_date_display(emission_date_val)
 
-    validity_date_str = None
-    if commercial_settings and commercial_settings.quote_validity_days:
-        validity_days = commercial_settings.quote_validity_days
-        validity_date_str = f"{validity_days} días calendario"
+    # Un borrador no tiene vigencia congelada porque todavia no se ha emitido
+    # nada: aqui la configuracion vigente es la respuesta correcta, y el numero
+    # que se ve es el que quedara guardado si se confirma hoy.
+    validity_days = commercial_settings.quote_validity_days if commercial_settings else None
+    validity_date_str = f"{validity_days} días calendario" if validity_days else None
 
     document_header = DocumentHeaderInfo(
         title="COTIZACIÓN",
@@ -500,6 +543,12 @@ def build_draft_quotation_pdf_document(
         validity_date=validity_date_str,
         currency_symbol=currency_symbol,
         currency_code=currency_code,
+        # La tasa que el borrador lleva puesta ahora mismo. Es la que se
+        # congelara si se confirma, asi que la previsualizacion tiene que
+        # ensenar exactamente esa.
+        exchange_rate_text=format_exchange_rate(
+            quotation_out.exchange_rate_snapshot, currency_code
+        ),
     )
 
     # 4. Items comerciales
@@ -552,7 +601,7 @@ def build_draft_quotation_pdf_document(
     )
 
     # 6. Condiciones comerciales
-    conditions_doc = _build_conditions_doc(commercial_settings)
+    conditions_doc = _build_conditions_doc(commercial_settings, validity_days)
 
     # 7. Cuentas bancarias comerciales
     bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)

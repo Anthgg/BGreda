@@ -1505,6 +1505,10 @@ class QuotationService:
         await self._apply(quotation, payload, calculation)
         quotation.status = QuotationStatus.CONFIRMED
         quotation.confirmed_at = datetime.now(UTC)
+        # Fase 009G: misma congelacion que en el Cotizador. Las dos rutas de
+        # confirmacion emiten el mismo PDF, asi que las dos tienen que dejar
+        # escrito el plazo con el que se emitio.
+        quotation.validity_days_snapshot = (await self.commercial_settings()).quote_validity_days
         await self._session.flush()
         self._audit.record_action(
             entity_type=QUOTATION_ENTITY,
