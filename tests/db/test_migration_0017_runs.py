@@ -119,8 +119,9 @@ async def _current(engine: AsyncEngine) -> str | None:
 #: `INSERT ... DEFAULT VALUES` no serviria: hay columnas NOT NULL sin default.
 NUEVA_COTIZACION = (
     "INSERT INTO quotations (code, status, workflow, commercial_factor, "
+    "commercial_factor_default_snapshot, "
     "currency_code_snapshot, exchange_rate_snapshot, exchange_rate_source_snapshot) "
-    "VALUES (:code, 'DRAFT', 'COTIZADOR', 1, :currency, :rate, :source)"
+    "VALUES (:code, 'DRAFT', 'COTIZADOR', 1, 1, :currency, :rate, :source)"
 )
 
 
@@ -268,7 +269,8 @@ async def test_las_cotizaciones_historicas_siguen_siendo_validas(
         await connection.execute(
             text(
                 "INSERT INTO quotations (code, status, workflow, commercial_factor, "
-                "currency_code_snapshot) VALUES ('CTZ-VIEJA', 'CONFIRMED', 'LEGACY', 1, 'PEN')"
+                "commercial_factor_default_snapshot, currency_code_snapshot) "
+                "VALUES ('CTZ-VIEJA', 'CONFIRMED', 'LEGACY', 1, 1, 'PEN')"
             )
         )
 

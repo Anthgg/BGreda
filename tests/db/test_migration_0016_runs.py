@@ -252,10 +252,18 @@ async def test_el_check_del_paso_de_redondeo_rechaza_un_tercer_valor(
 
 
 @pytest.mark.asyncio
-async def test_0016_no_deja_una_sola_cabeza_rota(migration_engine: AsyncEngine) -> None:
-    """`alembic upgrade head` tiene que llegar sola a 0016."""
-    _upgrade("head")
+async def test_0016_se_alcanza_subiendo_hasta_la_cabeza(
+    migration_engine: AsyncEngine,
+) -> None:
+    """Subir hasta la cabeza tiene que pasar por 0016 sin romperse.
+
+    Antes esta prueba exigia que la cabeza FUERA 0016, asi que cada migracion
+    nueva la rompia. Lo que 0016 puede garantizar es que sigue siendo
+    alcanzable; que la cabeza sea unica lo comprueba la migracion mas reciente.
+    """
+    _upgrade("0016")
     assert await _current(migration_engine) == "0016"
+    _upgrade("head")
     heads = _alembic("heads")
     assert heads.returncode == 0, heads.stderr
     assert heads.stdout.count("(head)") == 1, heads.stdout

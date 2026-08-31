@@ -177,6 +177,15 @@ class QuotationBuilderDraftIn(_Strict):
     production_factor: Annotated[
         Decimal | None, Field(gt=0, le=1_000, max_digits=18, decimal_places=6)
     ] = None
+    #: Fase 009F. Moneda en la que se EMITE la cotizacion. `None` toma la de
+    #: Configuracion, que es lo que hacia el sistema entero antes de 009F.
+    #: Los costos siguen en PEN: esto solo decide el precio que se factura.
+    currency_code: Literal["PEN", "USD"] | None = None
+    #: Cuantos soles vale un dolar (`1 USD = X PEN`). Obligatorio para USD y
+    #: prohibido para PEN, porque en soles no hay conversion que declarar.
+    exchange_rate: Annotated[
+        Decimal | None, Field(gt=0, le=1_000_000, max_digits=18, decimal_places=6)
+    ] = None
     items: list[QuotationBuilderItemIn] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
@@ -184,6 +193,19 @@ class QuotationBuilderDraftIn(_Strict):
         product_ids = [item.product_id for item in self.items]
         if len(product_ids) != len(set(product_ids)):
             raise ValueError("Un producto no puede repetirse en la misma cotizacion")
+        return self
+
+    @model_validator(mode="after")
+    def coherent_currency(self) -> QuotationBuilderDraftIn:
+        """Los dos unicos estados con sentido, tambien en la puerta de entrada.
+
+        El CHECK de la base ya lo impide, pero un 422 explica que falta; un
+        error de integridad llega como 500 y no dice nada util.
+        """
+        if self.currency_code == "USD" and self.exchange_rate is None:
+            raise ValueError("EXCHANGE_RATE_REQUIRED")
+        if self.currency_code != "USD" and self.exchange_rate is not None:
+            raise ValueError("Una cotizacion en PEN no lleva tipo de cambio")
         return self
 
 
@@ -270,6 +292,13 @@ class QuotationBuilderItemOut(BaseModel):
     fixed_cost_allocation: Decimal = Decimal(0)
     commercial_base_cost: Decimal = Decimal(0)
     commercial_base_unit_cost: Decimal = Decimal(0)
+    #: Fase 009F. Moneda y tasa efectivas de esta linea. Son las de la
+    #: cotizacion: un documento con dos tasas daria un total inexplicable.
+    currency_code_snapshot: str = "PEN"
+    exchange_rate_snapshot: Decimal | None = None
+    #: Neto unitario ANTES de convertir, siempre en PEN. Permite explicar de
+    #: donde sale el precio en dolares sin rehacer la cuenta.
+    raw_net_unit_base: Decimal = Decimal(0)
     raw_net_unit: Decimal = Decimal(0)
     raw_tax_unit: Decimal = Decimal(0)
     raw_gross_unit: Decimal = Decimal(0)
@@ -335,8 +364,14 @@ class QuotationBuilderOut(BaseModel):
     production_factor: Decimal = Decimal(0)
     rounding_step: Decimal = Decimal(0)
     total_fixed_cost: Decimal = Decimal(0)
+    #: Fase 009F. `currency_code_snapshot` es la autoridad semantica; el
+    #: simbolo es presentacion. Quien lea esto no debe deducir la moneda del
+    #: simbolo: un `$` suelto se lee como sol tan a menudo como como dolar.
     currency_code_snapshot: str = "PEN"
     currency_symbol_snapshot: str = "S/"
+    #: Cuantos soles vale un dolar. Nulo cuando se emite en PEN.
+    exchange_rate_snapshot: Decimal | None = None
+    exchange_rate_source_snapshot: str | None = None
     warnings: list[str] = Field(default_factory=list)
     complete: bool = False
     next_step: str = "GENERAL_DATA"
