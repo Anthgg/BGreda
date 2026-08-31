@@ -1963,13 +1963,22 @@ class QuotationBuilderService:
                 standard_height=item.product.height if item.product else None,
                 standard_length=item.product.length if item.product else None,
                 standard_depth=item.product.depth if item.product else None,
+                # Que una medida sea editable depende del MAESTRO, no de lo
+                # que esta linea guardo. Mirar el snapshot hacia que una medida
+                # propia de la cotizacion pareciera venir del maestro: la UI la
+                # protegia, dejaba de enviarla, y el recalculo caia al maestro
+                # -que no la tiene- y pedia las medidas otra vez. El borrador
+                # se completaba en pantalla y se rompia al reabrirlo.
+                #
+                # Es el mismo criterio que usa `preview`, y tiene que serlo:
+                # dos reglas para lo mismo se separan en cuanto una cambia.
                 editable_dimensions=(
                     []
                     if row.status is not QuotationStatus.DRAFT
                     else [
                         field
                         for field in ALL_DIMENSIONS
-                        if getattr(item, f"product_{field}_snapshot") is None
+                        if item.product is None or getattr(item.product, field) is None
                     ]
                 ),
                 dimensions_overridden=bool(item.production_snapshot.get("dimensions_overridden")),

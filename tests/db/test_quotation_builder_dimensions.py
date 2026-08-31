@@ -14,12 +14,12 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import update
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.masters import Product
 from tests.db.test_firings_api import FACTORES_CHICO, crear_horno
-from tests.db.test_quotation_builder_api import _customer, head
+from tests.db.test_quotation_builder_api import _complete_payload, _customer, head
 from tests.db.test_quotations_api import _finished_product_and_recipe
 
 BUILDER = "/api/v1/quotation-builder"
@@ -432,3 +432,172 @@ async def test_production_capacity_uses_effective_not_master_dimensions(
     assert "KILN_CAPACITY_EXCEEDED" not in body["items"][0]["warnings"]
     assert body["production_summary"]["capacity_exceeded"] is False
     assert body["production_summary"]["total_batches"] > 1
+
+
+# ---------------------------------------------------------------------------
+# Fase 009B — CASO C: producto sin medidas en el maestro
+# ---------------------------------------------------------------------------
+#
+# Un producto cuyo maestro no tiene medidas puede recibirlas en la cotización.
+# Esas medidas son de ESA línea, no del maestro, y tienen que sobrevivir a
+# guardar y reabrir.
+#
+# La regresión que estas pruebas impiden: `editable_dimensions` se calculaba al
+# reabrir mirando el SNAPSHOT en vez del maestro. Una medida propia guardada
+# parecía entonces venir del maestro, la interfaz la protegía, dejaba de
+# enviarla, y el recálculo caía al maestro —que no la tiene— y volvía a pedir
+# las medidas. El borrador se completaba en pantalla y se rompía al reabrirlo.
+
+
+async def _producto_sin_medidas(
+    api: httpx.AsyncClient, csrf: str, db_session: AsyncSession, payload: dict[str, Any]
+) -> int:
+    """Deja el segundo producto del fixture sin medidas en el maestro."""
+    product_id = payload["items"][1]["product_id"]
+    await db_session.execute(
+        update(Product)
+        .where(Product.id == product_id)
+        .values(width=None, height=None, length=None, depth=None)
+    )
+    await db_session.commit()
+    return int(product_id)
+
+
+def _con_medidas_propias(payload: dict[str, Any]) -> dict[str, Any]:
+    """Da al segundo producto medidas que sólo existen en esta cotización."""
+    items = [dict(item) for item in payload["items"]]
+    items[1] = {**items[1], "dimensions": {"width": "6", "height": "8", "length": "6"}}
+    return {**payload, "items": items}
+
+
+@pytest.mark.asyncio
+async def test_caso_c_las_medidas_propias_sobreviven_a_guardar_y_reabrir(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """QUOTE_CUSTOM_DIMENSIONS_SAVE_REOPEN y DRAFT_COMPLETENESS_PRESERVED."""
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    product_id = await _producto_sin_medidas(api, admin_csrf, db_session, payload)
+
+    creada = await api.post(BUILDER, json=_con_medidas_propias(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    quotation_id = creada.json()["id"]
+
+    # ---- Se guardaron en la linea, no en el maestro --------------------
+    fila = (
+        (
+            await db_session.execute(
+                text(
+                    "SELECT product_width_snapshot, product_height_snapshot, "
+                    "product_length_snapshot FROM quotation_items "
+                    "WHERE quotation_id = :qid AND product_id = :pid"
+                ),
+                {"qid": quotation_id, "pid": product_id},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    assert Decimal(str(fila["product_width_snapshot"])) == Decimal(6)
+    assert Decimal(str(fila["product_height_snapshot"])) == Decimal(8)
+    assert Decimal(str(fila["product_length_snapshot"])) == Decimal(6)
+
+    # ---- Al reabrir vuelven, y la linea sigue completa -----------------
+    reabierta = await api.get(f"{BUILDER}/{quotation_id}")
+    assert reabierta.status_code == 200
+    data = reabierta.json()
+    linea = next(item for item in data["items"] if item["product_id"] == product_id)
+    assert Decimal(linea["width"]) == Decimal(6)
+    assert Decimal(linea["height"]) == Decimal(8)
+    assert Decimal(linea["length"]) == Decimal(6)
+    assert "PRODUCTION_DIMENSIONS_REQUIRED" not in linea["warnings"]
+
+    # ---- Y siguen siendo editables, porque el maestro no las tiene -----
+    #
+    # Esta es la asercion que habria impedido la regresion: si se marcan como
+    # protegidas, la interfaz deja de enviarlas y el siguiente recalculo las
+    # pierde.
+    for campo in ("width", "height", "length"):
+        assert campo in linea["editable_dimensions"], (
+            f"{campo} debe seguir editable: el maestro no la tiene"
+        )
+
+
+@pytest.mark.asyncio
+async def test_caso_c_el_maestro_no_se_toca(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """MASTER_DIMENSIONS_UNCHANGED.
+
+    Antes de 009B, guardar escribía las medidas en el maestro compartido: un
+    producto medido para una cotización cambiaba de tamaño para todas.
+    """
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    product_id = await _producto_sin_medidas(api, admin_csrf, db_session, payload)
+
+    creada = await api.post(BUILDER, json=_con_medidas_propias(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+
+    maestro = (
+        (
+            await db_session.execute(
+                text("SELECT width, height, length, depth FROM products WHERE id = :pid"),
+                {"pid": product_id},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    assert all(valor is None for valor in maestro.values()), (
+        "las medidas de una cotizacion no pueden acabar en el maestro"
+    )
+
+
+@pytest.mark.asyncio
+async def test_caso_c_recalcular_tras_reabrir_no_pierde_las_medidas(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El bucle exacto que rompía el borrador.
+
+    Reabrir devuelve la línea; volver a guardarla con lo que devuelve tiene que
+    dejarla igual. Si al reabrir las medidas dejan de marcarse como editables,
+    este guardado las manda vacías y la línea se queda sin medidas.
+    """
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    product_id = await _producto_sin_medidas(api, admin_csrf, db_session, payload)
+
+    creada = await api.post(BUILDER, json=_con_medidas_propias(payload), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    guardada = creada.json()
+
+    # Se reenvia SOLO lo que el backend declara editable, que es justo lo que
+    # hace la interfaz.
+    items = []
+    for item in guardada["items"]:
+        editables = item["editable_dimensions"]
+        dimensiones = {campo: item[campo] for campo in editables if item.get(campo) is not None}
+        items.append(
+            {
+                "product_id": item["product_id"],
+                "quantity": item["quantity"],
+                "dimensions": dimensiones,
+                "sort_order": item["sort_order"],
+            }
+        )
+
+    reenviada = await api.put(
+        f"{BUILDER}/{guardada['id']}",
+        json={
+            "name": guardada["name"],
+            "customer_id": guardada["customer_id"],
+            "items": items,
+            "expected_updated_at": guardada["updated_at"],
+        },
+        headers=head(admin_csrf),
+    )
+    assert reenviada.status_code == 200, reenviada.text
+
+    linea = next(item for item in reenviada.json()["items"] if item["product_id"] == product_id)
+    assert linea["width"] is not None, "el reenvio no puede vaciar las medidas"
+    assert Decimal(linea["width"]) == Decimal(6)
+    assert Decimal(linea["height"]) == Decimal(8)
+    assert Decimal(linea["length"]) == Decimal(6)
