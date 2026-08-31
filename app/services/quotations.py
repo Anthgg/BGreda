@@ -67,8 +67,10 @@ from app.schemas.quotations import (
     QuotationCalculateIn,
     QuotationCalculateOut,
     QuotationCreateIn,
+    QuotationCurrencyTotal,
     QuotationOut,
     QuotationSummaryOut,
+    QuotationTotalsOut,
     QuotationUpdateIn,
     TechniqueCalculationOut,
     TechniqueCreate,
@@ -1779,6 +1781,54 @@ class QuotationService:
             updated_at=quotation.updated_at,
         )
 
+    async def totals_by_currency(
+        self,
+        *,
+        status: QuotationStatus | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> QuotationTotalsOut:
+        """Suma lo cotizado agrupando por moneda, en el servidor y en Decimal.
+
+        Se agrupa en Python y no con `SUM(...) GROUP BY` porque el total de
+        una cotizacion no es una columna: lo resuelve `_summary_total`, que
+        elige entre el Cotizador y la via heredada. Reescribir esa regla en
+        SQL la duplicaria, y el dia que cambie una de las dos copias el
+        tablero y el listado dirian cifras distintas del mismo pedido.
+
+        Las cotizaciones son cientos, no millones; cuando dejen de serlo,
+        merecera la pena una columna materializada y no una regla duplicada.
+        """
+        stmt = select(Quotation).options(selectinload(Quotation.items))
+        if status is not None:
+            stmt = stmt.where(Quotation.status == status)
+        if date_from is not None:
+            stmt = stmt.where(func.date(Quotation.created_at) >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(func.date(Quotation.created_at) <= date_to)
+
+        filas = (await self._session.execute(stmt)).scalars().unique().all()
+
+        acumulado: dict[str, tuple[str, Decimal, int]] = {}
+        for quotation in filas:
+            codigo = quotation.currency_code_snapshot or "PEN"
+            simbolo, total, cuenta = acumulado.get(
+                codigo, (quotation.currency_symbol_snapshot or codigo, Decimal(0), 0)
+            )
+            acumulado[codigo] = (simbolo, total + _summary_total(quotation), cuenta + 1)
+
+        return QuotationTotalsOut(
+            totals=[
+                QuotationCurrencyTotal(
+                    currency_code=codigo,
+                    currency_symbol=simbolo,
+                    total=total,
+                    quotation_count=cuenta,
+                )
+                for codigo, (simbolo, total, cuenta) in sorted(acumulado.items())
+            ]
+        )
+
     async def list_quotations(
         self,
         *,
@@ -1882,6 +1932,9 @@ class QuotationService:
                 ),
                 commercial_total=quotation.commercial_total,
                 total_with_tax=quotation.total_with_tax,
+                currency_code_snapshot=quotation.currency_code_snapshot,
+                currency_symbol_snapshot=quotation.currency_symbol_snapshot,
+                exchange_rate_snapshot=quotation.exchange_rate_snapshot,
                 created_at=quotation.created_at,
             )
             for quotation in rows

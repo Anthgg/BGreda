@@ -13,10 +13,12 @@ import pytest
 
 from app.core.pricing import (
     DEFAULT_PRODUCTION_FACTOR,
+    LinePricing,
     LinePricingInput,
     PricingError,
     allocate_fixed_costs,
     ceil_to_step,
+    convert_net_to_quote_currency,
     price_line,
     reconstruct_net_and_tax,
 )
@@ -267,3 +269,216 @@ class TestNoSecondRounding:
         # Y ninguna línea perdió su precio unitario redondo por el camino.
         for line in lineas:
             assert line.final_gross_unit % D("0.50") == Decimal(0)
+
+
+# ---------------------------------------------------------------------------
+# Fase 009F — moneda de emisión y tipo de cambio manual
+# ---------------------------------------------------------------------------
+
+
+def linea_usd(
+    *,
+    tecnico: str = "125",
+    factor: str = "3",
+    cantidad: int = 1,
+    markup: str = "0",
+    igv: str = "18",
+    tasa: str | None = "3.75",
+    paso: str = "0.50",
+    manual: str | None = None,
+) -> LinePricing:
+    """Una línea en dólares. El costo técnico sigue estando en soles."""
+    return price_line(
+        LinePricingInput(
+            quantity=cantidad,
+            technical_cost=D(tecnico),
+            production_factor=D(factor),
+            fixed_cost_allocation=D("0"),
+            markup_percent=D(markup),
+            tax_percent=D(igv),
+            rounding_step=D(paso),
+            currency="USD",
+            exchange_rate=None if tasa is None else D(tasa),
+            manual_net_unit=None if manual is None else D(manual),
+        )
+    )
+
+
+class TestCurrencyConversion:
+    def test_pen_no_convierte(self) -> None:
+        """PEN_NO_CONVERSION: la moneda base no pasa por el divisor."""
+        result = price_line(
+            LinePricingInput(
+                quantity=1,
+                technical_cost=D("125"),
+                production_factor=D("3"),
+                fixed_cost_allocation=D("0"),
+                markup_percent=D("0"),
+                tax_percent=D("0"),
+                rounding_step=D("0.50"),
+            )
+        )
+        assert result.currency == "PEN"
+        assert result.exchange_rate is None
+        assert result.raw_net_unit == result.raw_net_unit_base == D("375")
+
+    def test_usd_divide_por_la_tasa(self) -> None:
+        """USD_DIVIDES_BY_RATE. 375 soles a 3,75 son 100 dólares.
+
+        Multiplicar daría 1406,25: casi cuatro veces el número correcto y con
+        toda la pinta de ser un precio. Es el error que nadie detecta a ojo.
+        """
+        result = linea_usd()
+        assert result.raw_net_unit_base == D("375")
+        assert result.raw_net_unit == D("100")
+        assert result.currency == "USD"
+        assert result.exchange_rate == D("3.75")
+
+    def test_el_costo_interno_no_se_convierte(self) -> None:
+        """Los pasos anteriores al neto siguen en soles aunque se emita en USD."""
+        result = linea_usd()
+        assert result.technical_cost == D("125")
+        assert result.factored_cost == D("375")
+        assert result.commercial_base_cost == D("375")
+        assert result.commercial_base_unit_cost == D("375")
+
+    def test_usd_sin_tasa_es_un_error(self) -> None:
+        with pytest.raises(PricingError, match="EXCHANGE_RATE_REQUIRED"):
+            linea_usd(tasa=None)
+
+    @pytest.mark.parametrize("tasa", ["0", "-3.75"])
+    def test_una_tasa_no_positiva_es_un_error(self, tasa: str) -> None:
+        with pytest.raises(PricingError, match="mayor que cero"):
+            linea_usd(tasa=tasa)
+
+    def test_pen_con_tasa_es_un_error(self) -> None:
+        # Guardar una tasa en una cotización en soles describe una conversión
+        # que nunca ocurrió, y quien la lea creerá que hubo cambio de moneda.
+        with pytest.raises(PricingError, match="PEN no lleva tipo de cambio"):
+            price_line(
+                LinePricingInput(
+                    quantity=1,
+                    technical_cost=D("100"),
+                    production_factor=D("3"),
+                    fixed_cost_allocation=D("0"),
+                    markup_percent=D("0"),
+                    tax_percent=D("18"),
+                    rounding_step=D("0.50"),
+                    currency="PEN",
+                    exchange_rate=D("1"),
+                )
+            )
+
+    def test_una_moneda_no_autorizada_es_un_error(self) -> None:
+        with pytest.raises(PricingError, match="Moneda no admitida"):
+            price_line(
+                LinePricingInput(
+                    quantity=1,
+                    technical_cost=D("100"),
+                    production_factor=D("3"),
+                    fixed_cost_allocation=D("0"),
+                    markup_percent=D("0"),
+                    tax_percent=D("18"),
+                    rounding_step=D("0.50"),
+                    currency="EUR",
+                    exchange_rate=D("4.10"),
+                )
+            )
+
+    def test_convert_net_to_quote_currency_es_una_division(self) -> None:
+        """EXCHANGE_RATE_SEMANTICS: `1 USD = X PEN`."""
+        assert convert_net_to_quote_currency(D("375"), "USD", D("3.75")) == D("100")
+        assert convert_net_to_quote_currency(D("375"), "PEN", None) == D("375")
+
+
+class TestUsdTaxAndRounding:
+    def test_el_igv_se_aplica_despues_de_convertir(self) -> None:
+        """IGV_AFTER_CONVERSION. 100 USD netos al 18 % son 118 brutos."""
+        result = linea_usd()
+        assert result.raw_net_unit == D("100")
+        assert result.raw_tax_unit == D("18.00")
+        assert result.raw_gross_unit == D("118.00")
+
+    @pytest.mark.parametrize("igv", ["0", "10", "18", "21"])
+    def test_igv_dinamico_en_dolares(self, igv: str) -> None:
+        """USD_DYNAMIC_TAX: la tasa entra por parámetro también en USD."""
+        result = linea_usd(igv=igv)
+        assert result.raw_gross_unit == D("100") * (Decimal(1) + D(igv) / Decimal(100))
+
+    def test_ceiling_050_en_dolares(self) -> None:
+        """USD_CEILING_050: el caso del enunciado, en céntimos de dólar.
+
+        375,32 soles a 3,75 son 100,0853… netos; con 18 % el bruto crudo cae
+        en 118,1006… y sube al siguiente medio dólar.
+        """
+        result = linea_usd(tecnico="375.32", factor="1")
+        assert result.raw_net_unit_base == D("375.32")
+        assert result.final_gross_unit == D("118.50")
+
+    def test_ceiling_100_en_dolares(self) -> None:
+        """USD_CEILING_100: la misma regla, otro paso."""
+        result = linea_usd(tecnico="375.32", factor="1", paso="1.00")
+        assert result.final_gross_unit == D("119.00")
+
+    def test_reconstruccion_en_dolares(self) -> None:
+        """USD_RECONSTRUCT_NET_TAX: neto + IGV es exactamente el bruto."""
+        result = linea_usd(tecnico="375.32", factor="1")
+        assert result.final_gross_unit == D("118.50")
+        assert result.final_net_unit + result.final_tax_unit == result.final_gross_unit
+
+    def test_el_paso_es_el_mismo_en_las_dos_monedas(self) -> None:
+        # No hay política PEN=0,50 / USD=1,00: la regla es la misma y sólo
+        # cambia la unidad monetaria.
+        assert linea_usd().rounding_step == D("0.50")
+
+
+class TestUsdManualPrice:
+    def test_el_precio_manual_ya_esta_en_moneda_de_emision(self) -> None:
+        """USD_MANUAL_PRICE_IS_QUOTE_CURRENCY_NET.
+
+        Quien escribe 100 cotizando en dólares quiere cobrar cien dólares.
+        """
+        assert linea_usd(manual="100").raw_net_unit == D("100")
+
+    def test_el_precio_manual_no_se_convierte_dos_veces(self) -> None:
+        """MANUAL_PRICE_NOT_DOUBLE_CONVERTED.
+
+        Dividirlo otra vez por 3,75 cobraría 26,67 dólares en vez de 100.
+        """
+        result = linea_usd(manual="100")
+        assert result.raw_net_unit != D("100") / D("3.75")
+        assert result.raw_net_unit == D("100")
+
+    def test_el_precio_manual_en_dolares_pasa_por_igv_y_redondeo(self) -> None:
+        result = linea_usd(manual="100.10")
+        assert result.raw_gross_unit == D("100.10") * D("1.18")
+        assert result.final_gross_unit == D("118.50")
+        assert result.final_net_unit + result.final_tax_unit == D("118.50")
+
+    def test_el_precio_manual_no_exime_de_declarar_la_tasa(self) -> None:
+        # Sin tasa la cotización no es reproducible aunque el precio esté
+        # escrito a mano: el documento diría dólares sin decir a cuánto.
+        with pytest.raises(PricingError, match="EXCHANGE_RATE_REQUIRED"):
+            linea_usd(manual="100", tasa=None)
+
+
+class TestUsdMultiline:
+    def test_el_total_usd_es_la_suma_sin_redondear_otra_vez(self) -> None:
+        """USD_NO_SECOND_TOTAL_ROUNDING."""
+        lineas = [
+            linea_usd(tecnico=tecnico, cantidad=cantidad, markup=markup)
+            for tecnico, cantidad, markup in (("125", 10, "100"), ("41", 7, "50"))
+        ]
+        total = sum((line.line_total_gross for line in lineas), Decimal(0))
+        assert total == sum(
+            (line.final_gross_unit * Decimal(line.quantity) for line in lineas), Decimal(0)
+        )
+        for line in lineas:
+            assert line.final_gross_unit % D("0.50") == Decimal(0)
+            assert line.line_total_net + line.line_total_tax == line.line_total_gross
+
+    def test_todas_las_lineas_usan_la_misma_tasa(self) -> None:
+        # El tipo de cambio es de la cotización, no de la línea: dos tasas en
+        # un mismo documento harían un total que nadie puede explicar.
+        lineas = [linea_usd(tecnico="125"), linea_usd(tecnico="41")]
+        assert {line.exchange_rate for line in lineas} == {D("3.75")}

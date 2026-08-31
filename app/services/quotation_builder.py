@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.core.errors import APIError
 from app.core.precision import QUANTITY_SCALE
 from app.core.pricing import (
+    BASE_CURRENCY,
     LinePricingInput,
     allocate_fixed_costs,
     price_line,
@@ -32,6 +33,7 @@ from app.models.quotations import (
 )
 from app.models.recipes import Recipe, RecipeStatus, RecipeVersion
 from app.models.sequence import SequenceType
+from app.models.settings import CommercialSettings
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
 from app.schemas.quotation_builder import (
@@ -222,6 +224,60 @@ def _fingerprint_default(value: object) -> str:
 def _fingerprint(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=_fingerprint_default)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+#: Fase 009F. La unica procedencia de tipo de cambio que existe hoy: lo teclea
+#: una persona. La constante esta para que el dia que haya una fuente
+#: automatica se distinga sin adivinar mirando fechas.
+EXCHANGE_RATE_SOURCE = "MANUAL"
+
+#: Simbolos de presentacion. `US$` y no `$` porque en Peru un `$` suelto se lee
+#: como sol tan a menudo como como dolar, y aqui la diferencia es de 3,75 a 1.
+CURRENCY_SYMBOLS = {"PEN": "S/", "USD": "US$"}
+
+
+def _supported_currency(code: str | None) -> Literal["PEN", "USD"] | None:
+    """Estrecha un codigo guardado a las monedas que 009F admite.
+
+    Devuelve `None` —y no el codigo tal cual— cuando no es una de las dos:
+    asi el borrador reconstruido cae al default en vez de arrastrar una moneda
+    que el motor rechazaria despues con un error mucho menos claro.
+    """
+    return code if code in ("PEN", "USD") else None  # type: ignore[return-value]
+
+
+def _resolve_currency(
+    payload: QuotationBuilderDraftIn, settings: CommercialSettings
+) -> tuple[str, Decimal | None]:
+    """Decide en que moneda se emite y con que tasa.
+
+    La cotizacion manda. Configuracion solo aporta el valor inicial cuando el
+    borrador no dice nada, que es el caso de todo lo escrito antes de 009F.
+
+    Una moneda de Configuracion que no sea PEN ni USD no puede emitirse: se
+    cae a PEN en vez de propagar un codigo que el motor rechazaria mas
+    adelante con un error mucho menos claro.
+    """
+    if payload.currency_code is not None:
+        solicitada: str = payload.currency_code
+    else:
+        configurada = settings.currency_code or BASE_CURRENCY
+        solicitada = configurada if configurada in CURRENCY_SYMBOLS else BASE_CURRENCY
+    if solicitada == BASE_CURRENCY:
+        return BASE_CURRENCY, None
+    return solicitada, payload.exchange_rate
+
+
+def _currency_symbol(currency_code: str, settings: CommercialSettings) -> str:
+    """El simbolo con el que se presenta la moneda.
+
+    `currency_code` es la autoridad semantica; el simbolo es presentacion. Se
+    respeta el de Configuracion solo cuando coincide la moneda, porque un
+    `S/` guardado alli no debe acabar encabezando importes en dolares.
+    """
+    if currency_code == (settings.currency_code or BASE_CURRENCY) and settings.currency_symbol:
+        return settings.currency_symbol
+    return CURRENCY_SYMBOLS.get(currency_code, currency_code)
 
 
 def _unique(values: list[str]) -> list[str]:
@@ -629,6 +685,8 @@ class QuotationBuilderService:
         production_factor: Decimal,
         rounding_step: Decimal,
         total_fixed_cost: Decimal,
+        currency_code: str = BASE_CURRENCY,
+        exchange_rate: Decimal | None = None,
     ) -> list[QuotationBuilderItemOut]:
         """Aplica factor, reparto de fijos, margen, IGV y redondeo a cada linea.
 
@@ -660,6 +718,8 @@ class QuotationBuilderService:
                     tax_percent=item.tax_percentage_snapshot,
                     rounding_step=rounding_step,
                     manual_net_unit=item.commercial_sale_unit_price_input,
+                    currency=currency_code,
+                    exchange_rate=exchange_rate,
                 )
             )
             priced[item.sort_order] = item.model_copy(
@@ -669,6 +729,9 @@ class QuotationBuilderService:
                     "fixed_cost_allocation": pricing.fixed_cost_allocation,
                     "commercial_base_cost": pricing.commercial_base_cost,
                     "commercial_base_unit_cost": pricing.commercial_base_unit_cost,
+                    "currency_code_snapshot": pricing.currency,
+                    "exchange_rate_snapshot": pricing.exchange_rate,
+                    "raw_net_unit_base": pricing.raw_net_unit_base,
                     "raw_net_unit": pricing.raw_net_unit,
                     "raw_tax_unit": pricing.raw_tax_unit,
                     "raw_gross_unit": pricing.raw_gross_unit,
@@ -1258,12 +1321,18 @@ class QuotationBuilderService:
         # una cotizacion, para que nadie se salte Configuracion pieza a pieza.
         production_factor = payload.production_factor or settings.production_factor_default
         rounding_step = settings.rounding_step
+        # Fase 009F: la moneda es intencion de la cotizacion. Configuracion
+        # sigue dando el valor inicial, pero deja de ser la autoridad: dos
+        # cotizaciones del mismo dia pueden emitirse en monedas distintas.
+        currency_code, exchange_rate = _resolve_currency(payload, settings)
         total_fixed_cost = await self._total_fixed_cost()
         item_outputs = self._apply_commercial_engine(
             item_outputs,
             production_factor=production_factor,
             rounding_step=rounding_step,
             total_fixed_cost=total_fixed_cost,
+            currency_code=currency_code,
+            exchange_rate=exchange_rate,
         )
 
         subtotal = sum((item.line_total_net for item in item_outputs), ZERO)
@@ -1341,7 +1410,16 @@ class QuotationBuilderService:
                 # Cambiar el factor por defecto o el paso de redondeo si altera
                 # el precio y debe invalidar el borrador; editar el banco o las
                 # condiciones de pago no.
-                "pricing": [production_factor, rounding_step, total_fixed_cost],
+                # Fase 009F: la moneda y la tasa cambian el precio, asi que
+                # entran en la huella. Un borrador guardado a 3,75 no puede
+                # confirmarse en silencio con otra tasa.
+                "pricing": [
+                    production_factor,
+                    rounding_step,
+                    total_fixed_cost,
+                    currency_code,
+                    exchange_rate,
+                ],
                 "production": production,
                 "items": [item.source_fingerprint for item in item_outputs],
             }
@@ -1382,8 +1460,10 @@ class QuotationBuilderService:
             ),
             tax_amount=tax_amount,
             total_with_tax=total,
-            currency_code_snapshot=settings.currency_code or "PEN",
-            currency_symbol_snapshot=settings.currency_symbol or "S/",
+            currency_code_snapshot=currency_code,
+            currency_symbol_snapshot=_currency_symbol(currency_code, settings),
+            exchange_rate_snapshot=exchange_rate,
+            exchange_rate_source_snapshot=EXCHANGE_RATE_SOURCE if exchange_rate else None,
             warnings=_unique(header_warnings),
             complete=complete,
             next_step=next_step,
@@ -1448,6 +1528,8 @@ class QuotationBuilderService:
         row.commercial_unit_price_with_tax = ZERO
         row.currency_code_snapshot = preview.currency_code_snapshot
         row.currency_symbol_snapshot = preview.currency_symbol_snapshot
+        row.exchange_rate_snapshot = preview.exchange_rate_snapshot
+        row.exchange_rate_source_snapshot = preview.exchange_rate_source_snapshot
         row.tax_percentage_snapshot = preview.tax_percentage_snapshot
         row.tax_rate_source_snapshot = preview.tax_rate_source_snapshot
         row.tax_amount = preview.tax_amount
@@ -1702,6 +1784,15 @@ class QuotationBuilderService:
                 ),
                 None,
             ),
+            # Fase 009F: la moneda y la tasa tambien vuelven como ENTRADA.
+            #
+            # Al CONFIRMAR importa porque el recalculo de deriva tiene que
+            # usar la tasa guardada: si volviera al default, la huella no
+            # coincidiria y confirmar una cotizacion en dolares seria
+            # imposible. Al DUPLICAR importa porque el borrador nuevo hereda
+            # la intencion —misma moneda, misma tasa— y desde ahi es editable.
+            currency_code=_supported_currency(row.currency_code_snapshot),
+            exchange_rate=row.exchange_rate_snapshot,
             items=[
                 QuotationBuilderItemIn(
                     product_id=item.product_id,
@@ -1980,6 +2071,8 @@ class QuotationBuilderService:
             total_with_tax=row.total_with_tax,
             currency_code_snapshot=row.currency_code_snapshot,
             currency_symbol_snapshot=row.currency_symbol_snapshot,
+            exchange_rate_snapshot=row.exchange_rate_snapshot,
+            exchange_rate_source_snapshot=row.exchange_rate_source_snapshot,
             warnings=_output_warnings(row.calculation_warnings),
             complete=complete,
             next_step=next_step,

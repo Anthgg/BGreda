@@ -69,6 +69,15 @@ DEFAULT_PRODUCTION_FACTOR = Decimal(3)
 ROUNDING_STEPS = (Decimal("0.50"), Decimal("1.00"))
 DEFAULT_ROUNDING_STEP = Decimal("0.50")
 
+#: Moneda base del sistema. Los costos, el inventario y los maestros viven
+#: aqui y no se mueven: USD es moneda de EMISION, no de costeo.
+BASE_CURRENCY = "PEN"
+
+#: Monedas en las que se puede emitir una cotizacion. Fase 009F autoriza dos;
+#: la tupla existe para que anadir una tercera sea una decision explicita y no
+#: el efecto colateral de que alguien mande otro codigo.
+SUPPORTED_CURRENCIES = ("PEN", "USD")
+
 
 class PricingError(ValueError):
     """Una entrada no permite calcular un precio comercial válido."""
@@ -149,6 +158,35 @@ def reconstruct_net_and_tax(gross: Decimal, tax_percent: Decimal) -> tuple[Decim
     return net, gross - net
 
 
+def convert_net_to_quote_currency(
+    net_base: Decimal, currency: str, exchange_rate: Decimal | None
+) -> Decimal:
+    """Lleva un neto en PEN a la moneda en que se emite la cotización.
+
+    La tasa dice **cuántos soles vale un dólar** (`1 USD = X PEN`), así que
+    para pasar de soles a dólares se DIVIDE. Multiplicar con una tasa de 3,75
+    da un número casi cuatro veces mayor que el correcto y con toda la pinta de
+    ser un precio, que es exactamente el tipo de error que nadie detecta hasta
+    que el cliente lo firma.
+
+    No se cuantiza aquí: el redondeo del contrato ocurre una sola vez, sobre el
+    bruto, y truncar el neto antes le robaría precisión.
+    """
+    if currency not in SUPPORTED_CURRENCIES:
+        raise PricingError(f"Moneda no admitida: {currency}")
+    if currency == BASE_CURRENCY:
+        if exchange_rate is not None:
+            # Guardar una tasa en una cotizacion en soles describe una
+            # conversion que nunca ocurrio.
+            raise PricingError("Una cotización en PEN no lleva tipo de cambio")
+        return net_base
+    if exchange_rate is None:
+        raise PricingError("EXCHANGE_RATE_REQUIRED: falta el tipo de cambio")
+    if exchange_rate <= ZERO:
+        raise PricingError("El tipo de cambio debe ser mayor que cero")
+    return net_base / exchange_rate
+
+
 @dataclass(frozen=True, slots=True)
 class LinePricingInput:
     """Lo que hace falta para poner precio a una línea."""
@@ -168,6 +206,10 @@ class LinePricingInput:
     #: contrato sigue exigiendo un bruto redondo, asi que el precio tecleado
     #: entra como neto crudo y pasa por el mismo camino que cualquier otro.
     manual_net_unit: Decimal | None = None
+    #: Moneda en la que se EMITE la cotizacion. Los costos siguen en PEN.
+    currency: str = BASE_CURRENCY
+    #: Cuantos soles vale un dolar. Obligatorio para USD, prohibido para PEN.
+    exchange_rate: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +223,14 @@ class LinePricing:
     commercial_base_cost: Decimal
     commercial_base_unit_cost: Decimal
     markup_percent: Decimal
+    #: Moneda de emision y tasa usada. Viajan con el resultado para que quien
+    #: lo lea no tenga que deducir la moneda del simbolo.
+    currency: str
+    exchange_rate: Decimal | None
+    #: Neto unitario ANTES de convertir, siempre en PEN. Es lo que permite
+    #: explicar de donde sale el precio en dolares sin rehacer la cuenta.
+    raw_net_unit_base: Decimal
+    #: Neto unitario ya en la moneda de emision.
     raw_net_unit: Decimal
     tax_percent: Decimal
     raw_tax_unit: Decimal
@@ -216,12 +266,25 @@ def price_line(data: LinePricingInput) -> LinePricing:
     base = factored + data.fixed_cost_allocation
     base_unit = base / Decimal(data.quantity)
 
+    # El neto que sale del margen esta en PEN, porque todo lo anterior lo esta:
+    # el costo tecnico, el factor y los costos fijos son de produccion y no se
+    # convierten. La moneda entra en el precio, no en el costeo.
+    raw_net_unit_base = base_unit * (ONE + data.markup_percent / HUNDRED)
+
     if data.manual_net_unit is not None:
         if data.manual_net_unit < ZERO:
             raise PricingError("El precio comercial no puede ser negativo")
+        # El precio manual YA esta en la moneda de emision: si el usuario
+        # escribe 100 cotizando en dolares, quiere cobrar cien dolares.
+        # Convertirlo otra vez lo dividiria por la tasa y cobraria 26,67.
         raw_net_unit = data.manual_net_unit
+        # Aun asi se valida la coherencia moneda/tasa: un manual price no
+        # convierte la cotizacion en un sitio donde el contrato no rige.
+        convert_net_to_quote_currency(ZERO, data.currency, data.exchange_rate)
     else:
-        raw_net_unit = base_unit * (ONE + data.markup_percent / HUNDRED)
+        raw_net_unit = convert_net_to_quote_currency(
+            raw_net_unit_base, data.currency, data.exchange_rate
+        )
     raw_tax_unit = raw_net_unit * data.tax_percent / HUNDRED
     raw_gross_unit = raw_net_unit + raw_tax_unit
 
@@ -242,6 +305,9 @@ def price_line(data: LinePricingInput) -> LinePricing:
         commercial_base_cost=base,
         commercial_base_unit_cost=base_unit,
         markup_percent=data.markup_percent,
+        currency=data.currency,
+        exchange_rate=data.exchange_rate,
+        raw_net_unit_base=raw_net_unit_base,
         raw_net_unit=raw_net_unit,
         tax_percent=data.tax_percent,
         raw_tax_unit=raw_tax_unit,

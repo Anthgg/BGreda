@@ -31,6 +31,7 @@ from app.schemas.quotations import (
     QuotationCreateIn,
     QuotationOut,
     QuotationPage,
+    QuotationTotalsOut,
     QuotationUpdateIn,
     TechniqueCreate,
     TechniqueOut,
@@ -212,6 +213,24 @@ async def list_quotations(
         offset=offset,
     )
     return QuotationPage(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/quotations/totals", response_model=QuotationTotalsOut)
+async def quotation_totals(
+    service: QuotationServiceDep,
+    _: CurrentUserDep,
+    quotation_status: Annotated[QuotationStatus | None, Query(alias="status")] = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> QuotationTotalsOut:
+    """Lo cotizado por moneda. El tablero lee esto en vez de sumar filas.
+
+    Va ANTES de `/quotations/{quotation_id}` a proposito: si estuviera despues,
+    FastAPI intentaria leer «totals» como un id y devolveria un 422.
+    """
+    return await service.totals_by_currency(
+        status=quotation_status, date_from=date_from, date_to=date_to
+    )
 
 
 @router.post("/quotations", response_model=QuotationOut, status_code=status.HTTP_201_CREATED)
