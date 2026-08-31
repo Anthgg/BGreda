@@ -47,6 +47,29 @@ def format_tax_label(tax_percent: Decimal | None) -> str:
     return f"IGV ({rate_str})"
 
 
+#: Simbolo de la moneda BASE del sistema. No sale de `commercial_settings`
+#: a proposito: ese ajuste guarda el simbolo de la moneda configurada, que
+#: puede ser el dolar, y aqui hace falta siempre el del sol, que es contra lo
+#: que se cotiza la tasa.
+BASE_CURRENCY_SYMBOL = "S/"
+
+
+def format_exchange_rate(rate: Decimal | None, currency_code: str | None) -> str | None:
+    """La tasa tal y como se lee: «1 USD = S/ 3.31».
+
+    En soles devuelve None. Una cotizacion en PEN no se convirtio, y ensenarle
+    una tasa al cliente afirmaria un cambio de moneda que nunca ocurrio.
+
+    Los ceros de la escala se recortan —la columna guarda 3.310000— pero nunca
+    por debajo de dos decimales, para que 4 se lea como 4.00 y no como un
+    numero redondo sospechoso de estar truncado.
+    """
+    if rate is None or not currency_code or currency_code == "PEN":
+        return None
+    entero, _, decimales = f"{rate.normalize():f}".partition(".")
+    return f"1 {currency_code} = {BASE_CURRENCY_SYMBOL} {entero}.{decimales.ljust(2, '0')}"
+
+
 def format_dimensions(
     *,
     width: Decimal | None = None,
@@ -137,6 +160,10 @@ class DocumentHeaderInfo:
     validity_date: str | None = None
     currency_symbol: str = "S/"
     currency_code: str | None = "PEN"
+    #: Fase 009G. Ya formateado —«1 USD = S/ 3.31»— porque la plantilla solo
+    #: renderiza. Nulo en soles: ahi no hubo conversion, y ensenar una tasa
+    #: describiria un cambio de moneda que nunca ocurrio.
+    exchange_rate_text: str | None = None
 
 
 @dataclass(slots=True)
@@ -321,6 +348,12 @@ def build_quotation_pdf_document(
         validity_date=validity_date_str,
         currency_symbol=currency_symbol,
         currency_code=currency_code,
+        # Del snapshot congelado de la cotizacion, nunca de la configuracion
+        # actual: es la tasa con la que se calculo este documento. Si una
+        # confirmada en dolares no la tiene, es una incoherencia historica y se
+        # calla; poner la de hoy explicaria el precio con un numero que no lo
+        # produjo.
+        exchange_rate_text=format_exchange_rate(quotation.exchange_rate_snapshot, currency_code),
     )
 
     # 4. Items comerciales (EXCLUSIVAMENTE DESDE SNAPSHOTS)
@@ -510,6 +543,12 @@ def build_draft_quotation_pdf_document(
         validity_date=validity_date_str,
         currency_symbol=currency_symbol,
         currency_code=currency_code,
+        # La tasa que el borrador lleva puesta ahora mismo. Es la que se
+        # congelara si se confirma, asi que la previsualizacion tiene que
+        # ensenar exactamente esa.
+        exchange_rate_text=format_exchange_rate(
+            quotation_out.exchange_rate_snapshot, currency_code
+        ),
     )
 
     # 4. Items comerciales
