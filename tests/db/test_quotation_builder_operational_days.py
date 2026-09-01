@@ -12,6 +12,7 @@ quema no se entera de nada de esto.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
 
@@ -122,14 +123,18 @@ async def test_el_administrativo_no_depende_de_los_dias(
 
 
 @pytest.mark.asyncio
-async def test_un_maestro_por_pieza_no_entra_en_el_costo_operativo(
-    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+async def test_un_maestro_por_pieza_activo_no_cuesta_pero_si_avisa(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """PER_PIECE_EXCLUDED_FROM_009G1.
+    """PER_PIECE_ACTIVE_EXCLUDED y PER_PIECE_ACTIVE_WARNING_EMITTED.
 
-    PER_PIECE queda fuera de esta fase: su unico maestro esta desactivado y su
-    formula no esta decidida. Se comprueba que no se cuela ni como fijo ni como
-    diario, que es lo que pasaria si el motor lo tratara por descarte.
+    PER_PIECE queda fuera de esta fase porque su formula no esta decidida. Un
+    maestro ACTIVO de ese tipo se excluye igual, pero no en silencio: excluir
+    dinero sin dejar rastro es como se pierde una tarifa sin que nadie se entere
+    durante meses.
     """
     payload, _ = await _complete_payload(api, admin_csrf, db_session)
     await _sembrar_maestros(api, admin_csrf)
@@ -141,9 +146,49 @@ async def test_un_maestro_por_pieza_no_entra_en_el_costo_operativo(
         headers=head(admin_csrf),
     )
     assert creado.status_code == 201, creado.text
+    assert creado.json()["active"] is True, "hace falta que este ACTIVO para probar el aviso"
 
-    con_el = await _previsualizar(api, admin_csrf, payload)
+    with caplog.at_level(logging.WARNING, logger="app.services.quotation_builder"):
+        con_el = await _previsualizar(api, admin_csrf, payload)
+
     assert Decimal(con_el["total_fixed_cost"]) == Decimal(sin_el["total_fixed_cost"])
+    assert "ACTIVE_PER_PIECE_OTHER_COST_FOUND" in caplog.text
+    assert "Factor por pieza" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_un_maestro_por_pieza_desactivado_no_cuesta_ni_avisa(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """PER_PIECE_INACTIVE_EXCLUDED.
+
+    Es el caso de OTH-004 en produccion. No suma, y tampoco genera ruido: un
+    maestro dado de baja no es una anomalia que haya que reportar.
+    """
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    await _sembrar_maestros(api, admin_csrf)
+    sin_el = await _previsualizar(api, admin_csrf, payload)
+
+    creado = await api.post(
+        OTHER_COSTS,
+        json={
+            "name": "Factor legacy",
+            "unit_price": "3",
+            "calculation_type": "PER_PIECE",
+            "active": False,
+        },
+        headers=head(admin_csrf),
+    )
+    assert creado.status_code == 201, creado.text
+
+    with caplog.at_level(logging.WARNING, logger="app.services.quotation_builder"):
+        con_el = await _previsualizar(api, admin_csrf, payload)
+
+    assert Decimal(con_el["total_fixed_cost"]) == Decimal(sin_el["total_fixed_cost"])
+    assert "ACTIVE_PER_PIECE_OTHER_COST_FOUND" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +330,42 @@ async def test_el_ajuste_sobrevive_a_guardar_y_reabrir_dos_veces(
         )
         assert regrabada.status_code == 200, regrabada.text
         guardada = regrabada.json()
+
+
+@pytest.mark.asyncio
+async def test_al_reabrir_se_conservan_los_totales_y_el_eco_no_manda(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """REOPEN_*_PRESERVED y HEADER_TOTAL_FIXED_COST_NOT_AUTHORITY.
+
+    `total_fixed_cost` de cabecera vuelve en cero al reabrir porque es un eco
+    de la previsualizacion. Lo importante es que ese cero NO se convierta en
+    autoridad: el precio del borrador reabierto tiene que ser el mismo, y el
+    reparto por linea tiene que seguir sumando el costo operativo completo.
+
+    Si el cero mandara, el total comercial caeria en el importe de los costos
+    operativos y nadie lo notaria hasta cobrar de menos.
+    """
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+    await _sembrar_maestros(api, admin_csrf)
+
+    creada = await api.post(BUILDER, json=_con_ajuste(payload, 2), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    guardada = creada.json()
+
+    reabierta = await api.get(f"{BUILDER}/{guardada['id']}")
+    assert reabierta.status_code == 200
+    vuelta = reabierta.json()
+
+    # El reparto persiste y sigue cuadrando con la formula.
+    assert _repartido(vuelta) == _repartido(guardada)
+    assert _repartido(vuelta) == _esperado(_dias(vuelta))
+    assert all(Decimal(item["fixed_cost_allocation"]) > 0 for item in vuelta["items"])
+
+    # Y el dinero que se cobra no se mueve.
+    assert vuelta["commercial_subtotal"] == guardada["commercial_subtotal"]
+    assert vuelta["tax_amount"] == guardada["tax_amount"]
+    assert vuelta["total_with_tax"] == guardada["total_with_tax"]
 
 
 @pytest.mark.asyncio
