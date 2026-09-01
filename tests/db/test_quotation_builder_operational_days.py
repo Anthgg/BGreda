@@ -362,10 +362,12 @@ async def test_al_reabrir_se_conservan_los_totales_y_el_eco_no_manda(
     assert _repartido(vuelta) == _esperado(_dias(vuelta))
     assert all(Decimal(item["fixed_cost_allocation"]) > 0 for item in vuelta["items"])
 
-    # Y el dinero que se cobra no se mueve.
-    assert vuelta["commercial_subtotal"] == guardada["commercial_subtotal"]
-    assert vuelta["tax_amount"] == guardada["tax_amount"]
-    assert vuelta["total_with_tax"] == guardada["total_with_tax"]
+    # Y el dinero que se cobra no se mueve. Se compara como Decimal y no como
+    # texto: el importe recien calculado llega «3250.00» y el releido de la
+    # base «3250.000000000000000000». Es el mismo dinero con distinto relleno,
+    # y compararlo como cadena haria fallar una prueba que deberia pasar.
+    for campo in ("commercial_subtotal", "tax_amount", "total_with_tax"):
+        assert Decimal(vuelta[campo]) == Decimal(guardada[campo]), campo
 
 
 @pytest.mark.asyncio
