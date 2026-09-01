@@ -8,7 +8,11 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.quotations import QuotationStatus, QuotationWorkflow
+from app.models.quotations import (
+    QuotationPaymentStatus,
+    QuotationStatus,
+    QuotationWorkflow,
+)
 from app.schemas.quotations import (
     AdditionalSelectionIn,
     OtherCostSelectionIn,
@@ -380,3 +384,7 @@ class QuotationBuilderOut(BaseModel):
     updated_at: datetime | None = None
     confirmed_at: datetime | None = None
     cancelled_at: datetime | None = None
+    #: Fase 009H. Nulo significa que el pago no lo registro el sistema —todo lo
+    #: anterior a 009H—, no que este impaga. La interfaz debe distinguirlo.
+    payment_status: QuotationPaymentStatus | None = None
+    paid_at: datetime | None = None

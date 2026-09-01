@@ -31,6 +31,7 @@ from app.models.quotations import (
     OtherCostCalculationType,
     Quotation,
     QuotationItem,
+    QuotationPaymentStatus,
     QuotationStatus,
     QuotationWorkflow,
 )
@@ -192,6 +193,12 @@ class QuotationBuilderNotEditableError(APIError):
     status_code = 409
     code = "QUOTATION_BUILDER_NOT_EDITABLE"
     message = "Solo un borrador del Cotizador se puede editar"
+
+
+class QuotationBuilderNotPayableError(APIError):
+    status_code = 409
+    code = "QUOTATION_BUILDER_NOT_PAYABLE"
+    message = "Solo una cotizacion confirmada se puede registrar como pagada"
 
 
 class QuotationBuilderConflictError(APIError):
@@ -1787,6 +1794,12 @@ class QuotationBuilderService:
         row.validity_days_snapshot = (
             await self._quotations.commercial_settings()
         ).quote_validity_days
+        # Fase 009H. Un borrador anterior a 009H no tiene eje de cobro: entra
+        # al flujo nuevo aqui, y desde este momento si se sabe que no se ha
+        # cobrado. Solo se normaliza el hueco; una cotizacion que ya trae su
+        # estado de pago no se toca.
+        if row.payment_status is None:
+            row.payment_status = QuotationPaymentStatus.UNPAID
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
         self._audit.record_action(
@@ -1796,6 +1809,51 @@ class QuotationBuilderService:
             user_id=user.id,
             user_display_name=user.display_name,
             metadata={"code": row.code, "status": row.status.value},
+        )
+        return await self.get(row.id)
+
+    async def mark_paid(self, quotation_id: int, *, user: AuthenticatedUser) -> QuotationBuilderOut:
+        """Registra que la cotizacion se cobro.
+
+        Solo desde CONFIRMED: un borrador todavia no es un compromiso, y una
+        anulada no se cobra. Las confirmadas anteriores a 009H llegan con el
+        eje en nulo y tambien pueden marcarse: no saber si se cobraron no es
+        motivo para impedir registrarlo ahora.
+
+        Es idempotente por el hecho, no por la peticion: si ya estaba pagada se
+        devuelve tal cual, sin mover `paid_at` ni anotar una segunda
+        transicion. Una fecha de cobro que se desplaza cada vez que alguien
+        pulsa el boton deja de ser la fecha en que se cobro.
+
+        No toca precios, ni dias, ni quema, ni inventario. Cobrar es un hecho
+        posterior al documento y no lo reescribe.
+        """
+        row = await self._get(quotation_id, for_update=True)
+        if row.status is not QuotationStatus.CONFIRMED:
+            raise QuotationBuilderNotPayableError(
+                "Solo una cotizacion confirmada puede registrarse como pagada"
+            )
+        if row.payment_status is QuotationPaymentStatus.PAID:
+            return await self.get(row.id)
+
+        anterior = row.payment_status
+        row.payment_status = QuotationPaymentStatus.PAID
+        row.paid_at = datetime.now(UTC)
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+        # Con el antes y el despues, no solo la accion: el valor anterior
+        # distingue «se cobro una que sabiamos impaga» de «se cobro una de la
+        # que no habia registro», y esa diferencia no se puede reconstruir
+        # despues.
+        self._audit.record_changes(
+            entity_type=BUILDER_ENTITY,
+            entity_id=str(row.id),
+            changes={
+                "payment_status": (anterior.value if anterior else None, row.payment_status.value),
+                "paid_at": (None, row.paid_at.isoformat()),
+            },
+            user_id=user.id,
+            user_display_name=user.display_name,
         )
         return await self.get(row.id)
 
@@ -2175,6 +2233,8 @@ class QuotationBuilderService:
             updated_at=row.updated_at,
             confirmed_at=row.confirmed_at,
             cancelled_at=row.cancelled_at,
+            payment_status=row.payment_status,
+            paid_at=row.paid_at,
         )
 
     async def get(self, quotation_id: int) -> QuotationBuilderOut:

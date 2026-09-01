@@ -56,6 +56,22 @@ class QuotationStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class QuotationPaymentStatus(StrEnum):
+    """Si la cotizacion se cobro. Es un eje APARTE de `QuotationStatus`.
+
+    Cobrar no es un cuarto estado comercial: una anulada puede estar pagada y
+    una confirmada puede seguir sin cobrarse. Son dos hechos independientes y
+    mezclarlos obligaria a perder uno de los dos.
+
+    La ausencia —NULL en la columna— es un tercer caso con significado propio:
+    el pago no lo registro el sistema. Es lo que hay en todo lo anterior a
+    009H, y NO equivale a UNPAID.
+    """
+
+    UNPAID = "UNPAID"
+    PAID = "PAID"
+
+
 class QuotationWorkflow(StrEnum):
     """Flujo que creo la cotizacion sin alterar su estado comercial."""
 
@@ -356,6 +372,18 @@ class Quotation(Base, TimestampMixin):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    #: Fase 009H. Eje de cobro, independiente de `status`. Nulo significa que
+    #: el pago no lo registro el sistema —todo lo anterior a 009H— y no debe
+    #: leerse como «no pagada»: de esas filas no sabemos nada.
+    payment_status: Mapped[QuotationPaymentStatus | None] = mapped_column(
+        StrEnumType(QuotationPaymentStatus, 16),
+        nullable=True,
+        server_default=text("'UNPAID'"),
+    )
+    #: Cuando se marco cobrada. Solo tiene valor con PAID, y una vez escrito no
+    #: se vuelve a tocar: es la fecha de un hecho, no un campo editable.
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     __table_args__ = (
         CheckConstraint("quantity > 0", name="quantity_positive"),
         CheckConstraint("materials_calculated >= 0", name="materials_calculated_non_negative"),
@@ -398,6 +426,19 @@ class Quotation(Base, TimestampMixin):
             f" OR (validity_days_snapshot > 0"
             f" AND validity_days_snapshot <= {MAX_VALIDITY_DAYS})",
             name="validity_days_snapshot_range",
+        ),
+        # Fase 009H: los tres estados de cobro representables, cada uno con la
+        # fecha que le corresponde. `paid_at` sin PAID seria una fecha de cobro
+        # sin cobro; PAID sin fecha, un cobro sin cuando.
+        CheckConstraint(
+            "payment_status IS NULL OR payment_status IN ('UNPAID', 'PAID')",
+            name="payment_status_allowed",
+        ),
+        CheckConstraint(
+            "(payment_status IS NULL AND paid_at IS NULL)"
+            " OR (payment_status = 'UNPAID' AND paid_at IS NULL)"
+            " OR (payment_status = 'PAID' AND paid_at IS NOT NULL)",
+            name="payment_coherence",
         ),
         Index("ix_quotations_created_at", "created_at"),
     )

@@ -160,6 +160,23 @@ async def cancel_quotation_builder(
     return result
 
 
+@router.post("/{quotation_id}/mark-paid", response_model=QuotationBuilderOut)
+async def mark_quotation_builder_paid(
+    quotation_id: int,
+    service: QuotationBuilderServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> QuotationBuilderOut:
+    """Registra el cobro de una cotizacion confirmada.
+
+    Mismo permiso que confirmar y anular: son las tres transiciones
+    comerciales del documento. No mueve inventario ni toca precios.
+    """
+    result = await service.mark_paid(quotation_id, user=admin)
+    await session.commit()
+    return result
+
+
 @router.post("/{quotation_id}/duplicate", response_model=QuotationBuilderOut)
 async def duplicate_quotation_builder(
     quotation_id: int,
