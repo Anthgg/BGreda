@@ -434,10 +434,15 @@ class Quotation(Base, TimestampMixin):
             "payment_status IS NULL OR payment_status IN ('UNPAID', 'PAID')",
             name="payment_status_allowed",
         ),
+        # Los `IS NOT NULL` no sobran: `NULL = 'PAID'` da NULL, no FALSE, y un
+        # CHECK que evalua a NULL se da por cumplido. Sin ellos entraba una
+        # fila sin estado de pago pero con fecha de cobro.
         CheckConstraint(
             "(payment_status IS NULL AND paid_at IS NULL)"
-            " OR (payment_status = 'UNPAID' AND paid_at IS NULL)"
-            " OR (payment_status = 'PAID' AND paid_at IS NOT NULL)",
+            " OR (payment_status IS NOT NULL AND payment_status = 'UNPAID'"
+            " AND paid_at IS NULL)"
+            " OR (payment_status IS NOT NULL AND payment_status = 'PAID'"
+            " AND paid_at IS NOT NULL)",
             name="payment_coherence",
         ),
         Index("ix_quotations_created_at", "created_at"),

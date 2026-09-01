@@ -37,10 +37,27 @@ depends_on: str | Sequence[str] | None = None
 #: Los tres estados representables, y la fecha que cada uno exige. `paid_at`
 #: sin PAID seria una fecha de cobro sin cobro; PAID sin `paid_at`, un cobro
 #: sin fecha. El esquema impide las dos.
+#:
+#: Los `IS NOT NULL` de las dos ultimas ramas NO sobran. En SQL,
+#: `NULL = 'PAID'` no es FALSE sino NULL, y un CHECK que evalua a NULL se da
+#: por CUMPLIDO. Sin ellos, una fila con `payment_status` nulo y `paid_at`
+#: puesta daba FALSE OR FALSE OR NULL = NULL y entraba tan campante: una fecha
+#: de cobro colgando de una cotizacion de la que no sabemos si se cobro.
+#:
+#: Es el mismo agujero que 0017 tapo en el CHECK del tipo de cambio. Se repite
+#: aqui porque la forma «OR de ramas con igualdad» lo invita cada vez.
 COHERENCIA = """
     (payment_status IS NULL AND paid_at IS NULL)
-    OR (payment_status = 'UNPAID' AND paid_at IS NULL)
-    OR (payment_status = 'PAID' AND paid_at IS NOT NULL)
+    OR (
+        payment_status IS NOT NULL
+        AND payment_status = 'UNPAID'
+        AND paid_at IS NULL
+    )
+    OR (
+        payment_status IS NOT NULL
+        AND payment_status = 'PAID'
+        AND paid_at IS NOT NULL
+    )
 """
 
 

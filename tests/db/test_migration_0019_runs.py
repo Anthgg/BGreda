@@ -149,14 +149,20 @@ async def test_0018_a_0019_a_0018_y_de_vuelta(migration_engine: AsyncEngine) -> 
     assert await _column_exists(migration_engine, "quotations", "payment_status")
     assert await _column_exists(migration_engine, "quotations", "paid_at")
 
-    # `status` no se toca: pagar no es un cuarto estado comercial.
+    # `status` no se toca: pagar no es un cuarto estado comercial. Se busca por
+    # tabla y contenido, no por un nombre de restriccion que puede variar con
+    # la convencion: un nombre equivocado devuelve NULL y la prueba pasaria por
+    # no encontrar nada.
     permitidos = await _scalar(
         migration_engine,
-        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-        "WHERE conname = 'ck_quotations_status_allowed'",
+        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+        "JOIN pg_class t ON t.oid = c.conrelid "
+        "WHERE t.relname = 'quotations' AND c.contype = 'c' "
+        "AND pg_get_constraintdef(c.oid) LIKE '%DRAFT%'",
     )
+    assert permitidos is not None, "no se encontro el CHECK del estado comercial"
     assert "DRAFT" in str(permitidos) and "CONFIRMED" in str(permitidos)
-    assert "PAID" not in str(permitidos)
+    assert "PAID" not in str(permitidos), "pagar no puede haberse colado en `status`"
 
     _downgrade("0018")
     assert await _current(migration_engine) == "0018"

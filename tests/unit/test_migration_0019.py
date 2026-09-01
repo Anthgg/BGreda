@@ -53,9 +53,33 @@ def test_migration_0019_impone_los_tres_estados_coherentes() -> None:
     # Sin registro: ni estado ni fecha.
     assert "payment_status IS NULL AND paid_at IS NULL" in coherencia
     # Impaga: no puede traer fecha de cobro.
-    assert "payment_status = 'UNPAID' AND paid_at IS NULL" in coherencia
+    assert "payment_status = 'UNPAID'" in coherencia
     # Pagada: no puede faltarle el cuando.
-    assert "payment_status = 'PAID' AND paid_at IS NOT NULL" in coherencia
+    assert "payment_status = 'PAID'" in coherencia
+    assert "paid_at IS NOT NULL" in coherencia
+
+
+def test_migration_0019_cierra_el_agujero_de_la_logica_ternaria() -> None:
+    """El guardia que el CHECK necesita para no dejar pasar nada.
+
+    En SQL, `NULL = 'PAID'` no es FALSE sino NULL, y un CHECK que evalua a NULL
+    se da por CUMPLIDO. Sin un `IS NOT NULL` en las ramas de igualdad, una fila
+    con `payment_status` nulo y `paid_at` puesta daba
+    `FALSE OR FALSE OR NULL` = NULL y entraba: una fecha de cobro colgando de
+    una cotizacion de la que no se sabe si se cobro.
+
+    Es el mismo agujero que 0017 tapo en el CHECK del tipo de cambio. Esta
+    prueba existe porque la forma «OR de ramas con igualdad» lo invita cada
+    vez, y el sintoma no aparece hasta que alguien inserta el caso raro.
+    """
+    content = MIGRATION_FILE.read_text(encoding="utf-8")
+    coherencia = content.split("COHERENCIA = ")[1].split('"""')[1]
+    ramas = [trozo for trozo in coherencia.split("OR") if "payment_status =" in trozo]
+    assert len(ramas) == 2, "se esperan dos ramas de igualdad: UNPAID y PAID"
+    for rama in ramas:
+        assert "payment_status IS NOT NULL" in rama, (
+            "sin este guardia el CHECK evalua a NULL y se da por cumplido"
+        )
 
 
 def test_migration_0019_no_hace_backfill() -> None:
