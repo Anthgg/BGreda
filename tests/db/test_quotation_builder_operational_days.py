@@ -71,6 +71,16 @@ def _esperado(dias: int) -> Decimal:
     return POR_DIA * Decimal(dias) + ADMINISTRATIVO
 
 
+def _repartido(body: dict[str, Any]) -> Decimal:
+    """El costo operativo tal y como queda repartido entre las lineas.
+
+    Sirve tanto para una previsualizacion como para un borrador reabierto: el
+    reparto se guarda en el plan de cada linea, mientras que el total de
+    cabecera solo existe mientras se calcula.
+    """
+    return sum((Decimal(item["fixed_cost_allocation"]) for item in body["items"]), Decimal(0))
+
+
 # ---------------------------------------------------------------------------
 # La formula
 # ---------------------------------------------------------------------------
@@ -242,7 +252,14 @@ async def test_el_reparto_reconcilia_con_el_costo_operativo(
 async def test_el_ajuste_sobrevive_a_guardar_y_reabrir_dos_veces(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """DAY_ADJUSTMENT_SAVE_REOPEN y DAY_ADJUSTMENT_SECOND_SAVE."""
+    """DAY_ADJUSTMENT_SAVE_REOPEN y DAY_ADJUSTMENT_SECOND_SAVE.
+
+    Se comprueba sobre el REPARTO por linea, no sobre `total_fixed_cost`. Ese
+    campo de cabecera es un eco de la previsualizacion y vuelve en cero al
+    reabrir: no se guarda, se recalcula. Lo que si persiste —y lo que sostiene
+    el precio— es `fixed_cost_allocation` de cada linea, cuya suma es el total
+    operativo exacto.
+    """
     payload, _ = await _complete_payload(api, admin_csrf, db_session)
     await _sembrar_maestros(api, admin_csrf)
 
@@ -250,7 +267,7 @@ async def test_el_ajuste_sobrevive_a_guardar_y_reabrir_dos_veces(
     assert creada.status_code == 201, creada.text
     guardada = creada.json()
     dias = _dias(guardada)
-    costo = Decimal(guardada["total_fixed_cost"])
+    costo = _repartido(guardada)
     assert costo == _esperado(dias)
 
     for _ in range(2):
@@ -259,7 +276,7 @@ async def test_el_ajuste_sobrevive_a_guardar_y_reabrir_dos_veces(
         vuelta = reabierta.json()
         assert all(item["days_adjustment"] == 2 for item in vuelta["items"])
         assert _dias(vuelta) == dias
-        assert Decimal(vuelta["total_fixed_cost"]) == costo
+        assert _repartido(vuelta) == costo
 
         regrabada = await api.put(
             f"{BUILDER}/{guardada['id']}",

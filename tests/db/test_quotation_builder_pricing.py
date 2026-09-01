@@ -471,11 +471,16 @@ async def test_un_gasto_manual_no_puede_cobrar_dos_veces_los_fijos(
 async def test_un_maestro_desactivado_no_entra_en_los_fijos(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """El retiro del «Factor» legacy: desactivarlo lo saca del total.
+    """El retiro del «Factor» legacy: ni activo ni desactivado entra en el total.
 
     PRODUCTION_FACTOR_DOUBLE_COUNT: 0 — el factor canonico es el multiplicador,
     y un maestro llamado «Factor» sumando ademas su importe lo cobraria dos
     veces con dos significados distintos.
+
+    Hasta 009G.1 esta prueba comprobaba que ACTIVO sumaba 3 y desactivado no.
+    Ahora la garantia es mas fuerte: `PER_PIECE` queda fuera del costo
+    operativo pase lo que pase, porque su formula no esta decidida. Se sigue
+    comprobando la baja, que es lo que la prueba vigila de verdad.
     """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
     await _seed_fixed_costs(api, admin_csrf)
@@ -490,7 +495,9 @@ async def test_un_maestro_desactivado_no_entra_en_los_fijos(
     con_legacy = (
         await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
     ).json()
-    assert Decimal(con_legacy["total_fixed_cost"]) == TOTAL_FIXED + Decimal(3)
+    assert Decimal(con_legacy["total_fixed_cost"]) == TOTAL_FIXED, (
+        "un PER_PIECE activo tampoco puede colarse en el costo operativo"
+    )
 
     baja = await api.put(
         f"{OTHER_COSTS}/{legacy_id}",
