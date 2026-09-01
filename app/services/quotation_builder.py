@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -26,6 +28,7 @@ from app.models.firings import FiringType
 from app.models.masters import Partner, Product
 from app.models.quotations import (
     OtherCost,
+    OtherCostCalculationType,
     Quotation,
     QuotationItem,
     QuotationStatus,
@@ -63,6 +66,8 @@ from app.services.preparations import (
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import FiringEstimateOverride, QuotationService
 from app.services.sequences import SequenceService
+
+logger = logging.getLogger(__name__)
 
 ZERO = Decimal(0)
 BUILDER_ENTITY = "quotation_builder"
@@ -672,21 +677,64 @@ class QuotationBuilderService:
             [],
         )
 
-    async def _total_fixed_cost(self) -> Decimal:
-        """Costos fijos de la cotizacion: se suman UNA vez, no por linea.
+    async def _total_operational_cost(self, quotation_total_days: int) -> Decimal:
+        """Costos operativos de la cotizacion: se calculan UNA vez, no por linea.
 
-        Son los maestros de otros gastos activos. `calculation_type` ya no es
-        autoridad de calculo en 009E: alquiler, servicios y administrativo son
-        importes totales de la cotizacion, no importes por dia ni por pieza.
-        Multiplicarlos por los dias del lote en cada linea cobraba el taller
-        entero tantas veces como productos tuviera el pedido.
+        Alquiler y servicios se cobran por dia; el administrativo es un importe
+        fijo. Esa es la regla del negocio y la que `calculation_type` ya
+        declaraba en cada maestro.
+
+        009E dejo de mirar `calculation_type` y los sumaba planos. Lo hizo por
+        una razon buena —el motor tecnico multiplicaba por los dias DENTRO de
+        cada linea, asi que un pedido de dos productos cobraba el alquiler del
+        taller dos veces— pero al aplanarlos se llevo por delante la parte
+        diaria: mover el ajuste de dias dejo de cambiar el costo, y el usuario
+        podia sumar una semana al pedido sin que el precio se enterara.
+
+        Aqui se conservan las dos cosas. Los dias multiplican una sola vez, a
+        nivel de cotizacion, y el reparto entre lineas lo sigue haciendo
+        `allocate_fixed_costs` como hasta ahora.
+
+        `PER_PIECE` queda fuera de 009G.1 a proposito: el unico maestro que lo
+        usa es OTH-004, desactivado, y su formula no esta decidida. Si algun
+        dia se activa uno, se registra en el log en vez de inventarle un
+        calculo o de ignorarlo en silencio.
         """
         rows = (
             (await self._session.execute(select(OtherCost).where(OtherCost.active.is_(True))))
             .scalars()
             .all()
         )
-        return sum((row.unit_price for row in rows), ZERO)
+        dias = Decimal(quotation_total_days)
+        total = ZERO
+        for row in rows:
+            if row.calculation_type is OtherCostCalculationType.PER_DAY:
+                total += row.unit_price * dias
+            elif row.calculation_type is OtherCostCalculationType.FIXED:
+                total += row.unit_price
+            else:
+                logger.warning(
+                    "ACTIVE_PER_PIECE_OTHER_COST_FOUND: %s (%s) esta activo y "
+                    "queda fuera del costo operativo; 009G.1 no define su formula",
+                    row.code,
+                    row.name,
+                )
+        return total
+
+    @staticmethod
+    def _quotation_total_days(items: Sequence[QuotationBuilderItemOut]) -> int:
+        """Dias de calendario que ocupa la cotizacion entera.
+
+        Es el MAXIMO de las lineas, no la suma. Los dias de dos productos
+        transcurren dentro del mismo periodo: sumarlos cobraria dos veces un
+        alquiler que solo se paga una. Una cotizacion con una linea de 13 dias
+        y otra de 8 dura 13, no 21.
+
+        No es un planificador: 009G.1 no modela dependencias ni secuencias
+        obligatorias entre lineas. Si algun dia Quemas impone un orden real,
+        esa regla se decide alli.
+        """
+        return max((item.total_days for item in items), default=0)
 
     @staticmethod
     def _apply_commercial_engine(
@@ -1335,7 +1383,10 @@ class QuotationBuilderService:
         # sigue dando el valor inicial, pero deja de ser la autoridad: dos
         # cotizaciones del mismo dia pueden emitirse en monedas distintas.
         currency_code, exchange_rate = _resolve_currency(payload, settings)
-        total_fixed_cost = await self._total_fixed_cost()
+        # Los dias ya estan calculados por linea; el costo operativo los
+        # multiplica UNA vez, aqui, y no dentro de cada linea.
+        quotation_total_days = self._quotation_total_days(item_outputs)
+        total_fixed_cost = await self._total_operational_cost(quotation_total_days)
         item_outputs = self._apply_commercial_engine(
             item_outputs,
             production_factor=production_factor,

@@ -73,14 +73,19 @@ async def test_los_costos_fijos_no_se_duplican_por_producto(
 
 
 @pytest.mark.asyncio
-async def test_el_costo_fijo_no_se_multiplica_por_los_dias(
+async def test_el_costo_por_dia_se_multiplica_una_vez_por_la_cotizacion(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """PER_DAY_FIXED_COST_MULTIPLICATION: NO.
+    """Fase 009G.1: un maestro PER_DAY se cobra por dia, pero una sola vez.
 
-    `calculation_type` dejo de ser autoridad de calculo. Un maestro marcado
-    PER_DAY suma su importe UNA vez, no una por cada dia del lote: antes, un
-    lote de doce dias facturaba doce dias de servicios en cada linea.
+    Esta prueba afirmaba lo contrario hasta 009G.1, y guardaba un defecto. 009E
+    dejo de mirar `calculation_type` para impedir que cada linea multiplicara
+    los dias por su cuenta —dos productos pagaban el taller dos veces— y al
+    aplanarlo se llevo por delante la parte diaria: mover el ajuste de dias
+    dejo de cambiar el precio.
+
+    El contrato correcto conserva las dos cosas: los dias multiplican al nivel
+    de la COTIZACION, y el reparto entre lineas sigue sumando el total exacto.
     """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
     creado = await api.post(
@@ -94,10 +99,14 @@ async def test_el_costo_fijo_no_se_multiplica_por_los_dias(
     assert respuesta.status_code == 200, respuesta.text
     body = respuesta.json()
 
-    assert Decimal(body["total_fixed_cost"]) == Decimal(10)
-    assert sum(Decimal(item["fixed_cost_allocation"]) for item in body["items"]) == Decimal(10)
-    # Y el lote dura varios dias, asi que el 10 no es una casualidad de un dia.
-    assert any(item["total_days"] > 1 for item in body["items"])
+    dias = max(item["total_days"] for item in body["items"])
+    assert dias > 1, "hace falta un lote de varios dias para que la prueba diga algo"
+    esperado = Decimal(10) * Decimal(dias)
+
+    assert Decimal(body["total_fixed_cost"]) == esperado
+    # Una vez por cotizacion, no una por linea: con dos lineas, el doble seria
+    # exactamente el defecto que 009E arreglo.
+    assert sum(Decimal(item["fixed_cost_allocation"]) for item in body["items"]) == esperado
 
 
 @pytest.mark.asyncio
@@ -462,11 +471,16 @@ async def test_un_gasto_manual_no_puede_cobrar_dos_veces_los_fijos(
 async def test_un_maestro_desactivado_no_entra_en_los_fijos(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """El retiro del «Factor» legacy: desactivarlo lo saca del total.
+    """El retiro del «Factor» legacy: ni activo ni desactivado entra en el total.
 
     PRODUCTION_FACTOR_DOUBLE_COUNT: 0 — el factor canonico es el multiplicador,
     y un maestro llamado «Factor» sumando ademas su importe lo cobraria dos
     veces con dos significados distintos.
+
+    Hasta 009G.1 esta prueba comprobaba que ACTIVO sumaba 3 y desactivado no.
+    Ahora la garantia es mas fuerte: `PER_PIECE` queda fuera del costo
+    operativo pase lo que pase, porque su formula no esta decidida. Se sigue
+    comprobando la baja, que es lo que la prueba vigila de verdad.
     """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
     await _seed_fixed_costs(api, admin_csrf)
@@ -481,7 +495,9 @@ async def test_un_maestro_desactivado_no_entra_en_los_fijos(
     con_legacy = (
         await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))
     ).json()
-    assert Decimal(con_legacy["total_fixed_cost"]) == TOTAL_FIXED + Decimal(3)
+    assert Decimal(con_legacy["total_fixed_cost"]) == TOTAL_FIXED, (
+        "un PER_PIECE activo tampoco puede colarse en el costo operativo"
+    )
 
     baja = await api.put(
         f"{OTHER_COSTS}/{legacy_id}",
