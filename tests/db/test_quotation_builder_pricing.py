@@ -73,14 +73,19 @@ async def test_los_costos_fijos_no_se_duplican_por_producto(
 
 
 @pytest.mark.asyncio
-async def test_el_costo_fijo_no_se_multiplica_por_los_dias(
+async def test_el_costo_por_dia_se_multiplica_una_vez_por_la_cotizacion(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """PER_DAY_FIXED_COST_MULTIPLICATION: NO.
+    """Fase 009G.1: un maestro PER_DAY se cobra por dia, pero una sola vez.
 
-    `calculation_type` dejo de ser autoridad de calculo. Un maestro marcado
-    PER_DAY suma su importe UNA vez, no una por cada dia del lote: antes, un
-    lote de doce dias facturaba doce dias de servicios en cada linea.
+    Esta prueba afirmaba lo contrario hasta 009G.1, y guardaba un defecto. 009E
+    dejo de mirar `calculation_type` para impedir que cada linea multiplicara
+    los dias por su cuenta —dos productos pagaban el taller dos veces— y al
+    aplanarlo se llevo por delante la parte diaria: mover el ajuste de dias
+    dejo de cambiar el precio.
+
+    El contrato correcto conserva las dos cosas: los dias multiplican al nivel
+    de la COTIZACION, y el reparto entre lineas sigue sumando el total exacto.
     """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
     creado = await api.post(
@@ -94,10 +99,14 @@ async def test_el_costo_fijo_no_se_multiplica_por_los_dias(
     assert respuesta.status_code == 200, respuesta.text
     body = respuesta.json()
 
-    assert Decimal(body["total_fixed_cost"]) == Decimal(10)
-    assert sum(Decimal(item["fixed_cost_allocation"]) for item in body["items"]) == Decimal(10)
-    # Y el lote dura varios dias, asi que el 10 no es una casualidad de un dia.
-    assert any(item["total_days"] > 1 for item in body["items"])
+    dias = max(item["total_days"] for item in body["items"])
+    assert dias > 1, "hace falta un lote de varios dias para que la prueba diga algo"
+    esperado = Decimal(10) * Decimal(dias)
+
+    assert Decimal(body["total_fixed_cost"]) == esperado
+    # Una vez por cotizacion, no una por linea: con dos lineas, el doble seria
+    # exactamente el defecto que 009E arreglo.
+    assert sum(Decimal(item["fixed_cost_allocation"]) for item in body["items"]) == esperado
 
 
 @pytest.mark.asyncio
