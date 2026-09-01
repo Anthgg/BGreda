@@ -79,8 +79,13 @@ def test_migration_0018_downgrade_quita_el_check_antes_que_la_columna() -> None:
         assert ajeno not in downgrade, f"downgrade no debe tocar {ajeno}"
 
 
-def test_alembic_single_head_is_0018() -> None:
-    """Una sola cabeza: dos harian fallar `alembic upgrade head` en el deploy."""
+def test_0018_sigue_estando_en_el_camino_a_la_cabeza() -> None:
+    """0018 se alcanza desde la cabeza actual, sea cual sea.
+
+    Fijar aqui que la cabeza ES 0018 hace que la siguiente migracion rompa esta
+    prueba sin que nada este mal. Que haya UNA cabeza lo afirma la prueba de la
+    migracion mas nueva, que es la unica que puede saber cual es.
+    """
     alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(alembic_cfg)
-    assert script.get_heads() == ["0018"]
+    assert "0018" in {revision.revision for revision in script.walk_revisions()}
