@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.quotations import (
     AdditionalFormulaType,
     OtherCostCalculationType,
+    QuotationPaymentStatus,
     QuotationStatus,
     QuotationWorkflow,
     TechniqueFormulaType,
@@ -444,6 +445,15 @@ class QuotationSummaryOut(_Out):
     currency_code_snapshot: str = "PEN"
     currency_symbol_snapshot: str = "S/"
     exchange_rate_snapshot: Decimal | None = None
+    #: Fase 009H. El eje de cobro de CADA fila. Sin esto el listado no puede
+    #: decir si algo se cobro, y la unica alternativa seria deducirlo del
+    #: estado comercial —confirmada, luego impaga— que es justo lo que 009H
+    #: separo: son dos hechos distintos y uno no implica el otro.
+    #:
+    #: Nulo significa que el pago no lo registro el sistema, no que este
+    #: impaga. `paid_at` no se expone aqui a proposito: el listado dice si se
+    #: cobro, y el cuando pertenece al detalle.
+    payment_status: QuotationPaymentStatus | None = None
     created_at: datetime
 
 

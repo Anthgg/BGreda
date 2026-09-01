@@ -1946,6 +1946,7 @@ class QuotationService:
                 currency_code_snapshot=quotation.currency_code_snapshot,
                 currency_symbol_snapshot=quotation.currency_symbol_snapshot,
                 exchange_rate_snapshot=quotation.exchange_rate_snapshot,
+                payment_status=quotation.payment_status,
                 created_at=quotation.created_at,
             )
             for quotation in rows
