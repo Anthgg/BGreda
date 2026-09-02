@@ -73,6 +73,11 @@ async def escenario(
     receta, quitar los gramos o dejar el preparado sin existencia. Cada uno de
     esos casos tiene que bloquear el arranque por su propio motivo, y solo se
     puede distinguir si el resto del escenario sigue intacto.
+
+    Quitar la receta o los gramos obliga a mandar `materials_applied`, el
+    importe manual de materiales: el Cotizador no deja confirmar una linea que
+    no diga de una forma o de otra que material lleva. Y asi es EXACTAMENTE
+    como estan las 25 lineas confirmadas de produccion que no tienen receta.
     """
     cliente = await api.post(
         PARTNERS,
@@ -87,6 +92,12 @@ async def escenario(
     assert cliente.status_code == 201, cliente.text
 
     producto, receta = await _finished_product_and_recipe(api, csrf, f"_prod{suffix}")
+    if not con_receta:
+        # Una segunda receta activa para desactivar la eleccion automatica.
+        # `_recipe_for` elige sola cuando hay EXACTAMENTE una version activa en
+        # toda la base, asi que con una sola receta omitir `recipe_id` no
+        # produce una linea sin receta: produce una linea con la unica que hay.
+        await _finished_product_and_recipe(api, csrf, f"_distractor{suffix}")
     horno = await crear_horno(
         api,
         csrf,
@@ -112,6 +123,11 @@ async def escenario(
         item["recipe_version_id"] = receta["current_version"]["id"]
     if gramos_por_pieza is not None:
         item["material_grams_per_piece"] = gramos_por_pieza
+    if not con_receta or gramos_por_pieza is None:
+        # El importe manual de materiales. Es lo que hace confirmable una linea
+        # sin receta o sin gramos, y lo que la deja INPRODUCIBLE: un importe en
+        # soles no dice cuantos gramos de barniz hay que sacar del almacen.
+        item["materials_applied"] = "250.00"
 
     creada = await api.post(
         BUILDER,

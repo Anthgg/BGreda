@@ -148,6 +148,14 @@ async def test_sin_receta_no_arranca_y_no_mueve_nada(
     materiales que llevara la cotizacion.
     """
     datos = await _preparada(api, admin_csrf, db_session, suffix="_norec", con_receta=False)
+    # La precondicion, comprobada y no supuesta. El Cotizador ELIGE receta sola
+    # cuando solo hay una activa en toda la base, asi que una version anterior
+    # de esta prueba creia estar probando una linea sin receta cuando el
+    # backend le habia puesto una: arrancaba, consumia, y la prueba pasaba por
+    # el motivo contrario al que decia su nombre.
+    assert datos["orden"]["lines"][0]["recipe_id"] is None, (
+        "el escenario no logro una linea sin receta: la prueba no probaria nada"
+    )
     antes = await _movimientos(db_session)
 
     respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
@@ -172,6 +180,12 @@ async def test_sin_gramos_por_pieza_no_arranca_y_no_mueve_nada(
     nadie decidio.
     """
     datos = await _preparada(api, admin_csrf, db_session, suffix="_nogr", gramos_por_pieza=None)
+    linea = datos["orden"]["lines"][0]
+    assert linea["recipe_id"] is not None, "hace falta receta para aislar el fallo de los gramos"
+    assert linea["material_grams_per_piece"] is None
+    assert linea["required_material_quantity"] is None, (
+        "sin gramos no puede haber requerimiento calculado"
+    )
     antes = await _movimientos(db_session)
 
     respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
