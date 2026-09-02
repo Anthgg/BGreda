@@ -26,7 +26,7 @@ from tests.db.test_firings_api import FACTORES_CHICO, crear_horno
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
     ORDERS,
-    confirmar,
+    confirmada_y_pagada,
     crear_orden,
     crear_ubicacion,
     dar_existencia,
@@ -174,7 +174,9 @@ async def escenario_multilinea(
         headers=head(csrf),
     )
     assert creada.status_code == 201, creada.text
-    confirmada = await confirmar(api, csrf, creada.json())
+    # Cobrada: desde 009H.1 sin pago no hay arranque, y estas pruebas miden
+    # justamente que dos arranques simultaneos no consuman dos veces.
+    confirmada = await confirmada_y_pagada(api, csrf, creada.json())
 
     orden = await crear_orden(api, csrf, quotation_id=confirmada["id"], location_id=location_id)
     assert orden.status_code == 201, orden.text
@@ -331,7 +333,7 @@ async def test_dos_lineas_del_mismo_preparado_se_suman_antes_de_mirar_el_saldo(
         headers=head(admin_csrf),
     )
     assert creada.status_code == 201, creada.text
-    confirmada = await confirmar(api, admin_csrf, creada.json())
+    confirmada = await confirmada_y_pagada(api, admin_csrf, creada.json())
     orden = await crear_orden(
         api, admin_csrf, quotation_id=confirmada["id"], location_id=location_id
     )
@@ -510,7 +512,7 @@ async def test_dos_ordenes_que_se_pelean_el_mismo_saldo_no_lo_dejan_negativo(
             headers=head(admin_csrf),
         )
         assert creada.status_code == 201, creada.text
-        confirmada = await confirmar(api, admin_csrf, creada.json())
+        confirmada = await confirmada_y_pagada(api, admin_csrf, creada.json())
         orden = await crear_orden(
             api, admin_csrf, quotation_id=confirmada["id"], location_id=location_id
         )

@@ -26,7 +26,7 @@ from app.models.recipes import Recipe
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
     ORDERS,
-    confirmar,
+    confirmada_y_pagada,
     crear_orden,
     dar_existencia,
     escenario,
@@ -37,9 +37,15 @@ from tests.db.test_quotation_builder_api import head
 async def _preparada(
     api: httpx.AsyncClient, csrf: str, db_session: AsyncSession, **kwargs: Any
 ) -> dict[str, Any]:
-    """Escenario confirmado + orden creada, lista para arrancar (o no)."""
+    """Escenario confirmado, COBRADO y con la orden creada: lista para arrancar.
+
+    El cobro no es decorado. Desde 009H.1 una cotizacion impagada no arranca, y
+    las pruebas que montan un fallo de disponibilidad —sin gramos, sin receta,
+    sin saldo— tienen que estar pagadas o fallarian por el motivo equivocado y
+    dejarian de probar lo suyo.
+    """
     datos = await escenario(api, csrf, db_session, **kwargs)
-    confirmada = await confirmar(api, csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, csrf, datos["quotation"])
     creada = await crear_orden(
         api, csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )
@@ -240,7 +246,7 @@ async def test_una_receta_que_no_produce_preparado_no_arranca(
     )
     await db_session.commit()
 
-    confirmada = await confirmar(api, admin_csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, admin_csrf, datos["quotation"])
     creada = await crear_orden(
         api, admin_csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )
@@ -329,7 +335,7 @@ async def test_un_preparado_en_mililitros_bloquea_el_arranque(
     )
     await db_session.commit()
 
-    confirmada = await confirmar(api, admin_csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, admin_csrf, datos["quotation"])
     creada = await crear_orden(
         api, admin_csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )
@@ -366,7 +372,7 @@ async def test_un_preparado_en_kilos_si_convierte_con_el_maestro_de_unidades(
         cantidad="5",
     )
 
-    confirmada = await confirmar(api, admin_csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, admin_csrf, datos["quotation"])
     creada = await crear_orden(
         api, admin_csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )

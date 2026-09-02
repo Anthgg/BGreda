@@ -36,7 +36,12 @@ from app.models.production import (
     ProductionOrderStatus,
     ProductionReadinessCode,
 )
-from app.models.quotations import Quotation, QuotationItem, QuotationStatus
+from app.models.quotations import (
+    Quotation,
+    QuotationItem,
+    QuotationPaymentStatus,
+    QuotationStatus,
+)
 from app.models.recipes import Recipe
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
@@ -140,6 +145,26 @@ class ProductionOrderLocationInvalidError(APIError):
     status_code = 422
     code = "PRODUCTION_ORDER_LOCATION_INVALID"
     message = "La ubicacion de stock no existe o esta desactivada"
+
+
+class ProductionOrderQuotationNotPaidError(APIError):
+    """La cotizacion de origen no consta cobrada. Fase 009H.1.
+
+    Es 409 y no 403 a proposito: no es un problema de permisos sino del estado
+    del negocio. Quien lo recibe puede tener todo el permiso del mundo y la
+    respuesta seguiria siendo la misma, porque lo que falta es el cobro. Un 403
+    mandaria a buscar a un administrador que no puede arreglarlo dando permisos.
+
+    **NULL tambien bloquea.** El eje de cobro admite tres valores y el nulo
+    significa «no consta» —lo que hay en todo lo anterior a 009H—, no «pagada».
+    Dejarlo pasar volveria la regla inoperante el dia que se escribio: hoy hay
+    17 cotizaciones confirmadas en nulo y 2 pagadas. Registrar el cobro de una
+    de esas 17 es posible y basta para desbloquearla.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_QUOTATION_NOT_PAID"
+    message = "La cotizacion debe estar pagada para iniciar la produccion"
 
 
 class ProductionOrderNotStartableError(APIError):
@@ -585,6 +610,24 @@ class ProductionOrderService:
         return grams / uom.factor_to_base
 
     # -- arranque: el unico punto que mueve inventario ---------------------
+    async def _require_paid_quotation(self, order: ProductionOrder) -> None:
+        """Exige que la cotizacion de origen conste cobrada. Fase 009H.1.
+
+        Se comprueba ANTES de evaluar disponibilidad, y por tanto antes de
+        bloquear una sola fila de saldo: un arranque que va a rechazarse no
+        tiene por que retener el inventario mientras lo hace.
+
+        La cotizacion se lee con cerrojo para no cruzarse con quien la esta
+        marcando pagada en ese mismo instante. Sin el, dos peticiones
+        simultaneas podrian leer «impagada» y «pagada» del mismo estado y el
+        resultado dependeria del orden en que el planificador las despierte.
+        """
+        quotation = await self._session.scalar(
+            select(Quotation).where(Quotation.id == order.quotation_id).with_for_update()
+        )
+        if quotation is None or quotation.payment_status is not QuotationPaymentStatus.PAID:
+            raise ProductionOrderQuotationNotPaidError()
+
     async def start(
         self, order_id: int, *, user: AuthenticatedUser
     ) -> tuple[ProductionOrder, bool]:
@@ -612,6 +655,8 @@ class ProductionOrderService:
             return order, False
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotStartableError()
+
+        await self._require_paid_quotation(order)
 
         issues, requirements = await self._evaluate(order, lock=True)
         if issues:
@@ -760,6 +805,7 @@ class ProductionOrderService:
             quotation_id=order.quotation_id,
             quotation_code=quotation.code if quotation else "",
             quotation_customer_name=quotation.customer_name_snapshot if quotation else None,
+            quotation_payment_status=quotation.payment_status if quotation else None,
             stock_location_id=order.stock_location_id,
             stock_location_name=location.name if location else "",
             line_count=len(order.lines),

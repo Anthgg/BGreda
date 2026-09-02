@@ -176,6 +176,31 @@ async def confirmar(api: httpx.AsyncClient, csrf: str, quotation: dict[str, Any]
     return dict(respuesta.json())
 
 
+async def pagar(api: httpx.AsyncClient, csrf: str, quotation_id: int) -> dict[str, Any]:
+    """Registra el cobro. Fase 009H.1: sin esto una orden NO puede arrancar.
+
+    La columna nace con `UNPAID`, asi que toda cotizacion recien confirmada
+    esta impagada. Los escenarios que llegan a arrancar tienen que pasar por
+    aqui, y eso es exactamente lo que se quiere que se lea en la prueba: que
+    producir depende de que alguien haya cobrado.
+
+    Solo ADMIN puede marcarla, por la matriz de 009J. El operario ejecuta el
+    taller; cobrar es administracion.
+    """
+    respuesta = await api.post(f"{BUILDER}/{quotation_id}/mark-paid", headers=head(csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    return dict(respuesta.json())
+
+
+async def confirmada_y_pagada(
+    api: httpx.AsyncClient, csrf: str, quotation: dict[str, Any]
+) -> dict[str, Any]:
+    """Una cotizacion lista para producir de verdad: confirmada Y cobrada."""
+    confirmada = await confirmar(api, csrf, quotation)
+    await pagar(api, csrf, confirmada["id"])
+    return confirmada
+
+
 async def crear_orden(
     api: httpx.AsyncClient, csrf: str, *, quotation_id: int, location_id: int, **extra: Any
 ) -> httpx.Response:
@@ -252,10 +277,16 @@ async def test_una_cotizacion_anulada_no_puede_originar_una_orden(
 async def test_producir_no_exige_haber_cobrado(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession, cobrar: bool
 ) -> None:
-    """PAYMENT_NOT_REQUIRED_FOR_PRODUCTION_ORDER.
+    """UNPAID_ORDER_CAN_BE_CREATED. Crear no exige haber cobrado; ARRANCAR si.
 
-    Cobrar (009H) y fabricar (009I) son ejes distintos. Atarlos aqui pararia el
-    taller por una gestion administrativa, y el taller no es quien cobra.
+    Fase 009H.1 movio la linea, y la movio a un sitio y no a otro. Preparar la
+    orden —reservar el correlativo, congelar que hay que fabricar, imprimir la
+    hoja, generar el QR, mirar si alcanza el material— no gasta nada y puede
+    hacerse mientras administracion cobra. Lo que no puede ocurrir sin cobro es
+    el hecho fisico, y eso se comprueba en `test_production_payment_gate.py`.
+
+    Atar la CREACION al cobro pararia el taller por una gestion administrativa
+    que no le corresponde. Atar el ARRANQUE es la regla del negocio.
 
     Se prueban los dos extremos del eje: sin cobrar y cobrada. El tercer caso
     —`payment_status` nulo, las historicas anteriores a 009H— no se puede
@@ -288,9 +319,16 @@ async def test_una_confirmada_sin_registro_de_pago_tambien_produce(
 ) -> None:
     """El tercer caso del eje de pago: NULL, que no es UNPAID.
 
-    Es el estado real de las 18 confirmadas anteriores a 009H. No saber si se
-    cobraron no puede impedir fabricarlas, asi que el nulo se pone a mano
-    porque la API ya no lo produce.
+    Es el estado real de 17 de las 19 confirmadas que hay en produccion, todas
+    anteriores a 009H. No saber si se cobraron no impide PREPARAR la orden.
+
+    Si impide arrancarla, y eso es deliberado: desde 009H.1 hace falta PAID, y
+    el nulo tambien bloquea. Dejar pasar el nulo habria vuelto la regla
+    inoperante el mismo dia que se escribio, porque cubre casi todo lo que hay.
+    Registrar el cobro de una de esas 17 es posible y basta para desbloquearla.
+    Lo comprueba `test_production_payment_gate.py`.
+
+    El nulo se pone a mano porque la API ya no lo produce.
     """
     datos = await escenario(api, admin_csrf, db_session, suffix="_nulo")
     confirmada = await confirmar(api, admin_csrf, datos["quotation"])

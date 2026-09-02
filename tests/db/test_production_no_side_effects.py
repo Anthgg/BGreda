@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.inventory import StockBalance, StockMovement
 from tests.db.test_production_orders_api import (
     ORDERS,
+    confirmada_y_pagada,
     confirmar,
     crear_orden,
     escenario,
@@ -88,7 +89,7 @@ async def test_solo_arrancar_mueve_inventario_en_todo_el_flujo(
     assert await _foto(db_session) == referencia, "guardar el borrador movio inventario"
 
     # ---- 3. Confirmar ----------------------------------------------------
-    confirmada = await confirmar(api, admin_csrf, actualizado.json())
+    confirmada = await confirmada_y_pagada(api, admin_csrf, actualizado.json())
     assert await _foto(db_session) == referencia, "confirmar movio inventario"
 
     # ---- 4. Cobrar -------------------------------------------------------

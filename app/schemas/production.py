@@ -14,6 +14,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.production import ProductionOrderStatus, ProductionReadinessCode
+from app.models.quotations import QuotationPaymentStatus
 
 
 class ProductionOrderCreateIn(BaseModel):
@@ -96,6 +97,14 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     #: dejaria recorrer ordenes ajenas cambiando un digito.
     qr_token: str
     quotation_customer_name: str | None
+    #: Fase 009H.1. Si la cotizacion de origen consta cobrada. Viaja para que
+    #: la pantalla pueda decir POR QUE no se puede arrancar, no para que lo
+    #: decida: la autoridad es el guardia del backend, que rechaza el arranque
+    #: aunque el boton llegara a aparecer.
+    #:
+    #: Nulo significa «no consta», que es un tercer caso y no «impagada». Para
+    #: arrancar hace falta PAID; el nulo tambien bloquea.
+    quotation_payment_status: QuotationPaymentStatus | None
     lines: list[ProductionOrderLineOut]
     readiness: ProductionReadinessOut
 
