@@ -436,13 +436,19 @@ ProductionOrderServiceDep = Annotated[ProductionOrderService, Depends(get_produc
 async def get_production_pdf_service(
     session: DbSessionDep,
     settings: SettingsDep,
+    request: Request,
 ) -> ProductionPdfService:
     # La base del QR sale de la configuracion, no de la cabecera Host de la
     # peticion: un Host manipulado imprimiria en la hoja de taller un enlace a
     # un dominio ajeno. Se usa el primer origen declarado, que es el de la
     # aplicacion; si no hubiera ninguno, el QR lleva solo la ruta relativa.
     origins = settings.frontend_origins
-    return ProductionPdfService(session, base_url=origins[0] if origins else None)
+    storage: ObjectStorage | None = getattr(request.app.state, "object_storage", None)
+    return ProductionPdfService(
+        session,
+        base_url=origins[0] if origins else None,
+        storage=storage,
+    )
 
 
 ProductionPdfServiceDep = Annotated[ProductionPdfService, Depends(get_production_pdf_service)]

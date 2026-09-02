@@ -43,6 +43,8 @@ from app.models.masters import Product
 from app.models.production import ProductionOrder
 from app.models.quotations import Quotation
 from app.models.settings import SINGLETON_ID, CompanySettings
+from app.services.document_assets import resolve_company_logo_data_uri
+from app.services.storage import ObjectStorage
 
 #: Raiz del sistema documental. El cargador apunta aqui y no a `production/`
 #: porque las plantillas extienden `base_document.html` y usan los componentes
@@ -84,9 +86,16 @@ def build_qr_data_uri(token: str, *, base_url: str | None = None) -> str:
 class ProductionPdfService:
     """Renderiza los documentos de una orden."""
 
-    def __init__(self, session: AsyncSession, *, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        base_url: str | None = None,
+        storage: ObjectStorage | None = None,
+    ) -> None:
         self._session = session
         self._base_url = base_url
+        self._storage = storage
         self._jinja_env = Environment(
             loader=FileSystemLoader(str(TEMPLATES_DIR)),
             autoescape=select_autoescape(["html", "xml"]),
@@ -115,6 +124,7 @@ class ProductionPdfService:
         quotation = await self._session.get(Quotation, order.quotation_id)
         location = await self._session.get(StockLocation, order.stock_location_id)
         company = await self._company_settings()
+        logo_data_uri = await resolve_company_logo_data_uri(company, self._storage)
 
         prepared_ids = {
             line.prepared_product_id for line in order.lines if line.prepared_product_id is not None
@@ -126,7 +136,7 @@ class ProductionPdfService:
 
         return build_production_order_document(
             order=order,
-            company=build_company_doc_info(company),
+            company=build_company_doc_info(company, logo_data_uri),
             quotation_code=quotation.code if quotation else None,
             stock_location_name=location.name if location else None,
             prepared_names=prepared,
@@ -143,6 +153,13 @@ class ProductionPdfService:
     async def build_public_data(self, order: ProductionOrder) -> PublicTrackingData:
         """Lo unico que sale de aqui sin sesion. Lo consumen la API y el PDF."""
         company = await self._company_settings()
+        return self._build_public_data(order, company)
+
+    @staticmethod
+    def _build_public_data(
+        order: ProductionOrder,
+        company: CompanySettings | None,
+    ) -> PublicTrackingData:
         nombre = None
         if company is not None:
             nombre = company.trade_name or company.legal_name
@@ -156,7 +173,10 @@ class ProductionPdfService:
         serlo y bastaria una fila nueva en la plantilla para publicar el
         almacen.
         """
-        hoja = build_public_tracking_sheet(await self.build_public_data(order))
+        company = await self._company_settings()
+        data = self._build_public_data(order, company)
+        logo_data_uri = await resolve_company_logo_data_uri(company, self._storage)
+        hoja = build_public_tracking_sheet(data, logo_data_uri=logo_data_uri)
         html_content = self._public_template.render(doc=hoja)
         content = await asyncio.to_thread(self.render_pdf_from_html, html_content)
         return content, sanitize_pdf_filename(order.code, "seguimiento")

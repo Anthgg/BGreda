@@ -106,11 +106,12 @@ def _html_orden() -> str:
     return servicio._template.render(doc=documento)
 
 
-def _html_publico() -> str:
+def _html_publico(logo_data_uri: str | None = None) -> str:
     servicio = ProductionPdfService.__new__(ProductionPdfService)
     ProductionPdfService.__init__(servicio, session=None)  # type: ignore[arg-type]
     hoja = build_public_tracking_sheet(
-        build_public_tracking_data(order=_orden(), company_name="LABERINTO S.A.C.")
+        build_public_tracking_data(order=_orden(), company_name="LABERINTO S.A.C."),
+        logo_data_uri=logo_data_uri,
     )
     return servicio._public_template.render(doc=hoja)
 
@@ -171,6 +172,14 @@ def test_todos_extienden_la_misma_base(nombre: str) -> None:
     assert '{% extends "base_document.html" %}' in fuente
     assert 'extends "quotations/' not in fuente
     assert 'extends "production/' not in fuente
+
+
+def test_la_constancia_publica_usa_el_logo_configurado_sin_exponer_otros_datos() -> None:
+    html = _html_publico("data:image/png;base64,CONFIGURADO")
+
+    assert 'src="data:image/png;base64,CONFIGURADO"' in html
+    assert "RUC:" not in html
+    assert "Dirección:" not in html
 
 
 def test_lo_comercial_no_se_cuela_en_los_documentos_de_produccion() -> None:
