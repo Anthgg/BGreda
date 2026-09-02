@@ -55,21 +55,44 @@ class TestAutorizacion:
     async def test_sin_sesion_no_se_consulta(self, api: httpx.AsyncClient) -> None:
         assert (await api.get(INVENTORY)).status_code == 401
 
-    async def test_operator_consulta_pero_no_ajusta(
+    async def test_operator_ajusta_existencia_pero_no_abre_almacenes(
         self, api: httpx.AsyncClient, operator_csrf: str
     ) -> None:
+        """Fase 009J. Antes esta prueba exigia lo contrario, y era correcta.
+
+        Hasta 009I la regla del sistema era «todo lo que persiste es de ADMIN».
+        Ahora el taller repone y corrige existencia, porque el material que
+        consume una orden de produccion sale de una preparacion y la
+        preparacion sale de materia prima que alguien carga.
+
+        Abrir un almacen NUEVO sigue siendo administrativo, y por eso las dos
+        mitades viajan juntas: la ampliacion tiene un limite y se ve aqui.
+
+        El ajuste apunta a un producto inexistente a proposito: lo que se juzga
+        es que la peticion PASE la autorizacion, y un 404 lo demuestra igual de
+        bien que un 201 sin tener que montar un maestro entero.
+        """
         assert (await api.get(INVENTORY)).status_code == 200
-        response = await api.post(
+
+        ajuste = await api.post(
             ADJUSTMENTS,
             json={
                 "product_id": 1,
                 "location_id": 1,
                 "quantity": "1",
-                "reason": "Intento",
+                "reason": "Reposicion del taller",
             },
             headers={"X-CSRF-Token": operator_csrf},
         )
-        assert response.status_code == 403
+        assert ajuste.status_code != 403, "el taller ya puede ajustar existencia"
+        assert ajuste.status_code == 404, ajuste.text
+
+        almacen = await api.post(
+            LOCATIONS,
+            json={"name": "Almacen del operario"},
+            headers={"X-CSRF-Token": operator_csrf},
+        )
+        assert almacen.status_code == 403, "abrir un almacen sigue siendo administrativo"
 
 
 class TestAjustes:

@@ -118,15 +118,20 @@ async def test_el_operario_prepara_receta_y_ajusta_existencia(
     estos dos dejaria al taller pudiendo gastar barniz y sin poder fabricarlo.
     """
     datos = await escenario(api, admin_csrf, db_session, suffix="_rbac_prep")
+    # La preparacion consume la MATERIA PRIMA de la receta, no el preparado que
+    # produce. Cargar el preparado no habria servido de nada: es justo lo que la
+    # receta genera al final.
+    receta = (await api.get(f"/api/v1/recipes/{datos['receta']['id']}")).json()
+    componente = receta["current_version"]["lines"][0]["component_product_id"]
 
     operator_csrf = await como_operario(api)
     ajuste = await api.post(
         f"{INVENTARIO}/adjustments",
         json={
-            "product_id": datos["prepared_product_id"],
+            "product_id": componente,
             "location_id": datos["location_id"],
-            "quantity": "100",
-            "reason": "Carga del taller",
+            "quantity": "500",
+            "reason": "Reposicion del taller",
         },
         headers=head(operator_csrf),
     )
