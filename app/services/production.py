@@ -232,16 +232,22 @@ class ProductionOrderService:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[ProductionOrder], int]:
-        stmt = self._base_query()
+        # Los filtros se arman una vez y se aplican a las DOS consultas. Contar
+        # sobre una subconsulta que arrastra los `selectinload` del listado
+        # funcionaba, pero contar y listar por caminos distintos es como se
+        # acaba con un total que no cuadra con las filas.
+        condiciones = []
         if status is not None:
-            stmt = stmt.where(ProductionOrder.status == status)
+            condiciones.append(ProductionOrder.status == status)
         if quotation_id is not None:
-            stmt = stmt.where(ProductionOrder.quotation_id == quotation_id)
-        total = await self._session.scalar(
-            select(func.count()).select_from(
-                stmt.options().order_by(None).with_only_columns(ProductionOrder.id).subquery()
-            )
-        )
+            condiciones.append(ProductionOrder.quotation_id == quotation_id)
+
+        stmt = self._base_query()
+        total_stmt = select(func.count()).select_from(ProductionOrder)
+        for condicion in condiciones:
+            stmt = stmt.where(condicion)
+            total_stmt = total_stmt.where(condicion)
+        total = await self._session.scalar(total_stmt)
         rows = await self._session.execute(
             stmt.order_by(ProductionOrder.created_at.desc(), ProductionOrder.id.desc())
             .limit(_limit(limit))

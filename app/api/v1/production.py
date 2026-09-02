@@ -90,6 +90,21 @@ async def scan_production_order(
     return await service.present(await service.get_by_qr_token(qr_token))
 
 
+@router.get("/{order_id}", response_model=ProductionOrderOut)
+async def get_production_order(
+    order_id: int,
+    service: ProductionOrderServiceDep,
+    _: CurrentUserDep,
+) -> ProductionOrderOut:
+    """La orden con su disponibilidad recalculada.
+
+    Va DESPUES de `/scan/{qr_token}`: FastAPI resuelve por orden de
+    declaracion, y con esta delante `/scan/xxx` entraria por aqui con
+    `order_id="scan"` y respondaria un 422 incomprensible.
+    """
+    return await service.present(await service.get(order_id))
+
+
 @router.get(
     "/{order_id}/document",
     response_class=Response,

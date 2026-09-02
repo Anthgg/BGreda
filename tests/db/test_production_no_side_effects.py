@@ -67,7 +67,7 @@ async def test_solo_arrancar_mueve_inventario_en_todo_el_flujo(
                 {
                     "product_id": datos["producto"]["id"],
                     "quantity": 100,
-                    "dimensions": {"width": "24", "length": "24"},
+                    "dimensions": {"width": "24", "length": "24", "height": "8"},
                     "recipe_id": datos["receta"]["id"],
                     "recipe_version_id": datos["receta"]["current_version"]["id"],
                     "material_grams_per_piece": "10",

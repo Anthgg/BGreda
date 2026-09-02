@@ -142,7 +142,7 @@ async def escenario_multilinea(
             {
                 "product_id": terminado.json()["id"],
                 "quantity": cantidad,
-                "dimensions": {"width": "20", "length": "20"},
+                "dimensions": {"width": "20", "length": "20", "height": "8"},
                 "recipe_id": receta["id"],
                 "recipe_version_id": receta["current_version"]["id"],
                 "material_grams_per_piece": gramos,
@@ -309,7 +309,7 @@ async def test_dos_lineas_del_mismo_preparado_se_suman_antes_de_mirar_el_saldo(
             {
                 "product_id": terminado.json()["id"],
                 "quantity": cantidad,
-                "dimensions": {"width": "20", "length": "20"},
+                "dimensions": {"width": "20", "length": "20", "height": "8"},
                 "recipe_id": receta["id"],
                 "recipe_version_id": receta["current_version"]["id"],
                 "material_grams_per_piece": gramos,
@@ -496,7 +496,7 @@ async def test_dos_ordenes_que_se_pelean_el_mismo_saldo_no_lo_dejan_negativo(
                     {
                         "product_id": terminado.json()["id"],
                         "quantity": 70,
-                        "dimensions": {"width": "20", "length": "20"},
+                        "dimensions": {"width": "20", "length": "20", "height": "8"},
                         "recipe_id": receta["id"],
                         "recipe_version_id": receta["current_version"]["id"],
                         "material_grams_per_piece": "10",

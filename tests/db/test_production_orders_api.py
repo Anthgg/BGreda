@@ -101,7 +101,7 @@ async def escenario(
     item: dict[str, Any] = {
         "product_id": producto["id"],
         "quantity": cantidad,
-        "dimensions": {"width": "24", "length": "24"},
+        "dimensions": {"width": "24", "length": "24", "height": "8"},
         "other_costs": [],
         "markup_percent": "100",
         "commercial_sale_unit_price": "8.50",
