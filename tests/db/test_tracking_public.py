@@ -331,8 +331,8 @@ async def test_la_superficie_publica_no_acepta_escrituras(
         "token-que-no-existe-en-ninguna-parte-000000",
         "corto",
         "x" * 500,
-        "../../../etc/passwd",
         "' OR 1=1 --",
+        "<script>alert(1)",
     ],
 )
 async def test_un_token_invalido_responde_siempre_lo_mismo_y_nunca_un_500(
@@ -340,14 +340,43 @@ async def test_un_token_invalido_responde_siempre_lo_mismo_y_nunca_un_500(
 ) -> None:
     """QR_PUBLIC_INVALID_TOKEN_NO_500.
 
-    Uno corto, uno larguisimo, uno con recorrido de rutas y uno con comillas.
-    Todos tienen que responder el MISMO 404: cualquier diferencia —un 422 aqui,
-    un 500 alla— le dice a quien prueba tokens por donde seguir.
+    Uno desconocido, uno corto, uno larguisimo, uno con comillas y uno con
+    marcado (sin barras: una barra dejaria de ser un token y pasaria a ser
+    otra ruta, que es el caso de la prueba siguiente). Todos tienen que
+    responder el MISMO 404 y el MISMO codigo:
+    cualquier diferencia —un 422 aqui, un 500 alla— le dice a quien prueba
+    tokens por donde seguir.
+
+    El corto y el larguisimo ni siquiera llegan a la base: la forma se
+    comprueba antes, para que un endpoint sin sesion no se pueda usar para
+    disparar consultas con cadenas de un megabyte.
     """
     respuesta = await anonimo.get(f"{TRACKING}/scan/{token}")
 
     assert respuesta.status_code == 404, respuesta.text
     assert respuesta.json()["error"]["code"] == "TRACKING_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_un_intento_de_recorrer_rutas_no_llega_a_ninguna_parte(
+    anonimo: httpx.AsyncClient,
+) -> None:
+    """`..` en el token tampoco abre nada, aunque salga por otra puerta.
+
+    El cliente HTTP normaliza los segmentos `..` antes de enviar la peticion
+    —igual que hace un navegador—, asi que esto NO entra por el endpoint de
+    seguimiento sino por una ruta que no existe. Se comprueba igual, y se
+    comprueba lo que de verdad importa: que responde 404 y no un 500 ni el
+    contenido de otra cosa.
+
+    Se separa de la prueba anterior en vez de meterlo en su lista porque el
+    codigo de error es OTRO, y afirmar que son el mismo seria mentir sobre por
+    donde paso la peticion.
+    """
+    respuesta = await anonimo.get(f"{TRACKING}/scan/../../../etc/passwd")
+
+    assert respuesta.status_code == 404, respuesta.text
+    assert "passwd" not in respuesta.text
 
 
 # ---------------------------------------------------------------------------
