@@ -22,10 +22,8 @@ toca.
 from __future__ import annotations
 
 import asyncio
-import base64
 from pathlib import Path
 
-import segno
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +42,7 @@ from app.models.production import ProductionOrder
 from app.models.quotations import Quotation
 from app.models.settings import SINGLETON_ID, CompanySettings
 from app.services.document_assets import resolve_company_logo_data_uri
+from app.services.document_qr import build_document_qr_data_uri
 from app.services.storage import ObjectStorage
 
 #: Raiz del sistema documental. El cargador apunta aqui y no a `production/`
@@ -64,23 +63,29 @@ SCAN_PATH = "/seguimiento"
 QR_CAPTION = "Escanea para consultar el estado de producción"
 
 
-def build_qr_data_uri(token: str, *, base_url: str | None = None) -> str:
-    """Dibuja el QR del token como SVG embebido.
+def build_qr_data_uri(
+    token: str,
+    *,
+    base_url: str | None = None,
+    logo_data_uri: str | None = None,
+) -> str:
+    """El QR de una orden: una ruta con el token opaco, y nada mas.
 
-    Se codifica una RUTA con el token opaco y nada mas. En el QR no van el
-    cliente, el precio, el documento de identidad ni el stock: un QR es texto
-    legible por cualquiera que apunte una camara, y lo que se imprime en una
-    hoja de taller acaba en una mesa, en una foto y en un grupo de mensajeria.
+    En el QR no van el cliente, el precio, el documento de identidad ni el
+    stock: un QR es texto legible por cualquiera que apunte una camara, y lo
+    que se imprime en una hoja de taller acaba en una mesa, en una foto y en un
+    grupo de mensajeria.
 
-    El SVG se incrusta como `data:` porque WeasyPrint no descarga nada: el
-    documento tiene que ser autosuficiente.
+    El logo del taller —si esta configurado— se dibuja centrado. **No forma
+    parte del contenido codificado**: no cambia el token, ni la URL, ni la
+    entropia. Solo obliga a subir la correccion de errores, porque tapar el
+    centro destruye modulos que hay que poder reconstruir. Como dibujarlo lo
+    decide `app/services/document_qr.py`, que es el unico sitio del proyecto
+    que genera codigos.
     """
     prefix = (base_url or "").rstrip("/")
     payload = f"{prefix}{SCAN_PATH}/{token}"
-    qr = segno.make(payload, error="m")
-    svg = qr.svg_inline(scale=4, border=2)
-    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-    return f"data:image/svg+xml;base64,{encoded}"
+    return build_document_qr_data_uri(payload, logo_data_uri=logo_data_uri)
 
 
 class ProductionPdfService:
@@ -140,7 +145,9 @@ class ProductionPdfService:
             quotation_code=quotation.code if quotation else None,
             stock_location_name=location.name if location else None,
             prepared_names=prepared,
-            qr_data_uri=build_qr_data_uri(order.qr_token, base_url=self._base_url),
+            qr_data_uri=build_qr_data_uri(
+                order.qr_token, base_url=self._base_url, logo_data_uri=logo_data_uri
+            ),
             qr_caption=QR_CAPTION,
         )
 

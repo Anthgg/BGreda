@@ -9,16 +9,16 @@
   fechas y no sabe que es un IGV: `meta` es una lista de pares etiqueta/valor
   que arma cada documento con lo suyo.
 
-  `aside` es marcado ya renderizado —en la practica, un `qr_block`— que se
-  coloca a la izquierda de la caja de identidad. Se pasa como parametro en vez
-  de codificar el QR aqui dentro para que la cabecera siga sin saber que
-  existen los codigos QR.
+  No acepta contenido extra. Hubo un momento en que la hoja de taller le
+  colgaba el QR al lado, y con un emisor sin direccion la caja de identidad
+  quedaba tan estrecha que el titulo se partia en dos lineas. El QR vive ahora
+  al pie de su documento, que es donde tiene sitio.
 #}
 {% from "components/status_badge.html" import status_badge %}
 
-{% macro document_header(company, title, code, badge=none, meta=[], aside=none) %}
+{% macro document_header(company, title, code, badge=none, meta=[]) %}
 <div class="doc-header">
-  <div class="doc-header-left{{ ' doc-header-left-narrow' if aside else '' }}">
+  <div class="doc-header-left">
     {% if company.logo_data_uri %}
     <img src="{{ company.logo_data_uri }}" class="doc-logo" alt="Logo">
     {% endif %}
@@ -37,19 +37,8 @@
     </div>
   </div>
 
-  <div class="doc-header-right{{ ' doc-header-right-wide' if aside else '' }}">
-    {% if aside %}
-    <table class="doc-header-split">
-      <tr>
-        <td class="doc-header-aside">{{ aside }}</td>
-        <td class="doc-header-identity">
-          {{ _identity(title, code, badge, meta) }}
-        </td>
-      </tr>
-    </table>
-    {% else %}
+  <div class="doc-header-right">
     {{ _identity(title, code, badge, meta) }}
-    {% endif %}
   </div>
 </div>
 {%- endmacro %}
