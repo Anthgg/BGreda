@@ -1,0 +1,498 @@
+/* ==========================================================================
+   Sistema documental de Greda — identidad visual de todos los documentos.
+
+   Define COMO se ve un documento, nunca QUE dice. La explicacion completa —que
+   es global, que es de cada documento y como se anade uno nuevo— vive en
+   docs/document-design-system.md, no aqui.
+
+   Dos avisos que si tienen que estar a la vista de quien edite este fichero:
+
+   1) WEASYPRINT (v69), que no es Chrome. Maquetar en columnas con
+      `display: table`; `flex` va a medias y `grid` no llega. Nada de
+      `position: sticky`, `gap` en flex ni `clamp()`. Las variables CSS si
+      funcionan (>= v53). Ninguna URL externa: WeasyPrint no descarga nada, asi
+      que imagenes y fuentes van embebidas como `data:`. Las cajas de pie de
+      pagina solo aceptan `content`, no marcado.
+
+   2) VOCABULARIO. Este fichero se incrusta ENTERO —comentarios incluidos— en
+      el HTML de todos los documentos, incluido el que recibe el cliente. No
+      escribir aqui palabras del dominio de ningun documento concreto. Lo
+      vigila tests/unit/test_document_system.py.
+   ========================================================================== */
+
+:root {
+  /* Tipografia. DejaVu es la que trae la imagen; el resto son respaldo. */
+  --doc-font: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
+  --doc-font-mono: 'DejaVu Sans Mono', 'Courier New', monospace;
+
+  --doc-size-base: 9pt;
+  --doc-size-small: 8pt;
+  --doc-size-tiny: 7.5pt;
+  --doc-size-micro: 7pt;
+  --doc-size-title: 13pt;
+  --doc-size-code: 11pt;
+
+  /* Paleta. Un gris azulado frio y un solo acento. */
+  --doc-ink: #0f172a;
+  --doc-text: #1e293b;
+  --doc-muted: #475569;
+  --doc-faint: #64748b;
+  --doc-ghost: #94a3b8;
+  --doc-rule: #e2e8f0;
+  --doc-rule-strong: #cbd5e1;
+  --doc-surface: #f8fafc;
+  --doc-surface-alt: #f1f5f9;
+  --doc-accent: #2563eb;
+  --doc-paper: #ffffff;
+
+  --doc-space-1: 2px;
+  --doc-space-2: 4px;
+  --doc-space-3: 6px;
+  --doc-space-4: 8px;
+  --doc-space-5: 12px;
+  --doc-space-6: 16px;
+
+  --doc-radius: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Pagina
+   -------------------------------------------------------------------------- */
+@page {
+  size: A4 portrait;
+  margin: 14mm 14mm 16mm 14mm;
+
+  @bottom-right {
+    content: "Página " counter(page) " de " counter(pages);
+    font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 7.5pt;
+    color: #64748b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--doc-font);
+  font-size: var(--doc-size-base);
+  line-height: 1.4;
+  color: var(--doc-text);
+  background-color: var(--doc-paper);
+}
+
+/* --------------------------------------------------------------------------
+   Cabecera: identidad de la empresa a la izquierda, identidad del documento
+   a la derecha. La misma en todos los documentos.
+   -------------------------------------------------------------------------- */
+.doc-header {
+  display: table;
+  width: 100%;
+  margin-bottom: var(--doc-space-5);
+  border-bottom: 2px solid var(--doc-ink);
+  padding-bottom: 10px;
+}
+
+.doc-header-left {
+  display: table-cell;
+  vertical-align: top;
+  width: 58%;
+}
+
+.doc-header-right {
+  display: table-cell;
+  vertical-align: top;
+  width: 42%;
+  text-align: right;
+}
+
+/* Cuando la cabecera lleva algo mas que la identidad —hoy, el QR— la celda
+   derecha se parte en dos. Tabla y no flex: ver reglas de WeasyPrint.
+
+   Y se reparte distinto: con el QR dentro, el 42% de siempre deja la caja de
+   identidad tan estrecha que el titulo se parte en dos lineas en cuanto el
+   emisor no tiene direccion que ocupe la izquierda. */
+.doc-header-left-narrow { width: 44%; }
+.doc-header-right-wide { width: 56%; }
+
+.doc-header-split {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+/* Dentro del reparto, la caja se ajusta a su contenido en vez de reservar un
+   ancho minimo que ya no tiene de donde sacar. */
+.doc-header-split .doc-identity {
+  min-width: 0;
+}
+
+.doc-header-split .doc-title {
+  white-space: nowrap;
+}
+
+.doc-header-aside {
+  vertical-align: top;
+  text-align: right;
+  padding-right: var(--doc-space-4);
+  width: 34mm;
+}
+
+.doc-header-identity {
+  vertical-align: top;
+  text-align: right;
+}
+
+.doc-logo {
+  max-height: 52px;
+  max-width: 180px;
+  object-fit: contain;
+  margin-bottom: var(--doc-space-3);
+}
+
+.doc-company-name {
+  font-size: var(--doc-size-title);
+  font-weight: bold;
+  color: var(--doc-ink);
+  letter-spacing: -0.2px;
+}
+
+.doc-company-details {
+  font-size: var(--doc-size-small);
+  color: var(--doc-muted);
+  margin-top: var(--doc-space-1);
+  line-height: 1.35;
+}
+
+.doc-identity {
+  background-color: var(--doc-surface);
+  border: 1px solid var(--doc-rule-strong);
+  border-radius: var(--doc-radius);
+  padding: var(--doc-space-4) var(--doc-space-5);
+  display: inline-block;
+  text-align: right;
+  min-width: 200px;
+}
+
+.doc-title {
+  font-size: var(--doc-size-title);
+  font-weight: 800;
+  color: var(--doc-ink);
+  letter-spacing: 0.5px;
+}
+
+.doc-code {
+  font-size: var(--doc-size-code);
+  font-weight: 700;
+  color: var(--doc-accent);
+  margin-bottom: var(--doc-space-2);
+}
+
+/* Tabla clave/valor de la cabecera. */
+.doc-meta {
+  width: 100%;
+  font-size: var(--doc-size-small);
+  margin-top: var(--doc-space-2);
+  border-collapse: collapse;
+}
+
+.doc-meta td {
+  padding: 1px 0;
+}
+
+.doc-meta-label {
+  color: var(--doc-faint);
+  text-align: left;
+  padding-right: var(--doc-space-3);
+}
+
+.doc-meta-value {
+  font-weight: 600;
+  color: var(--doc-text);
+  text-align: right;
+}
+
+/* --------------------------------------------------------------------------
+   Secciones y rejilla de informacion
+   -------------------------------------------------------------------------- */
+.doc-section {
+  margin-bottom: var(--doc-space-5);
+  background-color: var(--doc-surface);
+  border: 1px solid var(--doc-rule);
+  border-radius: var(--doc-radius);
+  padding: var(--doc-space-4) var(--doc-space-5);
+  page-break-inside: avoid;
+}
+
+.doc-section-title {
+  font-size: var(--doc-size-tiny);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--doc-faint);
+  margin-bottom: var(--doc-space-2);
+  border-bottom: 1px solid var(--doc-rule);
+  padding-bottom: var(--doc-space-1);
+}
+
+/* Rejilla de pares etiqueta/valor. Tabla, no grid: ver reglas de WeasyPrint. */
+.doc-grid {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doc-grid td {
+  padding: 3px var(--doc-space-3) 3px 0;
+  vertical-align: top;
+  font-size: var(--doc-size-small);
+}
+
+.doc-grid-label {
+  color: var(--doc-faint);
+  text-transform: uppercase;
+  font-size: var(--doc-size-micro);
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  width: 30mm;
+}
+
+.doc-grid-value {
+  color: var(--doc-ink);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Tablas de detalle
+   -------------------------------------------------------------------------- */
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--doc-space-5);
+  page-break-inside: auto;
+}
+
+.doc-table thead {
+  display: table-header-group;
+}
+
+.doc-table tr {
+  page-break-inside: avoid;
+  page-break-after: auto;
+}
+
+.doc-table th {
+  background-color: var(--doc-ink);
+  color: var(--doc-paper);
+  font-size: var(--doc-size-small);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: var(--doc-space-3) var(--doc-space-4);
+  text-align: left;
+}
+
+.doc-table td {
+  padding: 7px var(--doc-space-4);
+  font-size: 8.5pt;
+  border-bottom: 1px solid var(--doc-rule);
+  vertical-align: top;
+}
+
+.doc-num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.doc-center {
+  text-align: center;
+}
+
+.doc-cell-title {
+  font-weight: 700;
+  color: var(--doc-ink);
+  font-size: var(--doc-size-base);
+  margin-bottom: var(--doc-space-1);
+}
+
+.doc-cell-sub {
+  font-size: var(--doc-size-tiny);
+  color: var(--doc-faint);
+  line-height: 1.3;
+}
+
+.doc-ref {
+  font-family: var(--doc-font-mono);
+  font-size: var(--doc-size-micro);
+  color: var(--doc-faint);
+}
+
+.doc-missing {
+  color: #b45309;
+  font-style: italic;
+}
+
+/* --------------------------------------------------------------------------
+   Distintivo de estado
+   -------------------------------------------------------------------------- */
+.doc-badge {
+  display: inline-block;
+  padding: 2px var(--doc-space-3);
+  border-radius: 3px;
+  font-size: var(--doc-size-tiny);
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.doc-badge-neutral {
+  background-color: var(--doc-surface-alt);
+  color: var(--doc-muted);
+  border: 1px solid var(--doc-rule-strong);
+}
+
+.doc-badge-pending {
+  background-color: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.doc-badge-active {
+  background-color: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+}
+
+.doc-badge-done {
+  background-color: #dcfce7;
+  color: #166534;
+  border: 1px solid #86efac;
+}
+
+.doc-badge-void {
+  background-color: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #f87171;
+}
+
+/* --------------------------------------------------------------------------
+   Nota / aviso
+   -------------------------------------------------------------------------- */
+.doc-note {
+  padding: var(--doc-space-4) var(--doc-space-5);
+  background-color: var(--doc-surface);
+  border-left: 3px solid var(--doc-rule-strong);
+  border-radius: 0 var(--doc-radius) var(--doc-radius) 0;
+  font-size: var(--doc-size-tiny);
+  color: var(--doc-muted);
+  line-height: 1.45;
+  page-break-inside: avoid;
+}
+
+.doc-note-title {
+  font-weight: 700;
+  color: var(--doc-ink);
+  display: block;
+  margin-bottom: var(--doc-space-1);
+}
+
+/* --------------------------------------------------------------------------
+   Bloque de QR. Es un envoltorio visual: no sabe a donde apunta el codigo.
+   -------------------------------------------------------------------------- */
+.doc-qr {
+  text-align: center;
+  border: 1px solid var(--doc-rule);
+  border-radius: var(--doc-radius);
+  padding: var(--doc-space-3);
+  background-color: var(--doc-paper);
+  display: inline-block;
+}
+
+.doc-qr img {
+  display: block;
+  width: 26mm;
+  height: 26mm;
+  margin: 0 auto;
+}
+
+.doc-qr-caption {
+  font-size: var(--doc-size-micro);
+  color: var(--doc-faint);
+  line-height: 1.25;
+  margin-top: var(--doc-space-1);
+  max-width: 30mm;
+}
+
+/* --------------------------------------------------------------------------
+   Firmas. Espacio real para una firma de mano, no una raya decorativa.
+   -------------------------------------------------------------------------- */
+.doc-signatures {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: var(--doc-space-6) 0;
+  margin-top: var(--doc-space-6);
+  page-break-inside: avoid;
+}
+
+.doc-signature {
+  vertical-align: bottom;
+  text-align: center;
+  width: 33.33%;
+}
+
+/* 18 mm de aire encima de la raya: una firma real necesita sitio. */
+.doc-signature-space {
+  height: 18mm;
+}
+
+.doc-signature-rule {
+  border-top: 1px solid var(--doc-faint);
+  padding-top: var(--doc-space-2);
+  font-size: var(--doc-size-tiny);
+  font-weight: 600;
+  color: var(--doc-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.doc-signature-hint {
+  font-size: var(--doc-size-micro);
+  color: var(--doc-ghost);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Pie impreso en el flujo del documento (el del borde inferior de la hoja
+   lo pone `@page`, que solo admite texto).
+   -------------------------------------------------------------------------- */
+.doc-footer {
+  text-align: center;
+  font-size: var(--doc-size-tiny);
+  color: var(--doc-ghost);
+  margin-top: var(--doc-space-5);
+  border-top: 1px solid var(--doc-surface-alt);
+  padding-top: var(--doc-space-3);
+  page-break-inside: avoid;
+}
+
+/* --------------------------------------------------------------------------
+   Marca de agua de documento anulado
+   -------------------------------------------------------------------------- */
+.doc-watermark {
+  position: fixed;
+  top: 35%;
+  left: 10%;
+  width: 80%;
+  text-align: center;
+  font-size: 64pt;
+  font-weight: bold;
+  color: rgba(220, 38, 38, 0.12);
+  transform: rotate(-35deg);
+  text-transform: uppercase;
+  letter-spacing: 6px;
+  z-index: 9999;
+  pointer-events: none;
+}

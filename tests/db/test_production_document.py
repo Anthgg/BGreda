@@ -34,6 +34,20 @@ def _texto(contenido: bytes) -> str:
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
+def _texto_seguido(contenido: bytes) -> str:
+    """El mismo texto con los espacios normalizados.
+
+    Hace falta para comparar FRASES. El maquetador parte una frase donde le
+    cabe —la leyenda del QR sale como «Escanea para / consultar el estado / de
+    producción», porque su bloque es estrecho— y buscar la frase seguida falla
+    por una razon que no tiene nada que ver con lo que se quiere comprobar.
+
+    Las comparaciones de una palabra o un codigo siguen usando `_texto`: ahi la
+    normalizacion no aporta nada.
+    """
+    return " ".join(_texto(contenido).split())
+
+
 async def _orden_con_documento(
     api: httpx.AsyncClient, csrf: str, db_session: AsyncSession, suffix: str
 ) -> tuple[dict[str, object], bytes]:
@@ -85,7 +99,7 @@ async def test_el_documento_lleva_el_qr_incrustado(
     # la pagina lleva contenido grafico ademas del texto y que el pie explica
     # para que sirve.
     assert len(reader.pages) >= 1
-    assert "Escanear" in _texto(contenido)
+    assert "Escanea para consultar el estado de producción" in _texto_seguido(contenido)
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,52 @@
+{#
+  Esqueleto de TODO documento oficial de Greda.
+
+  Aqui vive la identidad: la hoja A4, la tipografia, la paleta, el pie con la
+  paginacion. Lo que un documento concreto dice —un IGV, un almacen, un
+  estado de fabricacion— no aparece por ninguna parte y no debe aparecer:
+  esta plantilla no sabe que existe la cotizacion.
+
+  Un documento nuevo se escribe asi:
+
+      {% raw %}{% extends "base_document.html" %}{% endraw %}
+      {% raw %}{% block document_title %}Guia de remision{% endblock %}{% endraw %}
+      {% raw %}{% block content %} ... {% endblock %}{% endraw %}
+
+  y hereda cabecera, tablas, distintivos, notas, firmas y pie sin copiar una
+  sola linea de CSS. Ver docs/document-design-system.md.
+
+  REGLA: ningun documento hereda de otro documento. Los tres —cotizacion,
+  orden de produccion y constancia publica— extienden ESTA plantilla y solo
+  esta. Encadenarlos haria que retocar la cotizacion moviera la hoja de
+  taller, que es justo lo que este sistema existe para impedir.
+#}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>{% block html_title %}{% endblock %}</title>
+  <style>
+{% include "styles/document_system.css" %}
+
+    {# Solo el TEXTO del pie izquierdo cambia por documento: las cajas de
+       margen de `@page` admiten `content`, no marcado. #}
+    @page {
+      @bottom-left {
+        content: "{% block footer_left %}{% endblock %}";
+        font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
+        font-size: 7.5pt;
+        color: #94a3b8;
+      }
+    }
+
+    {# Estilos exclusivos de un documento. Todo lo que se escriba aqui deja de
+       ser sistema y pasa a ser de ese documento: es el sitio correcto para una
+       columna suya, y el sitio equivocado para un color de la empresa. #}
+{% block document_styles %}{% endblock %}
+  </style>
+</head>
+<body>
+{% block watermark %}{% endblock %}
+{% block content %}{% endblock %}
+</body>
+</html>

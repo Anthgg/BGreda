@@ -31,7 +31,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "quotations"
+#: Raiz del sistema documental, no la carpeta de cotizaciones: la plantilla
+#: extiende `base_document.html` y usa los componentes compartidos, y el
+#: cargador tiene que poder verlos.
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 
 class QuotationPdfDraftBlockedError(APIError):
@@ -56,7 +59,7 @@ class QuotationPdfService:
             trim_blocks=True,
             lstrip_blocks=True,
         )
-        self._template = self._jinja_env.get_template("quotation.html")
+        self._template = self._jinja_env.get_template("quotations/quotation.html")
 
     async def _get_company_settings(self) -> CompanySettings | None:
         stmt = select(CompanySettings).where(CompanySettings.id == SINGLETON_ID)

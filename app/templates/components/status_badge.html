@@ -1,0 +1,15 @@
+{#
+  Distintivo de estado.
+
+  El componente conoce cuatro TONOS visuales, no los estados del negocio. Un
+  documento decide que su estado «COMPLETED» se dibuja en verde; el sistema
+  documental no sabe que existe «COMPLETED», igual que no sabe que existe una
+  cotizacion anulada. Asi el dia que aparezca un quinto estado en produccion no
+  hay que tocar el sistema visual, y el dia que se cambie el verde de la
+  empresa no hay que tocar produccion.
+
+  tono: neutral | pending | active | done | void
+#}
+{% macro status_badge(label, tone='neutral') %}
+<span class="doc-badge doc-badge-{{ tone }}">{{ label }}</span>
+{%- endmacro %}

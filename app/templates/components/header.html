@@ -1,0 +1,76 @@
+{#
+  Cabecera comun a todos los documentos.
+
+  A la izquierda quien emite; a la derecha que documento es. Es la parte que
+  hace que una hoja de taller y una cotizacion se reconozcan como de la misma
+  casa, y por eso se cambia UNA vez para las dos.
+
+  El bloque recibe datos ya formateados. No consulta la base, no calcula
+  fechas y no sabe que es un IGV: `meta` es una lista de pares etiqueta/valor
+  que arma cada documento con lo suyo.
+
+  `aside` es marcado ya renderizado —en la practica, un `qr_block`— que se
+  coloca a la izquierda de la caja de identidad. Se pasa como parametro en vez
+  de codificar el QR aqui dentro para que la cabecera siga sin saber que
+  existen los codigos QR.
+#}
+{% from "components/status_badge.html" import status_badge %}
+
+{% macro document_header(company, title, code, badge=none, meta=[], aside=none) %}
+<div class="doc-header">
+  <div class="doc-header-left{{ ' doc-header-left-narrow' if aside else '' }}">
+    {% if company.logo_data_uri %}
+    <img src="{{ company.logo_data_uri }}" class="doc-logo" alt="Logo">
+    {% endif %}
+    <div class="doc-company-name">{{ company.display_name }}</div>
+    <div class="doc-company-details">
+      {% if company.tax_id %}<div><strong>RUC:</strong> {{ company.tax_id }}</div>{% endif %}
+      {% if company.address %}<div>{{ company.address }}</div>{% endif %}
+      {% if company.phone or company.email %}
+      <div>
+        {% if company.phone %}<span>Tel: {{ company.phone }}</span>{% endif %}
+        {% if company.phone and company.email %} &bull; {% endif %}
+        {% if company.email %}<span>{{ company.email }}</span>{% endif %}
+      </div>
+      {% endif %}
+      {% if company.website %}<div>{{ company.website }}</div>{% endif %}
+    </div>
+  </div>
+
+  <div class="doc-header-right{{ ' doc-header-right-wide' if aside else '' }}">
+    {% if aside %}
+    <table class="doc-header-split">
+      <tr>
+        <td class="doc-header-aside">{{ aside }}</td>
+        <td class="doc-header-identity">
+          {{ _identity(title, code, badge, meta) }}
+        </td>
+      </tr>
+    </table>
+    {% else %}
+    {{ _identity(title, code, badge, meta) }}
+    {% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+
+{% macro _identity(title, code, badge, meta) %}
+<div class="doc-identity">
+  <div class="doc-title">{{ title }}</div>
+  <div class="doc-code">{{ code }}</div>
+  {% if badge %}
+  <div>{{ status_badge(badge.label, badge.tone) }}</div>
+  {% endif %}
+  {% if meta %}
+  <table class="doc-meta">
+    {% for row in meta %}
+    <tr>
+      <td class="doc-meta-label">{{ row.label }}:</td>
+      <td class="doc-meta-value">{{ row.value }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{%- endmacro %}

@@ -1,216 +1,167 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <title>Orden de producción {{ order.code }}</title>
-  <style>
-    @page {
-      size: A4 portrait;
-      margin: 14mm 14mm 16mm 14mm;
-      @bottom-right {
-        content: "Página " counter(page) " de " counter(pages);
-        font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
-        font-size: 7.5pt;
-        color: #64748b;
-      }
-      @bottom-left {
-        content: "{{ company_name }} — Orden de producción {{ order.code }}";
-        font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
-        font-size: 7.5pt;
-        color: #94a3b8;
-      }
+{#
+  Hoja de taller de una orden de produccion. Documento INTERNO.
+
+  Comparte con la cotizacion la hoja, la tipografia, la cabecera y el pie —son
+  documentos de la misma casa— y NO comparte una sola regla de negocio: aqui no
+  hay precio, ni IGV, ni total del cliente, y no puede haberlo. Extiende
+  `base_document.html` directamente; no hereda de la cotizacion.
+
+  Lo que se imprime sale del modelo `ProductionOrderDocument`, ya formateado.
+  Esta plantilla no consulta la base, no convierte unidades y no decide que es
+  publicable.
+#}
+{% extends "base_document.html" %}
+{% from "components/header.html" import document_header %}
+{% from "components/qr_block.html" import qr_block %}
+{% from "components/info_grid.html" import info_section %}
+{% from "components/note_block.html" import note_block %}
+{% from "components/signature_block.html" import signature_block %}
+
+{% block html_title %}{{ doc.title }} {{ doc.code }}{% endblock %}
+{% block footer_left %}{{ doc.company.display_name }} — {{ doc.title }} {{ doc.code }}{% endblock %}
+
+{% block document_styles %}
+    /* -------------------------------------------------------------------
+       Solo de la hoja de taller.
+       ------------------------------------------------------------------- */
+    .production-order-lines th.col-num { width: 8mm; text-align: center; }
+    .production-order-lines th.col-dims { width: 28mm; }
+    .production-order-lines th.col-qty { width: 16mm; text-align: right; }
+    .production-order-lines th.col-required { width: 28mm; text-align: right; }
+
+    .production-order-lines td.col-num { text-align: center; color: var(--doc-faint); }
+    .production-order-lines td.col-qty {
+      text-align: right;
+      font-weight: 700;
+      font-size: 10pt;
+      white-space: nowrap;
+    }
+    .production-order-lines td.col-required {
+      text-align: right;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .production-order-lines td.col-dims { white-space: nowrap; }
+
+    /* Las filas del taller respiran mas que las comerciales: esta hoja se lee
+       de pie, con las manos ocupadas y a medio metro. */
+    .production-order-lines td { padding: 10px var(--doc-space-4); }
+
+    .production-order-total {
+      text-align: right;
+      font-size: var(--doc-size-small);
+      color: var(--doc-muted);
+      margin-top: calc(-1 * var(--doc-space-3));
+      margin-bottom: var(--doc-space-5);
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    .production-order-total strong { color: var(--doc-ink); font-size: var(--doc-size-base); }
 
-    body {
-      font-family: 'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif;
-      font-size: 9pt;
-      line-height: 1.45;
-      color: #1e293b;
-      background-color: #ffffff;
+    /* Espacio EN BLANCO para escribir a mano. No es un campo del sistema: no
+       hay nada que guardar detras y por eso no se inventa uno. Es papel. */
+    .production-order-handwriting {
+      margin-top: var(--doc-space-5);
+      page-break-inside: avoid;
     }
 
-    {% if order.status.value == 'CANCELLED' %}
-    .watermark {
-      position: fixed;
-      top: 35%; left: 10%; width: 80%;
-      text-align: center;
-      font-size: 64pt;
-      font-weight: bold;
-      color: rgba(220, 38, 38, 0.12);
-      transform: rotate(-35deg);
-      text-transform: uppercase;
-    }
-    {% endif %}
-
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      border-bottom: 2pt solid #0f172a;
-      padding-bottom: 6mm;
-      margin-bottom: 6mm;
-    }
-    .title { font-size: 16pt; font-weight: bold; letter-spacing: 0.5pt; }
-    .subtitle { font-size: 8pt; color: #64748b; text-transform: uppercase; letter-spacing: 1pt; }
-    .code { font-size: 13pt; font-weight: bold; font-family: 'DejaVu Sans Mono', monospace; }
-    .qr { text-align: center; }
-    .qr img { width: 30mm; height: 30mm; }
-    .qr-caption { font-size: 6.5pt; color: #94a3b8; margin-top: 1mm; }
-
-    .facts { width: 100%; border-collapse: collapse; margin-bottom: 6mm; }
-    .facts td { padding: 1.6mm 2mm; vertical-align: top; border-bottom: 0.4pt solid #e2e8f0; }
-    .facts .label {
-      width: 34mm; font-size: 7.5pt; text-transform: uppercase;
-      letter-spacing: 0.6pt; color: #64748b;
-    }
-    .facts .value { font-weight: bold; }
-
-    .badge {
-      display: inline-block; padding: 0.8mm 2.5mm; border-radius: 2mm;
-      font-size: 7.5pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5pt;
-    }
-    .badge-created   { background: #fef3c7; color: #92400e; }
-    .badge-started   { background: #dbeafe; color: #1e40af; }
-    .badge-completed { background: #dcfce7; color: #166534; }
-    .badge-cancelled { background: #fee2e2; color: #991b1b; }
-
-    h2 {
-      font-size: 8.5pt; text-transform: uppercase; letter-spacing: 1pt;
-      color: #0f172a; margin: 5mm 0 2mm; padding-bottom: 1mm;
-      border-bottom: 0.8pt solid #cbd5e1;
+    .production-order-handwriting-rule {
+      border-bottom: 1px solid var(--doc-rule);
+      height: 8mm;
     }
 
-    table.lines { width: 100%; border-collapse: collapse; font-size: 8pt; }
-    table.lines thead th {
-      background: #f1f5f9; text-align: left; padding: 2mm;
-      font-size: 7pt; text-transform: uppercase; letter-spacing: 0.5pt; color: #475569;
-      border-bottom: 0.8pt solid #cbd5e1;
-    }
-    table.lines tbody td { padding: 2mm; border-bottom: 0.4pt solid #e2e8f0; vertical-align: top; }
-    table.lines .num { text-align: right; font-family: 'DejaVu Sans Mono', monospace; }
-    .ref { font-family: 'DejaVu Sans Mono', monospace; font-size: 7pt; color: #64748b; }
-    .missing { color: #b45309; font-style: italic; }
+    /* Con dos o tres piezas la hoja acaba a media pagina. Las firmas se
+       separan del bloque de arriba para que no queden flotando en mitad del
+       folio y para que quede sitio real donde apoyar la mano al firmar. */
+    .production-order-signatures { margin-top: 12mm; }
+{% endblock %}
 
-    .note {
-      margin-top: 6mm; padding: 3mm; background: #f8fafc;
-      border-left: 2pt solid #cbd5e1; font-size: 7.5pt; color: #475569;
-    }
-    .signatures { margin-top: 14mm; display: flex; gap: 12mm; }
-    .signature { flex: 1; border-top: 0.6pt solid #94a3b8; padding-top: 2mm;
-                 font-size: 7.5pt; color: #64748b; text-align: center; }
-  </style>
-</head>
-<body>
-  {% if order.status.value == 'CANCELLED' %}
-  <div class="watermark">Anulada</div>
-  {% endif %}
+{% block watermark %}
+{% if doc.is_cancelled %}
+<div class="doc-watermark">Anulada</div>
+{% endif %}
+{% endblock %}
 
-  <header>
-    <div>
-      <div class="subtitle">{{ company_name }}</div>
-      <div class="title">Orden de producción</div>
-      <div class="code">{{ order.code }}</div>
-    </div>
-    <div class="qr">
-      <img src="{{ qr_data_uri }}" alt="Código QR de la orden {{ order.code }}">
-      <div class="qr-caption">Escanear para abrir la orden</div>
-    </div>
-  </header>
+{% block content %}
+{% set qr = qr_block(
+     doc.qr_data_uri,
+     caption=doc.qr_caption,
+     alt='Código QR de la orden ' ~ doc.code
+   ) if doc.qr_data_uri else none %}
 
-  <table class="facts">
+{{ document_header(
+     doc.company,
+     doc.title,
+     doc.code,
+     badge={'label': doc.status_label, 'tone': doc.status_tone},
+     aside=qr
+   ) }}
+
+{{ info_section('Datos de la orden', doc.facts, columns=2) }}
+
+<table class="doc-table production-order-lines">
+  <thead>
     <tr>
-      <td class="label">Estado</td>
-      <td class="value">
-        <span class="badge badge-{{ order.status.value|lower }}">
-          {% if order.status.value == 'CREATED' %}Creada
-          {% elif order.status.value == 'STARTED' %}En proceso
-          {% elif order.status.value == 'COMPLETED' %}Completada
-          {% else %}Anulada{% endif %}
-        </span>
-      </td>
-      <td class="label">Cotización de origen</td>
-      <td class="value">{{ quotation.code if quotation else '—' }}</td>
+      <th class="col-num">#</th>
+      <th>Producto</th>
+      <th class="col-dims">Medidas (cm)</th>
+      <th class="col-qty">Cant.</th>
+      <th>Material preparado</th>
+      <th class="col-required">Requerido</th>
     </tr>
+  </thead>
+  <tbody>
+    {% for line in doc.lines %}
     <tr>
-      <td class="label">Creada</td>
-      <td class="value">{{ order.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
-      <td class="label">Almacén de salida</td>
-      <td class="value">{{ location.name if location else '—' }}</td>
-    </tr>
-    <tr>
-      <td class="label">Arrancada</td>
-      <td class="value">
-        {{ order.started_at.strftime('%d/%m/%Y %H:%M') if order.started_at else '—' }}
+      <td class="col-num">{{ line.line_number }}</td>
+      <td>
+        <div class="doc-cell-title">{{ line.product_name }}</div>
+        {% if line.product_reference %}
+        <div class="doc-ref">{{ line.product_reference }}</div>
+        {% endif %}
       </td>
-      <td class="label">Completada</td>
-      <td class="value">
-        {{ order.completed_at.strftime('%d/%m/%Y %H:%M') if order.completed_at else '—' }}
+      <td class="col-dims">{{ line.dimensions_formatted or '—' }}</td>
+      <td class="col-qty">{{ line.quantity_formatted }}</td>
+      <td>
+        {% if line.prepared_product_name %}
+        <div>{{ line.prepared_product_name }}</div>
+        {% if line.prepared_product_reference %}
+        <div class="doc-ref">{{ line.prepared_product_reference }}</div>
+        {% endif %}
+        {% else %}
+        <span class="doc-missing">{{ line.missing_reason }}</span>
+        {% endif %}
+      </td>
+      <td class="col-required">
+        {% if line.required_formatted %}
+        {{ line.required_formatted }}
+        {% else %}
+        <span class="doc-missing">—</span>
+        {% endif %}
       </td>
     </tr>
-  </table>
+    {% endfor %}
+  </tbody>
+</table>
 
-  <h2>Piezas a fabricar</h2>
-  <table class="lines">
-    <thead>
-      <tr>
-        <th style="width: 6mm;">#</th>
-        <th>Producto</th>
-        <th style="width: 26mm;">Medidas (cm)</th>
-        <th class="num" style="width: 14mm;">Cant.</th>
-        <th>Material preparado</th>
-        <th class="num" style="width: 24mm;">Requerido</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for line in order.lines %}
-      <tr>
-        <td class="num">{{ loop.index }}</td>
-        <td>
-          {{ line.product_name_snapshot }}
-          <div class="ref">{{ line.product_internal_reference_snapshot }}</div>
-        </td>
-        <td>
-          {%- set dims = [] -%}
-          {%- if line.width_snapshot %}{% set _ = dims.append('A ' ~ line.width_snapshot|round(1)) %}{% endif -%}
-          {%- if line.height_snapshot %}{% set _ = dims.append('H ' ~ line.height_snapshot|round(1)) %}{% endif -%}
-          {%- if line.length_snapshot %}{% set _ = dims.append('L ' ~ line.length_snapshot|round(1)) %}{% endif -%}
-          {%- if line.depth_snapshot %}{% set _ = dims.append('P ' ~ line.depth_snapshot|round(1)) %}{% endif -%}
-          {{ dims|join(' · ') if dims else '—' }}
-        </td>
-        <td class="num">{{ line.quantity if line.quantity is not none else '—' }}</td>
-        <td>
-          {% if line.prepared_product_id and line.prepared_product_id in prepared %}
-            {{ prepared[line.prepared_product_id].name }}
-            <div class="ref">{{ prepared[line.prepared_product_id].internal_reference }}</div>
-          {% elif line.recipe_id %}
-            <span class="missing">Receta sin material preparado</span>
-          {% else %}
-            <span class="missing">Sin receta</span>
-          {% endif %}
-        </td>
-        <td class="num">
-          {% if line.required_material_quantity is not none %}
-            {{ line.required_material_quantity|round(2) }} {{ line.required_material_uom }}
-          {% else %}
-            <span class="missing">—</span>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="production-order-total">
+  Total de piezas a fabricar: <strong>{{ '{:,}'.format(doc.total_pieces) }}</strong>
+</div>
 
-  <div class="note">
-    Documento de taller. El material preparado se descuenta del almacén al
-    arrancar la orden, no al crearla ni al imprimir esta hoja.
-  </div>
+{{ note_block(
+     'El material preparado se descuenta del almacén al ARRANCAR la orden, no al
+      crearla ni al imprimir esta hoja. Si esta hoja se imprimió antes de arrancar,
+      las existencias todavía no se han movido.',
+     title='Nota operativa'
+   ) }}
 
-  <div class="signatures">
-    <div class="signature">Preparó</div>
-    <div class="signature">Fabricó</div>
-    <div class="signature">Conformidad</div>
-  </div>
-</body>
-</html>
+<div class="production-order-handwriting">
+  <div class="doc-section-title">Observaciones del taller · para anotar a mano</div>
+  {% for _ in range(5) %}
+  <div class="production-order-handwriting-rule"></div>
+  {% endfor %}
+</div>
+
+<div class="production-order-signatures">
+  {{ signature_block(['Preparó', 'Fabricó', 'Conformidad'], hint='Nombre y firma') }}
+</div>
+{% endblock %}

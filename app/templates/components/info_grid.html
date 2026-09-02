@@ -1,0 +1,37 @@
+{#
+  Rejilla de datos en pares etiqueta/valor, dentro de una seccion con titulo.
+
+  Sirve igual para «Datos del cliente» que para «Datos de la orden»: recibe
+  filas ya formateadas y las dibuja en dos columnas. La cantidad de columnas es
+  decision del sistema visual; que datos van dentro, del documento.
+
+  `rows` es una lista de objetos o diccionarios con `label` y `value`. Un valor
+  vacio se dibuja como raya, no como hueco: en un papel de taller, un hueco no
+  se distingue de un dato que alguien olvido rellenar.
+#}
+{% macro info_grid(rows, columns=2) %}
+<table class="doc-grid">
+  {% for chunk in rows | batch(columns) %}
+  <tr>
+    {% for row in chunk %}
+    <td class="doc-grid-label">{{ row.label }}</td>
+    <td class="doc-grid-value">{{ row.value if row.value else '—' }}</td>
+    {% endfor %}
+    {# Relleno de la ultima fila incompleta: sin el, la ultima celda se
+       estiraria y las columnas dejarian de estar alineadas. #}
+    {% for _ in range(columns - chunk | length) %}
+    <td class="doc-grid-label"></td>
+    <td class="doc-grid-value"></td>
+    {% endfor %}
+  </tr>
+  {% endfor %}
+</table>
+{%- endmacro %}
+
+
+{% macro info_section(title, rows, columns=2) %}
+<div class="doc-section">
+  <div class="doc-section-title">{{ title }}</div>
+  {{ info_grid(rows, columns) }}
+</div>
+{%- endmacro %}
