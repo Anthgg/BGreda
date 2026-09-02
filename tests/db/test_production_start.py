@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import MovementType, StockBalance, StockMovement
 from app.models.masters import Product
-from app.models.production import ProductionOrder, ProductionOrderStatus
+from app.models.production import ProductionOrder, ProductionOrderLine, ProductionOrderStatus
 from app.models.recipes import Recipe
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
@@ -172,27 +172,44 @@ async def test_sin_receta_no_arranca_y_no_mueve_nada(
 async def test_sin_gramos_por_pieza_no_arranca_y_no_mueve_nada(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """MISSING_MATERIAL_GRAMS.
+    """MISSING_MATERIAL_GRAMS, comprobado sobre la ENTRADA del motor.
 
-    Hay receta, pero nadie dijo cuanto material lleva cada pieza. El peso NO se
-    deduce del gramaje del producto ni del importe de materiales: serian
-    numeros presentables y falsos, y descontarian del almacen una cantidad que
-    nadie decidio.
+    Aqui la linea se deja sin gramos en la propia orden, y no cotizando una asi,
+    porque el Cotizador no deja confirmar una linea que tenga receta y no diga
+    cuantos gramos lleva cada pieza. Ese portazo comercial es bueno y no se
+    toca; el guardia de produccion existe de todas formas, porque el motor de
+    disponibilidad recibe lineas de orden y no cotizaciones: una cotizacion
+    LEGACY, una importacion o cualquier camino futuro pueden ponerle delante una
+    linea sin gramos, y entonces la pregunta es si descuenta algo o no.
+
+    La respuesta tiene que ser que no descuenta NADA. El peso no se deduce del
+    gramaje del producto ni del importe de materiales: serian numeros
+    presentables y falsos, y sacarian del almacen una cantidad que nadie
+    decidio.
     """
-    datos = await _preparada(api, admin_csrf, db_session, suffix="_nogr", gramos_por_pieza=None)
-    linea = datos["orden"]["lines"][0]
-    assert linea["recipe_id"] is not None, "hace falta receta para aislar el fallo de los gramos"
-    assert linea["material_grams_per_piece"] is None
-    assert linea["required_material_quantity"] is None, (
-        "sin gramos no puede haber requerimiento calculado"
+    datos = await _preparada(api, admin_csrf, db_session, suffix="_nogr")
+    # Precondicion: la orden nace COMPLETA, con sus gramos y su requerimiento.
+    # Se comprueba para que quitarlos signifique algo.
+    linea_id = int(datos["orden"]["lines"][0]["id"])
+    assert datos["orden"]["lines"][0]["material_grams_per_piece"] is not None
+    assert datos["orden"]["readiness"]["ready"] is True
+
+    await db_session.execute(
+        update(ProductionOrderLine)
+        .where(ProductionOrderLine.id == linea_id)
+        .values(material_grams_per_piece=None, required_material_quantity=None)
     )
+    await db_session.commit()
     antes = await _movimientos(db_session)
 
     respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
 
     assert respuesta.status_code == 409, respuesta.text
+    assert respuesta.json()["error"]["code"] == "PRODUCTION_ORDER_NOT_READY"
     assert "MISSING_MATERIAL_GRAMS" in _codigos(respuesta)
     assert await _movimientos(db_session) == antes
+    releida = await api.get(f"{ORDERS}/{datos['orden']['id']}")
+    assert releida.json()["status"] == "CREATED"
 
 
 @pytest.mark.asyncio

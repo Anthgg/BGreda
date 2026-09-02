@@ -74,10 +74,15 @@ async def escenario(
     esos casos tiene que bloquear el arranque por su propio motivo, y solo se
     puede distinguir si el resto del escenario sigue intacto.
 
-    Quitar la receta o los gramos obliga a mandar `materials_applied`, el
-    importe manual de materiales: el Cotizador no deja confirmar una linea que
-    no diga de una forma o de otra que material lleva. Y asi es EXACTAMENTE
-    como estan las 25 lineas confirmadas de produccion que no tienen receta.
+    Quitar la receta obliga a mandar `materials_applied`, el importe manual de
+    materiales: el Cotizador no deja confirmar una linea que no diga de una
+    forma o de otra que material lleva. Y asi es EXACTAMENTE como estan las 25
+    lineas confirmadas de produccion que no tienen receta.
+
+    `gramos_por_pieza=None` NO produce una cotizacion confirmable: con receta
+    puesta, el Cotizador exige los gramos. Ese caso se monta sobre la linea de
+    la orden en `test_sin_gramos_por_pieza_no_arranca_y_no_mueve_nada`, que es
+    donde vive el motor que se quiere probar.
     """
     cliente = await api.post(
         PARTNERS,
@@ -123,10 +128,10 @@ async def escenario(
         item["recipe_version_id"] = receta["current_version"]["id"]
     if gramos_por_pieza is not None:
         item["material_grams_per_piece"] = gramos_por_pieza
-    if not con_receta or gramos_por_pieza is None:
+    if not con_receta:
         # El importe manual de materiales. Es lo que hace confirmable una linea
-        # sin receta o sin gramos, y lo que la deja INPRODUCIBLE: un importe en
-        # soles no dice cuantos gramos de barniz hay que sacar del almacen.
+        # sin receta, y a la vez lo que la deja INPRODUCIBLE: un importe en
+        # soles no dice cuantos gramos de barniz sacar del almacen.
         item["materials_applied"] = "250.00"
 
     creada = await api.post(
