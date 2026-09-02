@@ -51,6 +51,11 @@ class MovementType(StrEnum):
     #: llevan `preparation_id` para saber a que lote pertenecen.
     PREPARATION_OUT = "PREPARATION_OUT"
     PREPARATION_IN = "PREPARATION_IN"
+    #: Fase 009I. Consumo de material preparado al arrancar una orden de
+    #: produccion. Tipo propio y no `OUT` generico: una salida de produccion se
+    #: audita distinto de una merma o de un traslado, y mezclarlas obligaria a
+    #: adivinar despues cual fue cual.
+    PRODUCTION_OUT = "PRODUCTION_OUT"
 
 
 class StockLocation(Base, TimestampMixin):
@@ -125,6 +130,11 @@ class StockMovement(Base):
     preparation_id: Mapped[int | None] = mapped_column(
         ForeignKey("recipe_preparations.id", ondelete="RESTRICT"), nullable=True, index=True
     )
+    #: Orden de produccion que origino el movimiento (Fase 009I). Nula en
+    #: compras, ajustes, cargas iniciales y preparaciones.
+    production_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     import_batch_id: Mapped[int | None] = mapped_column(
         ForeignKey("import_batches.id", ondelete="RESTRICT")
     )
@@ -141,7 +151,7 @@ class StockMovement(Base):
         CheckConstraint("balance_after >= 0", name="balance_after_not_negative"),
         CheckConstraint(
             "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT', "
-            "'PREPARATION_OUT', 'PREPARATION_IN')",
+            "'PREPARATION_OUT', 'PREPARATION_IN', 'PRODUCTION_OUT')",
             name="movement_type_allowed",
         ),
         Index("ix_stock_movements_product_created", "product_id", "created_at"),

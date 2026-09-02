@@ -36,6 +36,8 @@ from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
 from app.services.masters import MasterDataService
 from app.services.preparations import PreparationService
+from app.services.production import ProductionOrderService
+from app.services.production_pdf import ProductionPdfService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
 from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
@@ -400,3 +402,33 @@ async def get_quotation_pdf_service(
 
 
 QuotationPdfServiceDep = Annotated[QuotationPdfService, Depends(get_quotation_pdf_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 009I: ordenes de produccion y consumo fisico de material preparado
+# ---------------------------------------------------------------------------
+async def get_production_order_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
+    inventory: InventoryServiceDep,
+) -> ProductionOrderService:
+    return ProductionOrderService(session, audit, sequences, inventory)
+
+
+ProductionOrderServiceDep = Annotated[ProductionOrderService, Depends(get_production_order_service)]
+
+
+async def get_production_pdf_service(
+    session: DbSessionDep,
+    settings: SettingsDep,
+) -> ProductionPdfService:
+    # La base del QR sale de la configuracion, no de la cabecera Host de la
+    # peticion: un Host manipulado imprimiria en la hoja de taller un enlace a
+    # un dominio ajeno. Se usa el primer origen declarado, que es el de la
+    # aplicacion; si no hubiera ninguno, el QR lleva solo la ruta relativa.
+    origins = settings.frontend_origins
+    return ProductionPdfService(session, base_url=origins[0] if origins else None)
+
+
+ProductionPdfServiceDep = Annotated[ProductionPdfService, Depends(get_production_pdf_service)]

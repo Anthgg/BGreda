@@ -50,6 +50,9 @@ class SequenceType(StrEnum):
     PRODUCT_50 = "PRODUCT_50"
     PRODUCT_70 = "PRODUCT_70"
     PREPARATION = "PREPARATION"
+    #: Fase 009I. Ordenes de produccion (OP-2026-000001). El correlativo lo
+    #: emite el backend como cualquier otro documento: nadie teclea el suyo.
+    PRODUCTION_ORDER = "PRODUCTION_ORDER"
 
 
 class ResetPolicy(StrEnum):
@@ -74,7 +77,11 @@ class DocumentSequence(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=True)
 
-    sequence_type: Mapped[SequenceType] = mapped_column(String(16), nullable=False, unique=True)
+    #: 24 y no 16: "PRODUCTION_ORDER" mide exactamente 16 y cabria por los
+    #: pelos, de modo que el siguiente tipo con un nombre algo mas largo
+    #: reventaria al insertar. Ensanchar un varchar en PostgreSQL no reescribe
+    #: la tabla.
+    sequence_type: Mapped[SequenceType] = mapped_column(String(24), nullable=False, unique=True)
 
     prefix: Mapped[str] = mapped_column(String(MAX_PREFIX_LENGTH), nullable=False)
 
@@ -99,7 +106,8 @@ class DocumentSequence(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', 'PREPARATION')",
+            "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', "
+            "'PREPARATION', 'PRODUCTION_ORDER')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -131,7 +139,7 @@ class DocumentSequenceIssue(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
 
-    sequence_type: Mapped[SequenceType] = mapped_column(String(16), nullable=False)
+    sequence_type: Mapped[SequenceType] = mapped_column(String(24), nullable=False)
     period_key: Mapped[str] = mapped_column(String(16), nullable=False)
     number: Mapped[int] = mapped_column(Integer, nullable=False)
 

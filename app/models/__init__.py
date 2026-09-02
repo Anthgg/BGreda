@@ -41,6 +41,11 @@ from app.models.masters import (
     UnitOfMeasure,
     UomDimension,
 )
+from app.models.production import (
+    ProductionOrder,
+    ProductionOrderLine,
+    ProductionOrderStatus,
+)
 from app.models.profile import Profile, UserRole
 from app.models.quotations import (
     Additional,
@@ -114,6 +119,9 @@ __all__ = [
     "Product",
     "ProductCategory",
     "ProductType",
+    "ProductionOrder",
+    "ProductionOrderLine",
+    "ProductionOrderStatus",
     "Profile",
     "ProviderName",
     "Quotation",
