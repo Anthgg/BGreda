@@ -172,6 +172,20 @@ DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 #: ocultar el boton en React no es una medida de seguridad.
 AdminUserDep = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
 
+#: Fase 009J. Quien ejecuta el taller: preparar receta, ajustar existencia y
+#: llevar una orden de produccion de principio a fin.
+#:
+#: Hoy solo hay dos roles, asi que ADMIN + OPERATOR es, en efecto, cualquier
+#: sesion con perfil. Se declara igual y por extenso en vez de reutilizar
+#: `CurrentUserDep`, porque las dos cosas dicen cosas distintas: `CurrentUserDep`
+#: significa «basta con haber iniciado sesion» y esto significa «estos roles y
+#: no otros». El dia que exista un tercer rol —un consultor, un cliente con
+#: acceso de lectura— la diferencia deja de ser retorica: con `CurrentUserDep`
+#: heredaria el permiso de consumir inventario sin que nadie lo decidiera.
+WorkshopUserDep = Annotated[
+    AuthenticatedUser, Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR))
+]
+
 
 async def get_audit_recorder(session: DbSessionDep) -> AuditRecorder:
     return AuditRecorder(session)

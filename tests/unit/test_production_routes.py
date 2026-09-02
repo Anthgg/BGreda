@@ -79,3 +79,72 @@ def test_ninguna_ruta_permite_borrar() -> None:
     saldo.
     """
     assert not [ruta for ruta, metodo in _rutas() if metodo in {"DELETE", "PUT", "PATCH"}]
+
+
+#: Quien puede ejecutar cada mutacion, leido del propio router (Fase 009J).
+#:
+#: "taller" son ADMIN y OPERATOR; "admin" es solo ADMIN. Ampliar un permiso sin
+#: querer es un cambio de una palabra que no rompe ningun tipo ni ninguna
+#: prueba de comportamiento: por eso la matriz se fija aqui, donde una linea
+#: cambiada se ve.
+PERMISOS_ESPERADOS = {
+    "create_production_order": "taller",
+    "start_production_order": "taller",
+    "complete_production_order": "taller",
+    # Anular deshace un compromiso ya tomado y deja la cotizacion de origen
+    # ocupada para siempre. Es decision administrativa.
+    "cancel_production_order": "admin",
+}
+
+
+#: Nombre de la dependencia declarada -> quien la satisface.
+DEPENDENCIA_A_ALCANCE = {
+    "WorkshopUserDep": "taller",
+    "AdminUserDep": "admin",
+    "CurrentUserDep": "cualquier sesion",
+}
+
+
+def _dependencias() -> dict[str, str]:
+    """Lee la dependencia declarada en la firma de cada endpoint.
+
+    Con `from __future__ import annotations` las anotaciones llegan como texto,
+    asi que se lee el NOMBRE de la dependencia. Es una comprobacion de la
+    declaracion, no del comportamiento: que `WorkshopUserDep` admita de verdad
+    a un operario y rechace a un tercero lo prueban las de base de datos, que
+    hacen la peticion y miran el 403.
+    """
+    import inspect
+
+    from app.api.v1 import production
+
+    salida: dict[str, str] = {}
+    for nombre in PERMISOS_ESPERADOS:
+        firma = inspect.signature(getattr(production, nombre))
+        deps = [
+            DEPENDENCIA_A_ALCANCE[str(p.annotation)]
+            for p in firma.parameters.values()
+            if str(p.annotation) in DEPENDENCIA_A_ALCANCE
+        ]
+        assert deps, f"{nombre} no declara ninguna dependencia de autorizacion"
+        salida[nombre] = deps[0]
+    return salida
+
+
+def test_la_matriz_de_permisos_de_produccion_es_la_acordada() -> None:
+    """PRODUCTION_PERMISSION_MATRIX.
+
+    El taller ejecuta —crear, arrancar, completar— y la administracion decide
+    —anular—. Si alguien mueve una de las cuatro de sitio, esta prueba lo dice
+    por su nombre en vez de dejarlo pasar a produccion.
+    """
+    assert _dependencias() == PERMISOS_ESPERADOS
+
+
+def test_anular_no_se_amplia_al_taller_por_descuido() -> None:
+    """La unica de las cuatro que sigue restringida, dicha aparte.
+
+    Se comprueba sola porque es la que mas tienta ampliar: el boton esta al
+    lado de los otros tres y parece del mismo tipo.
+    """
+    assert _dependencias()["cancel_production_order"] == "admin"

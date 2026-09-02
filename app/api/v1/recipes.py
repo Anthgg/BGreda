@@ -14,6 +14,7 @@ from app.api.deps import (
     PreparationServiceDep,
     RecipeImportServiceDep,
     RecipeServiceDep,
+    WorkshopUserDep,
 )
 from app.core.preparations import PreparationError, grams_to_ml, ml_to_grams
 from app.models.importing import ImportEntity, ImportRow
@@ -289,7 +290,7 @@ async def get_recipe_preparation(
 async def create_recipe_preparation(
     payload: RecipePreparationIn,
     service: PreparationServiceDep,
-    admin: AdminUserDep,
+    actor: WorkshopUserDep,
     session: DbSessionDep,
     response: Response,
 ) -> RecipePreparationOut:
@@ -307,7 +308,7 @@ async def create_recipe_preparation(
         water_amount_ml=payload.water_amount_ml,
         final_yield_ml=payload.final_yield_ml,
         idempotency_key=payload.idempotency_key,
-        user=admin,
+        user=actor,
     )
     if created:
         await session.commit()
