@@ -199,6 +199,7 @@ class PublicTrackingSheet:
     """
 
     company_name: str
+    logo_data_uri: str | None
     title: str
     order_code: str
     status_label: str
@@ -315,7 +316,11 @@ def build_public_tracking_data(
     )
 
 
-def build_public_tracking_sheet(data: PublicTrackingData) -> PublicTrackingSheet:
+def build_public_tracking_sheet(
+    data: PublicTrackingData,
+    *,
+    logo_data_uri: str | None = None,
+) -> PublicTrackingSheet:
     """Pone en castellano lo que ya estaba decidido que es publico."""
     creada = format_datetime_display(data.created_at)
     arrancada = format_datetime_display(data.started_at)
@@ -338,6 +343,7 @@ def build_public_tracking_sheet(data: PublicTrackingData) -> PublicTrackingSheet
 
     return PublicTrackingSheet(
         company_name=data.company_name,
+        logo_data_uri=logo_data_uri,
         title=PUBLIC_TRACKING_TITLE,
         order_code=data.order_code,
         status_label=_PUBLIC_STATUS_LABELS[data.status],

@@ -70,11 +70,11 @@
 {% endblock %}
 
 {% block content %}
-{# La cabecera recibe solo la razon social: la constancia publica no lleva RUC,
-   direccion ni telefono de la empresa, porque nada de eso ayuda a saber si una
-   pieza esta lista. #}
+{# La cabecera recibe razon social y el logo configurado: ambos son identidad
+   visual publica. No recibe RUC, direccion ni telefono, porque nada de eso
+   ayuda a saber si una pieza esta lista. #}
 {{ document_header(
-     {'display_name': doc.company_name, 'logo_data_uri': none, 'tax_id': none,
+     {'display_name': doc.company_name, 'logo_data_uri': doc.logo_data_uri, 'tax_id': none,
       'address': none, 'phone': none, 'email': none, 'website': none},
      doc.title,
      doc.order_code,

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,14 +20,13 @@ from app.documents.quotation import (
 )
 from app.models.quotations import Quotation, QuotationStatus
 from app.models.settings import SINGLETON_ID, CommercialSettings, CompanySettings
+from app.services.document_assets import resolve_company_logo_data_uri
 from app.services.quotations import QuotationNotFoundError
-from app.services.storage import ObjectStorage, sniff_content_type
+from app.services.storage import ObjectStorage
 
 if TYPE_CHECKING:
     from app.models.masters import Partner
     from app.schemas.quotation_builder import QuotationBuilderOut
-
-logger = logging.getLogger(__name__)
 
 #: Raiz del sistema documental, no la carpeta de cotizaciones: la plantilla
 #: extiende `base_document.html` y usa los componentes compartidos, y el
@@ -75,22 +72,7 @@ class QuotationPdfService:
 
     async def _resolve_logo_data_uri(self, company_settings: CompanySettings | None) -> str | None:
         """Descarga de forma segura el logo y lo convierte en Data URI en memoria."""
-        if not company_settings or not company_settings.logo_object_path or not self._storage:
-            return None
-
-        try:
-            logo_bytes = await self._storage.download(company_settings.logo_object_path)
-            if not logo_bytes:
-                return None
-            content_type = (
-                sniff_content_type(logo_bytes) or company_settings.logo_content_type or "image/png"
-            )
-            b64_data = base64.b64encode(logo_bytes).decode("ascii")
-            return f"data:{content_type};base64,{b64_data}"
-        except Exception as exc:
-            # La falla en Storage/Logo no debe impedir la generacion del PDF comercial
-            logger.warning("No se pudo cargar el logo para el PDF comercial: %s", exc)
-            return None
+        return await resolve_company_logo_data_uri(company_settings, self._storage)
 
     def build_document_model(
         self,
