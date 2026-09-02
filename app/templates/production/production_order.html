@@ -66,8 +66,13 @@
 
     .production-order-handwriting-rule {
       border-bottom: 1px solid var(--doc-rule);
-      height: 7mm;
+      height: 8mm;
     }
+
+    /* Con dos o tres piezas la hoja acaba a media pagina. Las firmas se
+       separan del bloque de arriba para que no queden flotando en mitad del
+       folio y para que quede sitio real donde apoyar la mano al firmar. */
+    .production-order-signatures { margin-top: 12mm; }
 {% endblock %}
 
 {% block watermark %}
@@ -151,10 +156,12 @@
 
 <div class="production-order-handwriting">
   <div class="doc-section-title">Observaciones del taller · para anotar a mano</div>
+  {% for _ in range(5) %}
   <div class="production-order-handwriting-rule"></div>
-  <div class="production-order-handwriting-rule"></div>
-  <div class="production-order-handwriting-rule"></div>
+  {% endfor %}
 </div>
 
-{{ signature_block(['Preparó', 'Fabricó', 'Conformidad'], hint='Nombre y firma') }}
+<div class="production-order-signatures">
+  {{ signature_block(['Preparó', 'Fabricó', 'Conformidad'], hint='Nombre y firma') }}
+</div>
 {% endblock %}

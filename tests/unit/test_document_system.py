@@ -239,3 +239,22 @@ def test_el_sistema_no_sabe_de_negocio() -> None:
             "receta",
         ):
             assert prohibido not in reglas, f"«{prohibido}» no puede vivir en {ruta.name}"
+
+
+def test_el_qr_impreso_no_puede_encoger() -> None:
+    """PRODUCTION_PDF_QR_SCANNABLE, dicho como un minimo y no como una opinion.
+
+    Se midio sobre el PDF renderizado, decodificando el codigo con OpenCV a
+    varias resoluciones: a 26 mm decodifica desde 120 ppp; a 110 ppp ya no. Una
+    impresora de oficina trabaja a 300-600 ppp y la foto de un A4 con un movil
+    a distancia de lectura queda muy por encima de 120, asi que 26 mm sobra.
+
+    Pero sobra por poco, y el tamano vive en el CSS compartido, donde alguien
+    puede ajustarlo pensando solo en como queda la cabecera. Esta prueba fija el
+    suelo. Si hace falta bajarlo, hay que volver a medir con un PDF de verdad,
+    no estimarlo mirando la pantalla.
+    """
+    css = (TEMPLATES / "styles" / "document_system.css").read_text(encoding="utf-8")
+    medidas = re.findall(r"\.doc-qr img \{[^}]*?width:\s*(\d+(?:\.\d+)?)mm", css, re.DOTALL)
+    assert medidas, "el bloque de QR dejo de fijar su tamano impreso"
+    assert float(medidas[0]) >= 24, "por debajo de 24 mm el QR deja de leerse impreso"
