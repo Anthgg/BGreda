@@ -32,7 +32,7 @@ from app.models.production import ProductionOrder, ProductionOrderStatus
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
 from tests.db.test_production_orders_api import (
     ORDERS,
-    confirmar,
+    confirmada_y_pagada,
     crear_orden,
     escenario,
 )
@@ -89,7 +89,7 @@ async def test_el_operario_lleva_la_orden_de_principio_a_fin(
     administrador a mitad de la fabricacion.
     """
     datos = await escenario(api, admin_csrf, db_session, suffix="_rbac_op")
-    confirmada = await confirmar(api, admin_csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, admin_csrf, datos["quotation"])
 
     operator_csrf = await como_operario(api)
     creada = await crear_orden(

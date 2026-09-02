@@ -33,7 +33,7 @@ from app.models.production import ProductionOrder, ProductionOrderStatus
 from tests.db.conftest import TEST_EMAIL, TEST_PASSWORD, authenticate
 from tests.db.test_production_orders_api import (
     ORDERS,
-    confirmar,
+    confirmada_y_pagada,
     crear_orden,
     escenario,
 )
@@ -61,7 +61,7 @@ async def _orden_arrancada(
 ) -> dict[str, object]:
     """Una orden real, ya en marcha, con su token y sus dos piezas."""
     datos = await escenario(api, csrf, db_session, suffix=suffix)
-    confirmada = await confirmar(api, csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, csrf, datos["quotation"])
     creada = await crear_orden(
         api, csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )

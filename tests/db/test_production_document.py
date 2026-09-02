@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.db.test_production_orders_api import (
     ORDERS,
+    confirmada_y_pagada,
     confirmar,
     crear_orden,
     escenario,
@@ -148,7 +149,7 @@ async def test_el_pdf_comercial_de_la_cotizacion_no_cambia(
     mismo. Producir no reescribe lo que se le prometio al cliente.
     """
     datos = await escenario(api, admin_csrf, db_session, suffix="_pdfigual")
-    confirmada = await confirmar(api, admin_csrf, datos["quotation"])
+    confirmada = await confirmada_y_pagada(api, admin_csrf, datos["quotation"])
 
     antes = await api.get(f"/api/v1/quotations/{confirmada['id']}/pdf")
     assert antes.status_code == 200, antes.text
