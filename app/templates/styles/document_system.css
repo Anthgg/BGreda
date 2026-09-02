@@ -110,10 +110,27 @@ body {
 }
 
 /* Cuando la cabecera lleva algo mas que la identidad —hoy, el QR— la celda
-   derecha se parte en dos. Tabla y no flex: ver reglas de WeasyPrint. */
+   derecha se parte en dos. Tabla y no flex: ver reglas de WeasyPrint.
+
+   Y se reparte distinto: con el QR dentro, el 42% de siempre deja la caja de
+   identidad tan estrecha que el titulo se parte en dos lineas en cuanto el
+   emisor no tiene direccion que ocupe la izquierda. */
+.doc-header-left-narrow { width: 44%; }
+.doc-header-right-wide { width: 56%; }
+
 .doc-header-split {
   width: 100%;
   border-collapse: collapse;
+}
+
+/* Dentro del reparto, la caja se ajusta a su contenido en vez de reservar un
+   ancho minimo que ya no tiene de donde sacar. */
+.doc-header-split .doc-identity {
+  min-width: 0;
+}
+
+.doc-header-split .doc-title {
+  white-space: nowrap;
 }
 
 .doc-header-aside {

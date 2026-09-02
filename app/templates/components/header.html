@@ -18,7 +18,7 @@
 
 {% macro document_header(company, title, code, badge=none, meta=[], aside=none) %}
 <div class="doc-header">
-  <div class="doc-header-left">
+  <div class="doc-header-left{{ ' doc-header-left-narrow' if aside else '' }}">
     {% if company.logo_data_uri %}
     <img src="{{ company.logo_data_uri }}" class="doc-logo" alt="Logo">
     {% endif %}
@@ -37,7 +37,7 @@
     </div>
   </div>
 
-  <div class="doc-header-right">
+  <div class="doc-header-right{{ ' doc-header-right-wide' if aside else '' }}">
     {% if aside %}
     <table class="doc-header-split">
       <tr>
