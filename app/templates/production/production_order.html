@@ -15,7 +15,6 @@
 {% from "components/qr_block.html" import qr_block %}
 {% from "components/info_grid.html" import info_section %}
 {% from "components/note_block.html" import note_block %}
-{% from "components/signature_block.html" import signature_block %}
 
 {% block html_title %}{{ doc.title }} {{ doc.code }}{% endblock %}
 {% block footer_left %}{{ doc.company.display_name }} — {{ doc.title }} {{ doc.code }}{% endblock %}
@@ -69,10 +68,29 @@
       height: 8mm;
     }
 
-    /* Con dos o tres piezas la hoja acaba a media pagina. Las firmas se
-       separan del bloque de arriba para que no queden flotando en mitad del
-       folio y para que quede sitio real donde apoyar la mano al firmar. */
-    .production-order-signatures { margin-top: 12mm; }
+    /* El QR va al pie y no en la cabecera. Es lo ultimo que se usa de esta
+       hoja —se escanea cuando ya se sabe que se esta fabricando— y abajo tiene
+       sitio para imprimirse mas grande, que es lo que necesita para leerse
+       con el logo del taller encima. */
+    .production-order-footer {
+      width: 100%;
+      margin-top: 10mm;
+      border-top: 1px solid var(--doc-rule);
+      padding-top: var(--doc-space-4);
+      border-collapse: collapse;
+      page-break-inside: avoid;
+    }
+
+    .production-order-footer td { vertical-align: bottom; }
+
+    .production-order-footer-text {
+      font-size: var(--doc-size-tiny);
+      color: var(--doc-faint);
+      line-height: 1.45;
+      padding-right: var(--doc-space-6);
+    }
+
+    .production-order-footer-qr { text-align: right; width: 42mm; }
 {% endblock %}
 
 {% block watermark %}
@@ -82,18 +100,11 @@
 {% endblock %}
 
 {% block content %}
-{% set qr = qr_block(
-     doc.qr_data_uri,
-     caption=doc.qr_caption,
-     alt='Código QR de la orden ' ~ doc.code
-   ) if doc.qr_data_uri else none %}
-
 {{ document_header(
      doc.company,
      doc.title,
      doc.code,
-     badge={'label': doc.status_label, 'tone': doc.status_tone},
-     aside=qr
+     badge={'label': doc.status_label, 'tone': doc.status_tone}
    ) }}
 
 {{ info_section('Datos de la orden', doc.facts, columns=2) }}
@@ -161,7 +172,17 @@
   {% endfor %}
 </div>
 
-<div class="production-order-signatures">
-  {{ signature_block(['Preparó', 'Fabricó', 'Conformidad'], hint='Nombre y firma') }}
-</div>
+{% if doc.qr_data_uri %}
+<table class="production-order-footer">
+  <tr>
+    <td class="production-order-footer-text">
+      {{ doc.qr_caption }}. El código abre el seguimiento de esta orden;
+      no da acceso al sistema.
+    </td>
+    <td class="production-order-footer-qr">
+      {{ qr_block(doc.qr_data_uri, alt='Código QR de la orden ' ~ doc.code) }}
+    </td>
+  </tr>
+</table>
+{% endif %}
 {% endblock %}

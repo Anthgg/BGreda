@@ -109,42 +109,6 @@ body {
   text-align: right;
 }
 
-/* Cuando la cabecera lleva algo mas que la identidad —hoy, el QR— la celda
-   derecha se parte en dos. Tabla y no flex: ver reglas de WeasyPrint.
-
-   Y se reparte distinto: con el QR dentro, el 42% de siempre deja la caja de
-   identidad tan estrecha que el titulo se parte en dos lineas en cuanto el
-   emisor no tiene direccion que ocupe la izquierda. */
-.doc-header-left-narrow { width: 44%; }
-.doc-header-right-wide { width: 56%; }
-
-.doc-header-split {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-/* Dentro del reparto, la caja se ajusta a su contenido en vez de reservar un
-   ancho minimo que ya no tiene de donde sacar. */
-.doc-header-split .doc-identity {
-  min-width: 0;
-}
-
-.doc-header-split .doc-title {
-  white-space: nowrap;
-}
-
-.doc-header-aside {
-  vertical-align: top;
-  text-align: right;
-  padding-right: var(--doc-space-4);
-  width: 34mm;
-}
-
-.doc-header-identity {
-  vertical-align: top;
-  text-align: right;
-}
-
 .doc-logo {
   max-height: 52px;
   max-width: 180px;
@@ -411,8 +375,8 @@ body {
 
 .doc-qr img {
   display: block;
-  width: 26mm;
-  height: 26mm;
+  width: 36mm;
+  height: 36mm;
   margin: 0 auto;
 }
 
@@ -421,47 +385,7 @@ body {
   color: var(--doc-faint);
   line-height: 1.25;
   margin-top: var(--doc-space-1);
-  max-width: 30mm;
-}
-
-/* --------------------------------------------------------------------------
-   Firmas. Espacio real para una firma de mano, no una raya decorativa.
-   -------------------------------------------------------------------------- */
-.doc-signatures {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: var(--doc-space-6) 0;
-  margin-top: var(--doc-space-6);
-  page-break-inside: avoid;
-}
-
-.doc-signature {
-  vertical-align: bottom;
-  text-align: center;
-  width: 33.33%;
-}
-
-/* 18 mm de aire encima de la raya: una firma real necesita sitio. */
-.doc-signature-space {
-  height: 18mm;
-}
-
-.doc-signature-rule {
-  border-top: 1px solid var(--doc-faint);
-  padding-top: var(--doc-space-2);
-  font-size: var(--doc-size-tiny);
-  font-weight: 600;
-  color: var(--doc-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.doc-signature-hint {
-  font-size: var(--doc-size-micro);
-  color: var(--doc-ghost);
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
+  max-width: 36mm;
 }
 
 /* --------------------------------------------------------------------------

@@ -253,17 +253,48 @@ def test_el_sistema_no_sabe_de_negocio() -> None:
 def test_el_qr_impreso_no_puede_encoger() -> None:
     """PRODUCTION_PDF_QR_SCANNABLE, dicho como un minimo y no como una opinion.
 
-    Se midio sobre el PDF renderizado, decodificando el codigo con OpenCV a
-    varias resoluciones: a 26 mm decodifica desde 120 ppp; a 110 ppp ya no. Una
-    impresora de oficina trabaja a 300-600 ppp y la foto de un A4 con un movil
-    a distancia de lectura queda muy por encima de 120, asi que 26 mm sobra.
+    Medido sobre PDF renderizados, decodificando con OpenCV a varias
+    resoluciones y con cuatro tipos de logo central (marca limpia, degradado,
+    ruido y sin logo). A 36 mm todos decodifican desde 120 ppp; por debajo de
+    33 mm empiezan a aparecer casos que no leen.
 
-    Pero sobra por poco, y el tamano vive en el CSS compartido, donde alguien
-    puede ajustarlo pensando solo en como queda la cabecera. Esta prueba fija el
-    suelo. Si hace falta bajarlo, hay que volver a medir con un PDF de verdad,
-    no estimarlo mirando la pantalla.
+    El logo cuesta legibilidad y no es gratis: obliga a correccion alta, que
+    mete 49x49 modulos donde antes habia 37x37. Por eso el suelo sube de los
+    24 mm de la primera version a 33.
+
+    Si hace falta bajarlo, hay que volver a medir con un PDF de verdad y un
+    logo real. Mirarlo en pantalla no vale: en pantalla se lee todo.
     """
     css = (TEMPLATES / "styles" / "document_system.css").read_text(encoding="utf-8")
     medidas = re.findall(r"\.doc-qr img \{[^}]*?width:\s*(\d+(?:\.\d+)?)mm", css, re.DOTALL)
     assert medidas, "el bloque de QR dejo de fijar su tamano impreso"
-    assert float(medidas[0]) >= 24, "por debajo de 24 mm el QR deja de leerse impreso"
+    assert float(medidas[0]) >= 33, "por debajo de 33 mm el QR con logo deja de leerse impreso"
+
+
+def test_la_hoja_de_taller_lleva_el_qr_al_pie_y_no_en_la_cabecera() -> None:
+    """El QR es lo ultimo que se usa de esta hoja, y abajo tiene sitio.
+
+    Estuvo en la cabecera y ahi apretaba la caja de identidad —con un emisor
+    sin direccion el titulo se partia en dos lineas— y ademas no cabia con el
+    tamano que necesita para leerse con el logo encima.
+    """
+    # Sobre el CUERPO, no sobre el fichero: las reglas CSS de `.doc-qr` viven
+    # arriba, en el <style>, y estarian antes de la cabecera pase lo que pase.
+    cuerpo = _html_orden().split("<body>", 1)[1]
+    antes, despues = cuerpo.split("production-order-footer", 1)
+
+    assert "doc-header" in antes
+    assert "doc-qr" in despues
+    assert "doc-qr" not in antes
+
+
+def test_la_hoja_de_taller_ya_no_pide_firmas() -> None:
+    """Se quitaron por decision del taller: la hoja no se firma.
+
+    Se comprueba que no quedan restos —ni el bloque, ni sus etiquetas— porque
+    media firma impresa es peor que ninguna: sugiere un control que ya no
+    existe.
+    """
+    html = _html_orden().lower()
+    for resto in ("preparó", "fabricó", "conformidad", "doc-signature"):
+        assert resto not in html

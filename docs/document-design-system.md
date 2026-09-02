@@ -30,8 +30,7 @@ app/templates/
 │   ├── info_grid.html              → info_grid(rows, columns) / info_section(title, rows)
 │   ├── status_badge.html           → status_badge(label, tone)
 │   ├── qr_block.html               → qr_block(data_uri, caption, alt)
-│   ├── note_block.html             → note_block(text, title)
-│   └── signature_block.html        → signature_block(labels, hint)
+│   └── note_block.html             → note_block(text, title)
 ├── quotations/
 │   └── quotation.html              ← contenido comercial
 └── production/
@@ -46,7 +45,51 @@ app/documents/
 ├── common.py       ← CompanyDocInfo, DocFact, formatos de fecha, nombre de fichero
 ├── quotation.py    ← modelo del documento comercial
 └── production.py   ← modelo de la hoja de taller Y frontera de lo público
+
+app/services/
+├── document_assets.py  ← resuelve el logo configurado (uno para todos)
+└── document_qr.py      ← genera los códigos QR (uno para todos)
 ```
+
+## Los códigos QR
+
+Hay **un** generador: `app/services/document_qr.py`. No tres.
+
+Un QR mal generado no falla: se imprime igual y deja de leerse en el taller,
+donde nadie puede saber por qué. Las decisiones que deciden si se lee están ahí
+escritas y medidas:
+
+| | valor | por qué |
+| --- | --- | --- |
+| Borde silencioso | 4 módulos | Lo que pide la norma. Antes eran 2. |
+| Corrección de errores | `m` sin logo, `h` con logo | Alta **sólo** con logo: subirla gratis mete más módulos en los mismos milímetros y lo hace menos legible. |
+| Logo central | 18 % del ancho | Dentro del 15-20 % que tolera un QR con imagen. Tapa ~5 % del símbolo; la corrección alta recupera hasta el 30 %. |
+| Placa de protección | 1 módulo alrededor | Sin ella un módulo negro pegado al logo se lee como parte del dibujo. |
+| Tamaño impreso | 36 mm | **Medido**, no estimado (ver abajo). |
+
+El logo sale de la configuración de la empresa — el mismo campo que la cabecera
+de todos los documentos. No hay un logo para el QR.
+
+**El branding no toca el contenido.** Ni el token, ni la URL, ni la entropía
+dependen de que haya logo. Lo vigila `tests/unit/test_document_qr.py`.
+
+### Cómo se midió el tamaño
+
+Renderizando el PDF de verdad y decodificando el código con OpenCV a distintas
+resoluciones, con cuatro tipos de logo central (marca limpia, degradado, ruido y
+sin logo):
+
+```
+             30 mm     33 mm     36 mm     40 mm
+marca limpia  130 ppp   130 ppp   120 ppp    96 ppp
+degradado     130 ppp   no lee    120 ppp    96 ppp
+ruido         130 ppp   140 ppp   120 ppp    96 ppp
+sin logo      110 ppp    96 ppp   110 ppp   110 ppp
+```
+
+A 36 mm todos decodifican desde 120 ppp. Una impresora de oficina trabaja a
+300-600. Para bajar de ahí hay que volver a medir con un PDF y un logo reales:
+**en pantalla se lee todo**, así que mirarlo no vale como prueba.
 
 ---
 
