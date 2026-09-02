@@ -148,6 +148,7 @@ class InventoryService:
         user_name: str | None,
         import_batch_id: int | None = None,
         preparation_id: int | None = None,
+        production_order_id: int | None = None,
     ) -> StockMovement:
         """Aplica un delta y deja la evidencia que lo respalda.
 
@@ -185,6 +186,7 @@ class InventoryService:
             reason=reason,
             import_batch_id=import_batch_id,
             preparation_id=preparation_id,
+            production_order_id=production_order_id,
             created_by=user_id,
             created_by_name=user_name,
         )

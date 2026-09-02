@@ -125,8 +125,15 @@ def test_migration_0019_downgrade_quita_lo_suyo_y_nada_mas() -> None:
         assert ajeno not in downgrade, f"downgrade no debe tocar {ajeno}"
 
 
-def test_alembic_single_head_is_0019() -> None:
-    """Una sola cabeza: dos harian fallar `alembic upgrade head` en el deploy."""
-    alembic_cfg = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    script = ScriptDirectory.from_config(alembic_cfg)
-    assert script.get_heads() == ["0019"]
+def test_0019_sigue_estando_en_el_camino_a_la_cabeza() -> None:
+    """0019 se alcanza desde la cabeza actual, sea cual sea.
+
+    Antes esta prueba exigia que la cabeza FUERA 0019, y la fase siguiente la
+    rompia sin que nada estuviera mal: es la tercera vez que pasa en este
+    proyecto. Lo que hay que proteger es que la revision siga en la cadena; que
+    la cabeza sea unica lo comprueba la prueba de la migracion mas reciente.
+    """
+    script = ScriptDirectory.from_config(Config(str(Path(__file__).parents[2] / "alembic.ini")))
+    heads = script.get_heads()
+    assert len(heads) == 1, heads
+    assert "0019" in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}

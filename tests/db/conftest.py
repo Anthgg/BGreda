@@ -133,6 +133,19 @@ async def db_engine() -> AsyncIterator[object]:
                     "is_base": False,
                 },
                 {
+                    # La migracion 0015 da de alta `ml` como base de VOLUMEN.
+                    # La base de test se crea desde los modelos y no ejecuta
+                    # migraciones, asi que sin esta fila el esquema de prueba
+                    # seria mas pobre que el real y nadie podria comprobar que
+                    # un preparado en mililitros bloquea la produccion.
+                    "code": "ml",
+                    "name": "Mililitro",
+                    "symbol": "ml",
+                    "dimension": "VOLUME",
+                    "factor_to_base": Decimal(1),
+                    "is_base": True,
+                },
+                {
                     "code": "unit",
                     "name": "Unidad",
                     "symbol": "u",
@@ -182,6 +195,7 @@ async def reset_database(
         await session.execute(
             text(
                 "TRUNCATE audit_events, bank_accounts, document_sequence_issues, "
+                "production_order_lines, production_orders, "
                 "quotation_product_price_updates, quotation_other_costs, "
                 "quotation_additionals, quotation_techniques, quotations, "
                 "other_costs, additionals, techniques, "
@@ -212,6 +226,8 @@ async def reset_database(
             # CTZ y HR, sembrada aqui porque la base de test se crea desde los
             # modelos y no ejecuta la migracion 0015.
             ("PREPARATION", "PREP", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 009I: ordenes de produccion, OP-2026-000001.
+            ("PRODUCTION_ORDER", "OP", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(

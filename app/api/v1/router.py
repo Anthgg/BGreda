@@ -11,6 +11,7 @@ from app.api.v1 import (
     imports,
     inventory,
     masters,
+    production,
     quotation_builder,
     quotations,
     recipes,
@@ -27,4 +28,5 @@ api_v1_router.include_router(recipes.router)
 api_v1_router.include_router(firings.router)
 api_v1_router.include_router(quotations.router)
 api_v1_router.include_router(quotation_builder.router)
+api_v1_router.include_router(production.router)
 api_v1_router.include_router(identity.router)
