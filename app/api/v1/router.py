@@ -16,6 +16,7 @@ from app.api.v1 import (
     quotations,
     recipes,
     settings,
+    tracking,
 )
 
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -29,4 +30,8 @@ api_v1_router.include_router(firings.router)
 api_v1_router.include_router(quotations.router)
 api_v1_router.include_router(quotation_builder.router)
 api_v1_router.include_router(production.router)
+#: Superficie PUBLICA de seguimiento (Fase 009I.1). Va aparte de
+#: `production.router` a proposito: no comparte esquemas, no exige sesion y
+#: no tiene una sola operacion que escriba.
+api_v1_router.include_router(tracking.router)
 api_v1_router.include_router(identity.router)

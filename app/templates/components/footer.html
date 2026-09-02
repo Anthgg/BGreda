@@ -1,0 +1,15 @@
+{#
+  Pie impreso dentro del documento.
+
+  Es distinto del pie de la PAGINA: ese lo pone `@page` en `base_document.html`
+  y solo puede ser texto plano, porque las cajas de margen de CSS no admiten
+  marcado. Este otro es una linea final del contenido, y por eso puede llevar
+  enfasis o varias lineas.
+
+  No sabe de negocio: recibe el texto ya escrito.
+#}
+{% macro document_footer(text) %}
+{% if text %}
+<div class="doc-footer">{{ text }}</div>
+{% endif %}
+{%- endmacro %}

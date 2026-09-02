@@ -1,14 +1,22 @@
-"""Hoja de taller de una orden de produccion.
+"""Documentos de una orden de produccion.
 
-Es un documento operativo, no comercial. Dice que fabricar, cuanto, de que
-medida, con que material preparado y de que almacen sale, y lleva el QR de la
-orden para poder abrirla desde el taller sin teclear el codigo.
+Este servicio emite DOS documentos distintos de la misma orden:
 
-Lo que NO lleva es igual de deliberado: ni precio de venta, ni margen, ni IGV,
-ni total del cliente. Ninguna de esas cifras ayuda a esmaltar una pieza, y
-sacarlas impresas al taller solo amplia quien acaba viendo el margen del
-cliente. El PDF comercial de la cotizacion sigue siendo otro documento y esta
-fase no lo toca.
+- :meth:`ProductionPdfService.render`: la hoja de taller. Dice de que almacen
+  sale el material, que preparado toca y cuantos gramos. Se obtiene con sesion.
+
+- :meth:`ProductionPdfService.render_public`: la constancia de seguimiento. La
+  descarga quien escanea el QR sin tener cuenta.
+
+Los dos comparten la maquetacion —son documentos de la misma casa— y ni un
+campo del modelo. Que la constancia publica no lleve el almacen no depende de
+que la plantilla se acuerde de omitirlo: depende de que
+`PublicTrackingDocument` no tiene donde guardarlo (ver `app/documents/production`).
+
+Lo que ninguno de los dos lleva es igual de deliberado: ni precio de venta, ni
+margen, ni IGV, ni total del cliente. Ninguna de esas cifras ayuda a esmaltar
+una pieza. El documento comercial de la cotizacion es otro y esta fase no lo
+toca.
 """
 
 from __future__ import annotations
@@ -22,18 +30,36 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.documents.quotation import sanitize_pdf_filename
+from app.documents.common import build_company_doc_info, sanitize_pdf_filename
+from app.documents.production import (
+    ProductionOrderDocument,
+    PublicTrackingData,
+    build_production_order_document,
+    build_public_tracking_data,
+    build_public_tracking_sheet,
+)
 from app.models.inventory import StockLocation
 from app.models.masters import Product
 from app.models.production import ProductionOrder
 from app.models.quotations import Quotation
 from app.models.settings import SINGLETON_ID, CompanySettings
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "production"
+#: Raiz del sistema documental. El cargador apunta aqui y no a `production/`
+#: porque las plantillas extienden `base_document.html` y usan los componentes
+#: compartidos.
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
-#: Ruta interna que resuelve el token. Es lo que se codifica en el QR: una ruta
-#: de la aplicacion, no un enlace publico ni un volcado de datos.
-SCAN_PATH = "/produccion/scan"
+#: Ruta PUBLICA de seguimiento. Es lo que se codifica en el QR desde 009I.1.
+#:
+#: Antes apuntaba a una ruta interna y eso dejaba el QR sin utilidad para quien
+#: no tiene cuenta: escaneaba y acababa en el login. Ahora resuelve contra la
+#: superficie publica de solo lectura, y quien SI tiene sesion sigue pudiendo
+#: saltar desde ahi a la vista interna.
+SCAN_PATH = "/seguimiento"
+
+#: Pie del QR impreso. Dice para que sirve, porque un cuadrado negro sin
+#: explicacion no se escanea.
+QR_CAPTION = "Escanea para consultar el estado de producción"
 
 
 def build_qr_data_uri(token: str, *, base_url: str | None = None) -> str:
@@ -56,7 +82,7 @@ def build_qr_data_uri(token: str, *, base_url: str | None = None) -> str:
 
 
 class ProductionPdfService:
-    """Renderiza la hoja de taller de una orden."""
+    """Renderiza los documentos de una orden."""
 
     def __init__(self, session: AsyncSession, *, base_url: str | None = None) -> None:
         self._session = session
@@ -67,7 +93,8 @@ class ProductionPdfService:
             trim_blocks=True,
             lstrip_blocks=True,
         )
-        self._template = self._jinja_env.get_template("production_order.html")
+        self._template = self._jinja_env.get_template("production/production_order.html")
+        self._public_template = self._jinja_env.get_template("production/production_public.html")
 
     @staticmethod
     def render_pdf_from_html(html_content: str) -> bytes:
@@ -75,33 +102,61 @@ class ProductionPdfService:
 
         return weasyprint.HTML(string=html_content).write_pdf()
 
-    async def build_context(self, order: ProductionOrder) -> dict[str, object]:
-        quotation = await self._session.get(Quotation, order.quotation_id)
-        location = await self._session.get(StockLocation, order.stock_location_id)
-        company = (
+    async def _company_settings(self) -> CompanySettings | None:
+        return (
             await self._session.execute(
                 select(CompanySettings).where(CompanySettings.id == SINGLETON_ID)
             )
         ).scalar_one_or_none()
 
+    # -- Hoja de taller (interna) -------------------------------------------
+    async def build_document(self, order: ProductionOrder) -> ProductionOrderDocument:
+        """Modelo de la hoja de taller, con todo lo operativo ya resuelto."""
+        quotation = await self._session.get(Quotation, order.quotation_id)
+        location = await self._session.get(StockLocation, order.stock_location_id)
+        company = await self._company_settings()
+
         prepared_ids = {
             line.prepared_product_id for line in order.lines if line.prepared_product_id is not None
         }
-        prepared: dict[int, Product] = {}
+        prepared: dict[int, tuple[str, str]] = {}
         if prepared_ids:
             rows = await self._session.execute(select(Product).where(Product.id.in_(prepared_ids)))
-            prepared = {row.id: row for row in rows.scalars().all()}
+            prepared = {row.id: (row.name, row.internal_reference) for row in rows.scalars().all()}
 
-        return {
-            "order": order,
-            "quotation": quotation,
-            "location": location,
-            "company_name": (company.legal_name if company else None) or "Greda",
-            "prepared": prepared,
-            "qr_data_uri": build_qr_data_uri(order.qr_token, base_url=self._base_url),
-        }
+        return build_production_order_document(
+            order=order,
+            company=build_company_doc_info(company),
+            quotation_code=quotation.code if quotation else None,
+            stock_location_name=location.name if location else None,
+            prepared_names=prepared,
+            qr_data_uri=build_qr_data_uri(order.qr_token, base_url=self._base_url),
+            qr_caption=QR_CAPTION,
+        )
 
     async def render(self, order: ProductionOrder) -> tuple[bytes, str]:
-        html_content = self._template.render(**await self.build_context(order))
+        html_content = self._template.render(doc=await self.build_document(order))
         content = await asyncio.to_thread(self.render_pdf_from_html, html_content)
         return content, sanitize_pdf_filename(order.code, "orden-de-produccion")
+
+    # -- Constancia de seguimiento (publica) ---------------------------------
+    async def build_public_data(self, order: ProductionOrder) -> PublicTrackingData:
+        """Lo unico que sale de aqui sin sesion. Lo consumen la API y el PDF."""
+        company = await self._company_settings()
+        nombre = None
+        if company is not None:
+            nombre = company.trade_name or company.legal_name
+        return build_public_tracking_data(order=order, company_name=nombre or "Greda")
+
+    async def render_public(self, order: ProductionOrder) -> tuple[bytes, str]:
+        """La constancia publica, compuesta desde el MISMO dato publico.
+
+        Pasa por `build_public_data` a proposito, en vez de leer la orden otra
+        vez: si el PDF pudiera mirar la orden entera, la frontera dejaria de
+        serlo y bastaria una fila nueva en la plantilla para publicar el
+        almacen.
+        """
+        hoja = build_public_tracking_sheet(await self.build_public_data(order))
+        html_content = self._public_template.render(doc=hoja)
+        content = await asyncio.to_thread(self.render_pdf_from_html, html_content)
+        return content, sanitize_pdf_filename(order.code, "seguimiento")

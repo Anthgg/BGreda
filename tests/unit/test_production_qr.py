@@ -68,9 +68,21 @@ def test_el_qr_no_admite_que_se_le_cuele_nada_por_la_base(prohibido: str) -> Non
     assert prohibido not in svg.lower()
 
 
-def test_la_ruta_de_escaneo_es_interna_y_estable() -> None:
-    assert SCAN_PATH.startswith("/")
+def test_la_ruta_del_qr_apunta_al_seguimiento_publico() -> None:
+    """Fase 009I.1. El QR ya no lleva a una ruta que exige sesion.
+
+    Hasta 009J el QR apuntaba a `/produccion/scan/...`, detras del login: quien
+    escaneaba sin cuenta —el del horno, el que pregunta por su encargo— acababa
+    en una pantalla de credenciales. Ahora apunta a la superficie publica de
+    solo lectura, y quien SI tiene sesion salta desde ahi a la vista interna.
+
+    La prueba fija el destino, no solo la forma: si alguien devolviera esta
+    constante a una ruta interna, el QR impreso volveria a no servir de nada y
+    ninguna otra prueba lo notaria.
+    """
+    assert SCAN_PATH == "/seguimiento"
     assert "{" not in SCAN_PATH
+    assert not SCAN_PATH.startswith("/produccion")
 
 
 def test_sin_base_configurada_el_qr_lleva_solo_la_ruta_relativa() -> None:

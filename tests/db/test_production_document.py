@@ -85,7 +85,7 @@ async def test_el_documento_lleva_el_qr_incrustado(
     # la pagina lleva contenido grafico ademas del texto y que el pie explica
     # para que sirve.
     assert len(reader.pages) >= 1
-    assert "Escanear" in _texto(contenido)
+    assert "Escanea para consultar" in _texto(contenido)
 
 
 @pytest.mark.asyncio

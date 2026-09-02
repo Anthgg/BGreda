@@ -1,0 +1,123 @@
+{#
+  Constancia de seguimiento. Documento PUBLICO.
+
+  Lo descarga quien escanea el QR sin tener cuenta, asi que se escribe partiendo
+  de lo contrario que los otros dos: no «que puedo enseñar», sino «que es
+  imposible que se cuele». Lo que se imprime sale de `PublicTrackingDocument`,
+  que no tiene campos donde quepa un almacen, unos gramos, un cliente ni un
+  identificador.
+
+  **Sin QR.** Los otros documentos lo llevan; este no puede. El QR contiene el
+  token que da acceso a esta misma informacion, y un PDF descargable con el
+  token dentro convierte el documento en la llave: se reenvia por mensajeria y
+  deja de saberse quien puede consultar la orden. Quien tiene el papel original
+  ya tiene el QR.
+
+  Comparte hoja, tipografia, cabecera y pie con la cotizacion y con la hoja de
+  taller —es un documento de la misma casa— y ni una regla de negocio con
+  ninguno de los dos.
+#}
+{% extends "base_document.html" %}
+{% from "components/header.html" import document_header %}
+{% from "components/note_block.html" import note_block %}
+
+{% block html_title %}{{ doc.title }} {{ doc.order_code }}{% endblock %}
+{% block footer_left %}{{ doc.company_name }} — {{ doc.title }} {{ doc.order_code }}{% endblock %}
+
+{% block document_styles %}
+    /* -------------------------------------------------------------------
+       Solo del seguimiento publico.
+       ------------------------------------------------------------------- */
+    .tracking-timeline {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: var(--doc-space-5);
+    }
+
+    .tracking-timeline td {
+      padding: var(--doc-space-4) 0;
+      border-bottom: 1px solid var(--doc-rule);
+      vertical-align: middle;
+    }
+
+    .tracking-mark {
+      width: 10mm;
+      text-align: center;
+      font-size: 12pt;
+      font-weight: bold;
+    }
+
+    .tracking-mark-done { color: #166534; }
+    .tracking-mark-pending { color: var(--doc-rule-strong); }
+
+    .tracking-step { font-size: 10pt; font-weight: 700; color: var(--doc-ink); }
+    .tracking-step-pending { font-weight: 400; color: var(--doc-ghost); }
+
+    .tracking-when {
+      text-align: right;
+      font-size: var(--doc-size-small);
+      color: var(--doc-faint);
+      white-space: nowrap;
+    }
+
+    .tracking-items th.col-qty { width: 24mm; text-align: right; }
+    .tracking-items td.col-qty {
+      text-align: right;
+      font-weight: 700;
+      font-size: 10pt;
+      white-space: nowrap;
+    }
+{% endblock %}
+
+{% block content %}
+{# La cabecera recibe solo la razon social: la constancia publica no lleva RUC,
+   direccion ni telefono de la empresa, porque nada de eso ayuda a saber si una
+   pieza esta lista. #}
+{{ document_header(
+     {'display_name': doc.company_name, 'logo_data_uri': none, 'tax_id': none,
+      'address': none, 'phone': none, 'email': none, 'website': none},
+     doc.title,
+     doc.order_code,
+     badge={'label': doc.status_label, 'tone': doc.status_tone}
+   ) }}
+
+<div class="doc-section">
+  <div class="doc-section-title">Estado del proceso</div>
+  <table class="tracking-timeline">
+    {% for step in doc.timeline %}
+    <tr>
+      <td class="tracking-mark {{ 'tracking-mark-done' if step.done else 'tracking-mark-pending' }}">
+        {{ '✓' if step.done else '○' }}
+      </td>
+      <td class="tracking-step {{ '' if step.done else 'tracking-step-pending' }}">
+        {{ step.label }}
+      </td>
+      <td class="tracking-when">{{ step.happened_at or 'Pendiente' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<table class="doc-table tracking-items">
+  <thead>
+    <tr>
+      <th>Piezas</th>
+      <th class="col-qty">Cantidad</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in doc.items %}
+    <tr>
+      <td>{{ item.product_name }}</td>
+      <td class="col-qty">{{ item.quantity_formatted }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{{ note_block(
+     'Documento de consulta. Refleja el estado del proceso de fabricación en el
+      momento de emitirse y no sustituye a ningún documento comercial ni
+      tributario.'
+   ) }}
+{% endblock %}

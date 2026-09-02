@@ -2,16 +2,32 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect as sa_inspect
 
+from app.documents.common import (
+    CompanyDocInfo,
+    build_company_doc_info,
+    format_date_display,
+    sanitize_pdf_filename,
+)
 from app.models.quotations import Quotation, QuotationStatus
 from app.models.settings import CommercialSettings, CompanySettings
+
+#: El documento comercial siempre se ha construido con este nombre privado. Se
+#: mantiene como alias del comun para no reescribir el resto del modulo cuando
+#: 009I.1 mueve la identidad de la empresa al sistema documental compartido.
+_build_company_doc_info = build_company_doc_info
+
+__all__ = [
+    "CompanyDocInfo",
+    "format_date_display",
+    "sanitize_pdf_filename",
+]
 
 if TYPE_CHECKING:
     from app.models.masters import Partner
@@ -89,42 +105,6 @@ def format_dimensions(
     if depth is not None and depth > 0:
         parts.append(f"Profundidad: {format_quantity(depth)} {unit}")
     return " | ".join(parts) if parts else None
-
-
-def format_date_display(dt: date | datetime | None) -> str:
-    """Formatea fechas en formato DD/MM/AAAA."""
-    if dt is None:
-        return "-"
-    if isinstance(dt, datetime):
-        return dt.strftime("%d/%m/%Y")
-    return dt.strftime("%d/%m/%Y")
-
-
-def sanitize_pdf_filename(code: str, customer_name: str | None = None) -> str:
-    """Genera un nombre de archivo seguro para descarga de PDF, previniendo inyeccion."""
-    clean_code = re.sub(r"[^A-Za-z0-9_-]", "", code.strip()) or "COTIZACION"
-    if customer_name and customer_name.strip():
-        clean_name = re.sub(r"[^A-Za-z0-9_-]", "_", customer_name.strip())
-        clean_name = re.sub(r"_+", "_", clean_name).strip("_")
-        if clean_name:
-            return f"{clean_code}_{clean_name[:40]}.pdf"
-    return f"{clean_code}.pdf"
-
-
-@dataclass(slots=True)
-class CompanyDocInfo:
-    legal_name: str | None = None
-    trade_name: str | None = None
-    tax_id: str | None = None  # RUC
-    address: str | None = None
-    phone: str | None = None
-    email: str | None = None
-    website: str | None = None
-    logo_data_uri: str | None = None
-
-    @property
-    def display_name(self) -> str:
-        return self.trade_name or self.legal_name or "EMPRESA"
 
 
 @dataclass(slots=True)
@@ -217,40 +197,6 @@ class QuotationPdfDocument:
     totals: QuotationDocTotals = field(default_factory=QuotationDocTotals)
     conditions: CommercialDocConditions = field(default_factory=CommercialDocConditions)
     bank_accounts: list[BankAccountDocInfo] = field(default_factory=list)
-
-
-def _build_company_doc_info(
-    company_settings: CompanySettings | None,
-    logo_data_uri: str | None = None,
-) -> CompanyDocInfo:
-    address_parts = []
-    if company_settings:
-        if company_settings.address_line1:
-            address_parts.append(company_settings.address_line1)
-        if company_settings.address_line2:
-            address_parts.append(company_settings.address_line2)
-        loc = [
-            p
-            for p in (
-                company_settings.district,
-                company_settings.province,
-                company_settings.department,
-            )
-            if p
-        ]
-        if loc:
-            address_parts.append(", ".join(loc))
-
-    return CompanyDocInfo(
-        legal_name=company_settings.legal_name if company_settings else None,
-        trade_name=company_settings.trade_name if company_settings else None,
-        tax_id=company_settings.tax_id if company_settings else None,
-        address=" - ".join(address_parts) if address_parts else None,
-        phone=(company_settings.phone or company_settings.mobile) if company_settings else None,
-        email=company_settings.email if company_settings else None,
-        website=company_settings.website if company_settings else None,
-        logo_data_uri=logo_data_uri,
-    )
 
 
 def _build_conditions_doc(

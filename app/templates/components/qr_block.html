@@ -1,0 +1,21 @@
+{#
+  Envoltorio visual de un codigo QR.
+
+  No sabe a donde apunta el codigo ni por que. Recibe una imagen ya construida
+  y un pie de texto, y solo decide como se ve: tamano impreso, borde y
+  proporcion del pie. Si manana otro documento lleva un QR de verificacion en
+  vez de uno de seguimiento, reutiliza este bloque sin heredar una palabra de
+  produccion.
+
+  El tamano impreso (24 mm) esta fijado en el sistema y no aqui: es una
+  decision de legibilidad de la empresa, no de un documento. 24 mm sobra para
+  leerlo con un movil a un palmo, y no se come la cabecera.
+#}
+{% macro qr_block(data_uri, caption='', alt='Código QR') %}
+<div class="doc-qr">
+  <img src="{{ data_uri }}" alt="{{ alt }}">
+  {% if caption %}
+  <div class="doc-qr-caption">{{ caption }}</div>
+  {% endif %}
+</div>
+{%- endmacro %}

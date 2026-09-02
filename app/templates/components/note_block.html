@@ -1,0 +1,13 @@
+{#
+  Aviso destacado dentro del flujo del documento.
+
+  Para lo que hay que leer aunque se venga a mirar una cifra: una condicion
+  comercial, una advertencia operativa. No lleva icono ni color de alarma a
+  proposito — un papel que grita en cada parrafo deja de leerse.
+#}
+{% macro note_block(text, title=none) %}
+<div class="doc-note">
+  {% if title %}<span class="doc-note-title">{{ title }}</span>{% endif %}
+  {{ text }}
+</div>
+{%- endmacro %}
