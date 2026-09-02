@@ -16,6 +16,7 @@ from app.api.deps import (
     DbSessionDep,
     ProductionOrderServiceDep,
     ProductionPdfServiceDep,
+    WorkshopUserDep,
 )
 from app.models.production import ProductionOrderStatus
 from app.schemas.production import (
@@ -52,7 +53,7 @@ async def list_production_orders(
 async def create_production_order(
     payload: ProductionOrderCreateIn,
     service: ProductionOrderServiceDep,
-    admin: AdminUserDep,
+    actor: WorkshopUserDep,
     session: DbSessionDep,
     response: Response,
 ) -> ProductionOrderOut:
@@ -66,7 +67,7 @@ async def create_production_order(
         quotation_id=payload.quotation_id,
         stock_location_id=payload.stock_location_id,
         idempotency_key=payload.idempotency_key,
-        user=admin,
+        user=actor,
     )
     result = await service.present(order)
     await session.commit()
@@ -139,7 +140,7 @@ async def get_production_order_document(
 async def start_production_order(
     order_id: int,
     service: ProductionOrderServiceDep,
-    admin: AdminUserDep,
+    actor: WorkshopUserDep,
     session: DbSessionDep,
 ) -> ProductionOrderOut:
     """Arranca la orden y descuenta el material preparado.
@@ -150,7 +151,7 @@ async def start_production_order(
 
     Arrancar dos veces no consume dos veces.
     """
-    order, _consumed = await service.start(order_id, user=admin)
+    order, _consumed = await service.start(order_id, user=actor)
     result = await service.present(order)
     await session.commit()
     return result
@@ -160,11 +161,11 @@ async def start_production_order(
 async def complete_production_order(
     order_id: int,
     service: ProductionOrderServiceDep,
-    admin: AdminUserDep,
+    actor: WorkshopUserDep,
     session: DbSessionDep,
 ) -> ProductionOrderOut:
     """Cierra la orden. NO da de alta producto terminado ni crea una quema."""
-    order, _changed = await service.complete(order_id, user=admin)
+    order, _changed = await service.complete(order_id, user=actor)
     result = await service.present(order)
     await session.commit()
     return result
@@ -177,7 +178,14 @@ async def cancel_production_order(
     admin: AdminUserDep,
     session: DbSessionDep,
 ) -> ProductionOrderOut:
-    """Anula una orden que aun no ha consumido nada. Una arrancada, no."""
+    """Anula una orden que aun no ha consumido nada. Una arrancada, no.
+
+    Unica de las cuatro transiciones que sigue siendo de ADMIN (Fase 009J).
+    Arrancar y completar son ejecucion: las hace quien esta en el taller.
+    Anular es deshacer un compromiso de fabricacion ya tomado, y ademas ocupa
+    para siempre la cotizacion de origen, que no admite una segunda orden. Esa
+    decision es administrativa y no se delega sin que alguien lo decida.
+    """
     order, _changed = await service.cancel(order_id, user=admin)
     result = await service.present(order)
     await session.commit()

@@ -10,7 +10,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
-from app.api.deps import AdminUserDep, CurrentUserDep, DbSessionDep, InventoryServiceDep
+from app.api.deps import (
+    AdminUserDep,
+    CurrentUserDep,
+    DbSessionDep,
+    InventoryServiceDep,
+    WorkshopUserDep,
+)
 from app.schemas.common import ErrorResponse
 from app.schemas.inventory import (
     StockAdjustmentCreate,
@@ -141,7 +147,7 @@ async def list_movements(
 )
 async def create_adjustment(
     payload: StockAdjustmentCreate,
-    user: AdminUserDep,
+    user: WorkshopUserDep,
     service: InventoryServiceDep,
     session: DbSessionDep,
 ) -> StockMovementOut:
