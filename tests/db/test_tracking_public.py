@@ -205,11 +205,14 @@ async def test_la_constancia_publica_no_es_la_hoja_de_taller(
     texto_interno = _texto(interno.content)
 
     # Lo que la hoja de taller SI dice y la constancia publica NO.
+    # Las cabeceras van en mayusculas porque el sistema documental las dibuja
+    # asi con `text-transform`, y eso ocurre al maquetar: lo que queda escrito
+    # en el PDF es lo que se ve, no lo que dice la plantilla.
     for solo_interno in (
         str(orden["quotation_code"]),
         str(orden["stock_location_name"]),
-        "Material preparado",
-        "Almacén de salida",
+        "MATERIAL PREPARADO",
+        "ALMACÉN DE SALIDA",
     ):
         assert solo_interno in texto_interno, "la hoja de taller cambió de contenido"
         assert solo_interno not in texto, f"«{solo_interno}» no puede salir sin sesión"
