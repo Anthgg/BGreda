@@ -74,7 +74,12 @@ async def test_crear_la_orden_queda_auditado_con_su_origen(
     assert creada.status_code == 201, creada.text
 
     eventos = await _eventos(db_session, creada.json()["id"])
-    altas = [evento for evento in eventos if evento.action is AuditAction.CREATE]
+    # `==` y no `is`: `audit_events.action` es un String(16) plano y no un
+    # StrEnumType, asi que PostgreSQL lo devuelve como `str`. Con `is` la
+    # comparacion es False SIEMPRE y la lista sale vacia, que es la forma
+    # silenciosa de que esta prueba no probara nada. Lo advierte el propio
+    # docstring de StrEnumType, y aqui se cumplio.
+    altas = [evento for evento in eventos if evento.action == AuditAction.CREATE]
     assert len(altas) == 1, "crear la orden tiene que dejar exactamente un alta"
 
     alta = altas[0]
