@@ -382,13 +382,15 @@ async def _orden_lista(
     *,
     suffix: str,
     product_id_key: str = "prepared_id",
+    material_id: int | None = None,
     quantity_per_piece: str = "300",
     quantity: int = 10,
     existencia: str = "5000",
+    escena: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cotizacion con material base confirmada, cobrada y con la orden creada."""
-    escena = await _materials(api, csrf, db_session, suffix=suffix)
-    material_id = escena[product_id_key]
+    escena = escena or await _materials(api, csrf, db_session, suffix=suffix)
+    material_id = material_id if material_id is not None else escena[product_id_key]
     creada = await _crear(
         api,
         csrf,
@@ -646,3 +648,135 @@ async def test_el_catalogo_de_materiales_solo_ofrece_materia_y_preparados(
 
     assert por_id[escena["raw_id"]]["source"] == "RAW"
     assert por_id[escena["raw_id"]]["recipe_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# Exactitud decimal — lo que se descuenta es lo que se contrató
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_una_cantidad_decimal_llega_intacta_hasta_el_almacen(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """BODY_MATERIAL_FLOAT_DRIFT = 0.
+
+    12,345 g/pieza x 7 piezas = 86,415 g, y esa cifra tiene que sobrevivir
+    entera: cotización -> snapshot -> orden -> movimiento de almacén.
+
+    Lo que de verdad protege esto es el `assert isinstance(..., str)`.
+    `jsonable_encoder` convierte los `Decimal` a `float` al guardar el
+    snapshot, y de ese snapshot sale el requerimiento que la orden descuenta.
+    Dentro del rango que el contrato admite (hasta 1 000 000 con seis
+    decimales) el viaje por `float` no pierde nada, pero eso es una
+    coincidencia del formato binario, no una garantía del modelo: guardar el
+    texto quita la dependencia en vez de confiar en ella.
+    """
+    datos = await _orden_lista(
+        api,
+        admin_csrf,
+        db_session,
+        suffix="_decimal",
+        quantity_per_piece="12.345",
+        quantity=7,
+    )
+
+    item = (
+        await db_session.execute(
+            select(QuotationItem)
+            .join(Quotation, Quotation.id == QuotationItem.quotation_id)
+            .where(Quotation.id == datos["confirmada"]["id"])
+        )
+    ).scalar_one()
+    guardado = item.production_snapshot["body_material"]
+    assert isinstance(guardado["quantity_per_piece"], str)
+    assert guardado["quantity_per_piece"] == "12.345"
+    assert Decimal(guardado["required_quantity"]) == Decimal("86.415")
+
+    linea = (
+        await db_session.execute(
+            select(ProductionOrderLine).where(
+                ProductionOrderLine.production_order_id == datos["orden"]["id"]
+            )
+        )
+    ).scalar_one()
+    assert linea.required_material_quantity == Decimal("86.415")
+
+    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    assert arranque.status_code == 200, arranque.text
+    # 5000 - 86,415. Ni 4913,584999... ni 4913,59.
+    assert await _saldo(db_session, datos["material_id"], datos["location_id"]) == Decimal(
+        "4913.585"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mililitros — cuándo sí y cuándo no
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_un_material_en_mililitros_con_costo_propio_se_cotiza_en_mililitros(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El caso que el bloqueo NO debe atrapar.
+
+    Un preparado que el maestro lleva en ml y que tiene su propio costo por ml
+    no necesita ningún puente masa/volumen: se cotiza y se descuenta en
+    mililitros, tal cual. Bloquearlo también sería inventarse un problema.
+
+    250 ml/pieza x 10 = 2500 ml a 0,02 el mililitro = 50.
+    """
+    escena = await _materials(api, admin_csrf, db_session, suffix="_mlok")
+    categoria = await create_category(api, admin_csrf, "Material base ml con costo")
+    liquido = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=categoria["id"],
+        name="Barbotina liquida con costo",
+        product_type="PREPARED_MATERIAL",
+        base_uom_code="ml",
+        cost="0.02",
+    )
+    assert liquido.status_code == 201, liquido.text
+    material_id = int(liquido.json()["id"])
+
+    preview = await _preview(
+        api,
+        admin_csrf,
+        _payload(
+            escena,
+            quantity=10,
+            body_material={"product_id": material_id, "quantity_per_piece": "250"},
+        ),
+    )
+    linea = preview["items"][0]
+    assert linea["body_material"]["uom"] == "ml"
+    assert Decimal(linea["body_material"]["required_quantity"]) == Decimal(2500)
+    assert Decimal(linea["materials_calculated"]) == Decimal(50)
+    assert "BODY_MATERIAL_UNSUPPORTED_UOM_COSTING" not in linea["warnings"]
+    assert linea["complete"] is True
+
+    # Y llega hasta el almacén sin pasar por gramos en ningún punto.
+    datos = await _orden_lista(
+        api,
+        admin_csrf,
+        db_session,
+        suffix="_mlok",
+        escena=escena,
+        material_id=material_id,
+        quantity_per_piece="250",
+        quantity=10,
+        existencia="8000",
+    )
+    linea_op = (
+        await db_session.execute(
+            select(ProductionOrderLine).where(
+                ProductionOrderLine.production_order_id == datos["orden"]["id"]
+            )
+        )
+    ).scalar_one()
+    assert linea_op.required_material_uom == "ml"
+    assert linea_op.required_material_quantity == Decimal(2500)
+    # La columna legacy queda en NULL: no tiene dónde decir que no son gramos.
+    assert linea_op.material_grams_per_piece is None
+
+    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    assert arranque.status_code == 200, arranque.text
+    assert await _saldo(db_session, material_id, datos["location_id"]) == Decimal(5500)
