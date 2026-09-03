@@ -228,6 +228,10 @@ async def reset_database(
             ("PREPARATION", "PREP", DEFAULT_PATTERN, 6, "YEARLY"),
             # Fase 009I: ordenes de produccion, OP-2026-000001.
             ("PRODUCTION_ORDER", "OP", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 009K: muestras fisicas, PRT-2026-000001. La 0021 la siembra
+            # en produccion; aqui hay que repetirla porque la base de test se
+            # crea desde los modelos y ninguna migracion llega a correr.
+            ("PROTOTYPE", "PRT", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(

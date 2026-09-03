@@ -56,6 +56,11 @@ class MovementType(StrEnum):
     #: audita distinto de una merma o de un traslado, y mezclarlas obligaria a
     #: adivinar despues cual fue cual.
     PRODUCTION_OUT = "PRODUCTION_OUT"
+    #: Fase 009K. Consumo de una muestra fisica. Se distingue de
+    #: PRODUCTION_OUT porque no sale de una orden ni de una receta: sale de
+    #: los materiales que alguien eligio para ESE prototipo, y mezclarlos
+    #: haria imposible responder «cuanto barro se fue en muestras».
+    PROTOTYPE_OUT = "PROTOTYPE_OUT"
 
 
 class StockLocation(Base, TimestampMixin):
@@ -132,6 +137,12 @@ class StockMovement(Base):
     )
     #: Orden de produccion que origino el movimiento (Fase 009I). Nula en
     #: compras, ajustes, cargas iniciales y preparaciones.
+    #: Fase 009K. De que muestra salio este consumo. Un PROTOTYPE_OUT sin
+    #: prototipo seria un gasto sin responsable.
+    prototype_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prototypes.id", ondelete="RESTRICT"), index=True
+    )
+
     production_order_id: Mapped[int | None] = mapped_column(
         ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -151,7 +162,7 @@ class StockMovement(Base):
         CheckConstraint("balance_after >= 0", name="balance_after_not_negative"),
         CheckConstraint(
             "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT', "
-            "'PREPARATION_OUT', 'PREPARATION_IN', 'PRODUCTION_OUT')",
+            "'PREPARATION_OUT', 'PREPARATION_IN', 'PRODUCTION_OUT', 'PROTOTYPE_OUT')",
             name="movement_type_allowed",
         ),
         Index("ix_stock_movements_product_created", "product_id", "created_at"),

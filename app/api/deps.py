@@ -39,6 +39,7 @@ from app.services.preparations import PreparationService
 from app.services.production import ProductionOrderService
 from app.services.production_pdf import ProductionPdfService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.prototypes import PrototypeService
 from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
@@ -427,7 +428,15 @@ async def get_production_order_service(
     sequences: SequenceServiceDep,
     inventory: InventoryServiceDep,
 ) -> ProductionOrderService:
-    return ProductionOrderService(session, audit, sequences, inventory)
+    # El de prototipos se construye con la MISMA sesion: el guardia de 009K
+    # tiene que ver lo que esta peticion ya escribio, no otra transaccion.
+    return ProductionOrderService(
+        session,
+        audit,
+        sequences,
+        inventory,
+        PrototypeService(session, audit, sequences, inventory),
+    )
 
 
 ProductionOrderServiceDep = Annotated[ProductionOrderService, Depends(get_production_order_service)]
@@ -452,3 +461,18 @@ async def get_production_pdf_service(
 
 
 ProductionPdfServiceDep = Annotated[ProductionPdfService, Depends(get_production_pdf_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 009K: prototipos, la muestra fisica previa a fabricar en serie
+# ---------------------------------------------------------------------------
+async def get_prototype_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
+    inventory: InventoryServiceDep,
+) -> PrototypeService:
+    return PrototypeService(session, audit, sequences, inventory)
+
+
+PrototypeServiceDep = Annotated[PrototypeService, Depends(get_prototype_service)]

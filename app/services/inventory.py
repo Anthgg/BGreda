@@ -36,6 +36,20 @@ class NegativeStockError(APIError):
     message = "El movimiento dejaria existencia negativa"
 
 
+class OrphanPrototypeMovementError(APIError):
+    """Fase 009K. Un consumo de muestra tiene que decir de que muestra sale.
+
+    Es un error de programacion, no de uso: la comprobacion vive aqui —en el
+    unico camino de escritura de existencias— porque es el sitio donde no se
+    puede rodear. Un PROTOTYPE_OUT huerfano seria material gastado sin nadie a
+    quien preguntarle en que.
+    """
+
+    status_code = 500
+    code = "PROTOTYPE_MOVEMENT_WITHOUT_PROTOTYPE"
+    message = "Un consumo de prototipo debe referenciar su prototipo"
+
+
 class MissingUomError(APIError):
     status_code = 422
     code = "PRODUCT_WITHOUT_UOM"
@@ -149,6 +163,7 @@ class InventoryService:
         import_batch_id: int | None = None,
         preparation_id: int | None = None,
         production_order_id: int | None = None,
+        prototype_id: int | None = None,
     ) -> StockMovement:
         """Aplica un delta y deja la evidencia que lo respalda.
 
@@ -171,6 +186,11 @@ class InventoryService:
             )
             self._session.add(balance)
 
+        if movement_type is MovementType.PROTOTYPE_OUT and prototype_id is None:
+            # Un consumo de muestra sin muestra detras seria un gasto sin
+            # responsable: nadie podria decir en que se fue ese material.
+            raise OrphanPrototypeMovementError()
+
         new_quantity = balance.quantity + quantity
         if new_quantity < 0:
             raise NegativeStockError()
@@ -187,6 +207,7 @@ class InventoryService:
             import_batch_id=import_batch_id,
             preparation_id=preparation_id,
             production_order_id=production_order_id,
+            prototype_id=prototype_id,
             created_by=user_id,
             created_by_name=user_name,
         )

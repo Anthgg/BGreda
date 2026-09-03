@@ -53,6 +53,9 @@ class SequenceType(StrEnum):
     #: Fase 009I. Ordenes de produccion (OP-2026-000001). El correlativo lo
     #: emite el backend como cualquier otro documento: nadie teclea el suyo.
     PRODUCTION_ORDER = "PRODUCTION_ORDER"
+    #: Fase 009K. Muestras fisicas (PRT-2026-000001). Contador propio: una
+    #: muestra no es una orden y agotar unas no puede mover las otras.
+    PROTOTYPE = "PROTOTYPE"
 
 
 class ResetPolicy(StrEnum):
@@ -107,7 +110,7 @@ class DocumentSequence(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', "
-            "'PREPARATION', 'PRODUCTION_ORDER')",
+            "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE')",
             name="type_allowed",
         ),
         CheckConstraint(
