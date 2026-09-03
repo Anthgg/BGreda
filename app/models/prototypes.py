@@ -228,11 +228,19 @@ class Prototype(Base, TimestampMixin):
         Index("ix_prototypes_quotation_status", "quotation_id", "status"),
     )
 
+    #: `selectin` y no la carga perezosa por defecto: no hay ni una lectura de
+    #: una muestra que no necesite sus materiales —la disponibilidad los
+    #: recorre, la respuesta los enumera y hasta el resumen los cuenta—, y en
+    #: sesion asincrona una carga perezosa no es un viaje de mas sino un
+    #: `MissingGreenlet`. Dejarlo en manos de que cada consulta se acuerde de
+    #: pedir `selectinload` significa que la que se olvide reviente, y la
+    #: primera que se olvido fue crear una muestra sin materiales.
     lines: Mapped[list[PrototypeMaterialLine]] = relationship(
         "PrototypeMaterialLine",
         back_populates="prototype",
         cascade="all, delete-orphan",
         order_by="PrototypeMaterialLine.sort_order",
+        lazy="selectin",
     )
 
 

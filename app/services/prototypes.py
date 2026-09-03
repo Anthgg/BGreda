@@ -343,6 +343,13 @@ class PrototypeService:
             supersedes_prototype_id=supersedes_prototype_id,
             created_by=user.id,
             created_by_name=user.display_name,
+            # Se inicializa AQUI, antes del flush, y no es cosmetica: en cuanto
+            # la fila existe, leer una coleccion que nadie toco deja de ser un
+            # acceso en memoria y pasa a ser una consulta, que en sesion
+            # asincrona revienta con `MissingGreenlet`. Una muestra recien
+            # creada sin materiales tiene cero, y eso se sabe sin preguntarle a
+            # la base.
+            lines=[],
         )
         self._session.add(prototype)
         await self._session.flush()
