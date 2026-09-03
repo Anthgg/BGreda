@@ -573,6 +573,16 @@ class RecipeService:
                         raise RecipeCycleError(msg)
                     stack.append(line.component_product_id)
 
+    async def material_cost_per_gram(self, product: Product) -> Decimal:
+        """Costo por gramo de un material del maestro. Devuelve 0 si no se sabe.
+
+        Es la cara publica del costeo recursivo que ya usaban los componentes
+        de una receta. Existe para que el material base de la cotizacion pueda
+        reutilizarlo tal cual: un segundo motor de costos acabaria dando otra
+        cifra para el mismo material sin que nadie lo hubiera decidido.
+        """
+        return await self._resolve_component_cost_per_gram(product, depth=0, visited=set())
+
     async def _resolve_component_cost_per_gram(
         self,
         product: Product,

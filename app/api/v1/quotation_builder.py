@@ -1,6 +1,8 @@
 """API segura y transaccional del Cotizador multiproducto."""
 
-from fastapi import APIRouter, Response, status
+from typing import Annotated
+
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
@@ -9,6 +11,8 @@ from app.api.deps import (
     QuotationBuilderServiceDep,
 )
 from app.schemas.quotation_builder import (
+    BodyMaterialOptionOut,
+    BodyMaterialOptionPage,
     QuotationBuilderConfirmIn,
     QuotationBuilderCreateIn,
     QuotationBuilderDraftIn,
@@ -86,6 +90,25 @@ async def get_quotation_builder_pdf_preview(
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
         },
+    )
+
+
+@router.get("/body-materials", response_model=BodyMaterialOptionPage)
+async def list_body_materials(
+    service: QuotationBuilderServiceDep,
+    _: CurrentUserDep,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> BodyMaterialOptionPage:
+    """Materiales que pueden formar el cuerpo de una pieza.
+
+    Va ANTES de `/{quotation_id}`: declarada despues, FastAPI leeria
+    «body-materials» como un identificador de cotizacion y responderia 422.
+    """
+    items, total = await service.list_body_materials(search=search, limit=limit, offset=offset)
+    return BodyMaterialOptionPage(
+        items=[BodyMaterialOptionOut.model_validate(item) for item in items], total=total
     )
 
 
