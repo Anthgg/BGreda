@@ -55,6 +55,7 @@ from app.schemas.production import (
 )
 from app.services.audit import AuditRecorder
 from app.services.inventory import InventoryService
+from app.services.prototypes import PrototypeService, assert_prototypes_approved
 from app.services.sequences import SequenceService
 
 #: Entidad con la que se firman los eventos de auditoria del modulo.
@@ -209,11 +210,17 @@ class ProductionOrderService:
         audit: AuditRecorder | None = None,
         sequences: SequenceService | None = None,
         inventory: InventoryService | None = None,
+        prototypes: PrototypeService | None = None,
     ) -> None:
         self._session = session
         self._audit = audit or AuditRecorder(session)
         self._sequences = sequences or SequenceService(session)
         self._inventory = inventory or InventoryService(session)
+        # Fase 009K. Produccion no conoce el dominio de prototipos: solo le
+        # pregunta si las muestras vigentes de ese pedido estan aprobadas.
+        self._prototypes = prototypes or PrototypeService(
+            session, self._audit, self._sequences, self._inventory
+        )
 
     # -- lectura ------------------------------------------------------------
     def _base_query(self) -> Select[tuple[ProductionOrder]]:
@@ -628,6 +635,24 @@ class ProductionOrderService:
         if quotation is None or quotation.payment_status is not QuotationPaymentStatus.PAID:
             raise ProductionOrderQuotationNotPaidError()
 
+    async def _require_approved_prototypes(self, order: ProductionOrder) -> None:
+        """Exige que las muestras vigentes de ese pedido esten aprobadas. Fase 009K.
+
+        Va DESPUES del guardia de pago y ANTES de evaluar disponibilidad: el
+        orden importa porque asi el mensaje que recibe quien pulsa habla de lo
+        primero que falta, y porque un arranque que va a rechazarse no retiene
+        el inventario mientras lo hace.
+
+        Solo cuentan las muestras VIGENTES de cada cadena. Una rechazada con
+        sucesora aprobada no bloquea: la decision vigente es la de la sucesora.
+        Una cadena cuya vigente esta anulada tampoco: si se creo por error, no
+        puede dejar el pedido sin producir para siempre.
+
+        Y no bloquea nada cuando no hay muestras: la produccion normal de una
+        cotizacion sin prototipo sigue exactamente igual que antes de 009K.
+        """
+        await assert_prototypes_approved(self._session, self._prototypes, order)
+
     async def start(
         self, order_id: int, *, user: AuthenticatedUser
     ) -> tuple[ProductionOrder, bool]:
@@ -657,6 +682,7 @@ class ProductionOrderService:
             raise ProductionOrderNotStartableError()
 
         await self._require_paid_quotation(order)
+        await self._require_approved_prototypes(order)
 
         issues, requirements = await self._evaluate(order, lock=True)
         if issues:

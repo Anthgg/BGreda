@@ -47,6 +47,12 @@ from app.models.production import (
     ProductionOrderStatus,
 )
 from app.models.profile import Profile, UserRole
+from app.models.prototypes import (
+    Prototype,
+    PrototypeApproval,
+    PrototypeMaterialLine,
+    PrototypeStatus,
+)
 from app.models.quotations import (
     Additional,
     AdditionalFormulaType,
@@ -123,6 +129,10 @@ __all__ = [
     "ProductionOrderLine",
     "ProductionOrderStatus",
     "Profile",
+    "Prototype",
+    "PrototypeApproval",
+    "PrototypeMaterialLine",
+    "PrototypeStatus",
     "ProviderName",
     "Quotation",
     "QuotationAdditional",

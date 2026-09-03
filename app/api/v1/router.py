@@ -12,6 +12,7 @@ from app.api.v1 import (
     inventory,
     masters,
     production,
+    prototypes,
     quotation_builder,
     quotations,
     recipes,
@@ -34,4 +35,6 @@ api_v1_router.include_router(production.router)
 #: `production.router` a proposito: no comparte esquemas, no exige sesion y
 #: no tiene una sola operacion que escriba.
 api_v1_router.include_router(tracking.router)
+#: Fase 009K. Prototipos: dominio propio, no una variante de produccion.
+api_v1_router.include_router(prototypes.router)
 api_v1_router.include_router(identity.router)

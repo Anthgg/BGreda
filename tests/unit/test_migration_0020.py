@@ -25,16 +25,19 @@ def test_migration_0020_file_and_revisions() -> None:
     assert 'down_revision: str | None = "0019"' in content
 
 
-def test_alembic_single_head_is_0020() -> None:
-    """Una sola cabeza, y es la nueva.
+def test_0020_sigue_estando_en_el_camino_a_la_cabeza() -> None:
+    """0020 se alcanza desde la cabeza actual, sea cual sea.
 
-    Esta afirmacion se muda al ultimo archivo de cada fase a proposito: fijarla
-    en una revision concreta obliga a reescribir la prueba anterior cada vez, y
-    entonces deja de comprobar nada.
+    Antes esta prueba exigia que la cabeza FUERA 0020, y 009K la rompio sin que
+    nada estuviera mal: es la cuarta vez que pasa en este proyecto. La
+    afirmacion de cabeza unica se muda al archivo de la migracion mas reciente
+    —ahora 0021—; lo que hay que proteger aqui es que la revision siga en la
+    cadena.
     """
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     heads = script.get_heads()
-    assert heads == ["0020"], heads
+    assert len(heads) == 1, heads
+    assert "0020" in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
 
 
 def test_0019_sigue_siendo_alcanzable() -> None:
