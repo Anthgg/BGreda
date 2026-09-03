@@ -35,6 +35,7 @@ from tests.db.test_glaze_estimate_api import _lote
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
     ORDERS,
+    PARTNERS,
     confirmada_y_pagada,
     confirmar,
     crear_orden,
@@ -73,6 +74,20 @@ async def _materials(
     producto, receta = await _finished_product_and_recipe(api, csrf, f"_bm{suffix}")
     prepared_id = int(receta["product_id"])
 
+    # Sin cliente no se puede confirmar (CUSTOMER_REQUIRED), y la mitad de
+    # estas pruebas vive del otro lado de la confirmacion.
+    cliente = await api.post(
+        PARTNERS,
+        json={
+            "name": f"Cliente material base{suffix}",
+            "role": "CLIENT",
+            "document_type": "RUC",
+            "document_number": f"206{abs(hash(suffix)) % 100000000:08d}",
+        },
+        headers=head(csrf),
+    )
+    assert cliente.status_code == 201, cliente.text
+
     raw_id = await db_session.scalar(
         select(Product.id).where(Product.name == f"Pasta local QA_bm{suffix}")
     )
@@ -96,6 +111,7 @@ async def _materials(
     return {
         "producto": producto,
         "receta": receta,
+        "customer_id": cliente.json()["id"],
         "prepared_id": prepared_id,
         "raw_id": int(raw_id),
         "kiln_id": horno["id"],
@@ -132,6 +148,7 @@ def _payload(
         item["glaze_selection_touched"] = True
     return {
         "name": f"Pedido material base{suffix}",
+        "customer_id": escena["customer_id"],
         "kiln_id": escena["kiln_id"],
         "items": [item],
     }
