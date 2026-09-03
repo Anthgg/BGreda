@@ -768,26 +768,38 @@ class PrototypeService:
         anterior = await self.get(prototype_id, for_update=True)
         await self._guard_lineage(anterior)
 
-        sucesor = await self.create(
-            name=anterior.name,
-            quantity=anterior.quantity,
-            quotation_id=anterior.quotation_id,
-            product_id=anterior.product_id,
-            stock_location_id=anterior.stock_location_id,
-            target_days=anterior.target_days,
-            notes=notes,
-            materials=[
-                MaterialInput(product_id=linea.product_id, quantity=linea.quantity)
-                for linea in anterior.lines
-            ],
-            user=user,
-            supersedes_prototype_id=anterior.id,
+        # Se pregunta antes de intentarlo. La restriccion UNIQUE seguiria
+        # parandolo, pero una violacion aborta la transaccion en PostgreSQL:
+        # llegar hasta ahi para traducir el error significa que el caso normal
+        # —«esta ya tiene sucesora»— se contesta desde una transaccion muerta.
+        # El cerrojo de la linea anterior es lo que hace fiable esta lectura:
+        # otra peticion sobre la misma muestra espera aqui.
+        ya_tiene = await self._session.scalar(
+            select(Prototype.id).where(Prototype.supersedes_prototype_id == anterior.id)
         )
+        if ya_tiene is not None:
+            raise PrototypeAlreadySupersededError()
+
         try:
-            await self._session.flush()
+            sucesor = await self.create(
+                name=anterior.name,
+                quantity=anterior.quantity,
+                quotation_id=anterior.quotation_id,
+                product_id=anterior.product_id,
+                stock_location_id=anterior.stock_location_id,
+                target_days=anterior.target_days,
+                notes=notes,
+                materials=[
+                    MaterialInput(product_id=linea.product_id, quantity=linea.quantity)
+                    for linea in anterior.lines
+                ],
+                user=user,
+                supersedes_prototype_id=anterior.id,
+            )
         except IntegrityError as exc:
-            # El UNIQUE de sucesor unico. Se traduce a dominio: un error de
-            # PostgreSQL en la respuesta no le dice nada a quien lo lee.
+            # Red de seguridad del UNIQUE, para cualquier camino que llegue sin
+            # el cerrojo. Se traduce a dominio: un error de PostgreSQL en la
+            # respuesta no le dice nada a quien lo lee.
             raise PrototypeAlreadySupersededError() from exc
         return sucesor
 
