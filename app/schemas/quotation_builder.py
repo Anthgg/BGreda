@@ -49,6 +49,77 @@ class ProductDimensionCompletionIn(_Strict):
     depth: Dimension | None = None
 
 
+class BodyMaterialIn(_Strict):
+    """Material que forma el CUERPO de la pieza, y cuanto lleva una pieza.
+
+    Es el dato fisico principal del producto y sustituye a «receta + gramos»
+    como intencion del usuario. La receta sigue existiendo, pero como
+    procedencia del preparado, no como algo que haya que elegir para cotizar.
+
+    **No lleva unidad.** La unidad la pone el maestro del material
+    (`products.base_uom_code`) y la cantidad se expresa siempre en ella. Que el
+    navegador pudiera mandarla abriria la puerta a cotizar en mililitros un
+    material que el almacen lleva en gramos, y la cifra guardada dejaria de
+    significar nada.
+    """
+
+    product_id: PositiveInt
+    quantity_per_piece: Annotated[
+        Decimal, Field(gt=0, le=1_000_000, max_digits=18, decimal_places=6)
+    ]
+
+
+class BodyMaterialOut(BaseModel):
+    """El material base ya resuelto contra el maestro, con su costo.
+
+    Todo salvo `product_id` y `quantity_per_piece` es derivado del backend.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: int
+    product_internal_reference: str | None = None
+    product_name: str | None = None
+    product_type: str | None = None
+    quantity_per_piece: Decimal
+    #: Unidad base del material. Canonica: sale del maestro, no del navegador.
+    uom: str | None = None
+    #: `RAW` (materia prima directa) o `PREPARED` (material fabricado por una
+    #: receta). Decide si hay procedencia que mostrar, no como se costea.
+    source: str | None = None
+    #: Procedencia del preparado. Solo lectura en el Cotizador.
+    recipe_id_used: int | None = None
+    recipe_version_id_used: int | None = None
+    recipe_name_snapshot: str | None = None
+    unit_cost_snapshot: Decimal | None = None
+    required_quantity: Decimal | None = None
+    material_cost: Decimal | None = None
+
+
+class BodyMaterialOptionOut(BaseModel):
+    """Un material elegible como cuerpo de pieza, tal como lo ve el selector."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: int
+    internal_reference: str
+    name: str
+    product_type: str
+    source: str
+    uom: str | None = None
+    #: Procedencia legible, para mostrarla como metadato de solo lectura.
+    recipe_name: str | None = None
+    #: El backend ya sabe costear este material. Falso no lo esconde de la
+    #: lista —el usuario tiene que poder ver que existe— pero avisa antes de
+    #: que lo elija y se lo bloquee la confirmacion.
+    costable: bool = True
+
+
+class BodyMaterialOptionPage(BaseModel):
+    items: list[BodyMaterialOptionOut] = Field(default_factory=list)
+    total: int = 0
+
+
 class GlazeSelectionItemIn(_Strict):
     """Intencion del usuario sobre un esmalte de la linea. Nada derivado.
 
@@ -126,6 +197,13 @@ class QuotationBuilderItemIn(_Strict):
     #: sobrevive a que el maestro cambie despues (nunca se re-infiere
     #: comparando contra el maestro en vivo).
     dimensions_overridden: bool = False
+    #: Material que forma el cuerpo de la pieza. Cuando viene, es la autoridad
+    #: del material y del costo, y `recipe_id`/`material_grams_per_piece`
+    #: pasan a ser compatibilidad: se siguen escribiendo cuando el material lo
+    #: permite, pero ya no son lo que el usuario eligio.
+    body_material: BodyMaterialIn | None = None
+    #: Camino legacy. Sigue vivo para las cotizaciones que ya existen y para
+    #: los borradores que aun no han pasado por el selector de material.
     recipe_id: PositiveInt | None = None
     recipe_version_id: PositiveInt | None = None
     firing_line_id: PositiveInt | None = None
@@ -251,6 +329,9 @@ class QuotationBuilderItemOut(BaseModel):
     editable_dimensions: list[str] = Field(default_factory=list)
     dimensions_overridden: bool = False
     quantity: int | None = None
+    #: El frontend consume ESTE campo tipado, nunca el JSON crudo de
+    #: production_snapshot. `None` en las lineas legacy, que no lo tienen.
+    body_material: BodyMaterialOut | None = None
     recipe_id: int | None = None
     recipe_version_id: int | None = None
     recipe_version_fingerprint_snapshot: str | None = None

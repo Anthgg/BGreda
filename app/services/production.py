@@ -20,7 +20,8 @@ import zlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,7 @@ from app.schemas.production import (
     ProductionReadinessOut,
     ReadinessIssueOut,
 )
+from app.services import body_material as body_material_mod
 from app.services.audit import AuditRecorder
 from app.services.inventory import InventoryService
 from app.services.prototypes import PrototypeService, assert_prototypes_approved
@@ -70,6 +72,22 @@ IDEMPOTENCY_LOCK_NAMESPACE = 90109
 #: de este modulo: `material_grams_per_piece` ya viene en gramos desde la
 #: cotizacion.
 REQUIREMENT_UOM = "g"
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    """Lee un numero de un snapshot JSONB, que lo guarda como texto.
+
+    Devuelve `None` ante cualquier cosa que no sea un numero. Un snapshot
+    corrupto tiene que dejar la linea sin requerimiento —y por tanto
+    bloqueada— en vez de colar un cero que descontaria de menos.
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
 
 MAX_PAGE_SIZE = 200
 
@@ -397,13 +415,24 @@ class ProductionOrderService:
     async def _line_from_item(
         self, order: ProductionOrder, item: QuotationItem, position: int
     ) -> ProductionOrderLine:
-        """Copia una linea confirmada y resuelve su material preparado.
+        """Copia una linea confirmada y resuelve el material que va a consumir.
 
-        Lo que se copia queda congelado; lo unico que se resuelve contra el
-        maestro vivo es `recipe.product_id`, y se resuelve AQUI, al crear, para
-        que arrancar no dependa de que la receta siga apuntando manana al mismo
-        preparado.
+        Dos origenes, y el orden importa:
+
+        1. El MATERIAL BASE congelado en la cotizacion. Cuando existe, manda:
+           el material, la cantidad y la unidad ya los decidio y los congelo
+           quien confirmo, y aqui no se vuelve a resolver nada contra el
+           maestro. Es lo que hace que el operador no pueda cambiar el material
+           de una orden ni por descuido ni a proposito.
+        2. El camino legacy, para las lineas confirmadas antes de que el
+           material base existiera: se resuelve `recipe.product_id` contra el
+           maestro vivo, como se ha hecho siempre. No se les fabrica un
+           material base que nadie eligio.
         """
+        stored = body_material_mod.stored_selection(item.production_snapshot)
+        if stored is not None:
+            return self._line_from_body_material(order, item, position, stored)
+
         prepared_product_id: int | None = None
         if item.recipe_id is not None:
             recipe = await self._session.get(Recipe, item.recipe_id)
@@ -443,6 +472,56 @@ class ProductionOrderService:
             required_material_uom=REQUIREMENT_UOM if required is not None else None,
         )
 
+    def _line_from_body_material(
+        self,
+        order: ProductionOrder,
+        item: QuotationItem,
+        position: int,
+        stored: dict[str, Any],
+    ) -> ProductionOrderLine:
+        """Deriva la linea del material base congelado en la cotizacion.
+
+        Nada se resuelve contra el maestro: el material, la cantidad por pieza
+        y la unidad se copian del snapshot. Si manana el maestro cambia de
+        unidad o el preparado cambia de receta, esta orden sigue pidiendo lo
+        que se contrato.
+
+        La unidad viaja tal cual, y por eso aqui no hay ninguna conversion:
+        la cantidad ya se expreso en la unidad base del material cuando se
+        cotizo.
+        """
+        quantity_per_piece = _decimal_or_none(stored.get("quantity_per_piece"))
+        required: Decimal | None = None
+        if item.quantity is not None and quantity_per_piece is not None:
+            required = quantity_per_piece * Decimal(item.quantity)
+
+        return ProductionOrderLine(
+            production_order_id=order.id,
+            quotation_item_id=item.id,
+            sort_order=position,
+            product_id=item.product_id,
+            product_name_snapshot=item.product_name_snapshot,
+            product_internal_reference_snapshot=item.product_internal_reference_snapshot,
+            quantity=item.quantity,
+            width_snapshot=item.product_width_snapshot,
+            height_snapshot=item.product_height_snapshot,
+            length_snapshot=item.product_length_snapshot,
+            depth_snapshot=item.product_depth_snapshot,
+            # Procedencia del preparado, copiada del snapshot. NULL para una
+            # materia prima: no tiene receta, y anotarle una seria inventarla.
+            recipe_id=stored.get("recipe_id_used"),
+            recipe_version_id=stored.get("recipe_version_id_used"),
+            recipe_version_fingerprint_snapshot=stored.get("recipe_version_fingerprint_snapshot"),
+            # Solo cuando el material se lleva en gramos. En cualquier otra
+            # unidad esta columna mentiria, porque no tiene donde decir cual es.
+            material_grams_per_piece=(
+                quantity_per_piece if stored.get("uom") == REQUIREMENT_UOM else None
+            ),
+            prepared_product_id=stored.get("product_id"),
+            required_material_quantity=required,
+            required_material_uom=stored.get("uom") if required is not None else None,
+        )
+
     # -- motor de disponibilidad -------------------------------------------
     async def evaluate_readiness(self, order: ProductionOrder) -> ProductionReadiness:
         """Dice si la orden puede arrancar. **No escribe nada.**
@@ -467,13 +546,19 @@ class ProductionOrderService:
         # ---- 1. Lo que cada linea puede o no puede pedir -------------------
         per_product: dict[int, list[tuple[ProductionOrderLine, Decimal]]] = {}
         for line in order.lines:
-            if line.recipe_id is None:
+            # Una linea derivada de material base no tiene por que traer
+            # receta: una pieza de materia prima directa no se fabrica con
+            # ninguna. Lo que hace falta para producir es saber QUE material y
+            # CUANTO, y eso es `prepared_product_id` + `required_material_*`.
+            # El aviso de receta se reserva para las lineas legacy, que sin
+            # ella no tienen de donde sacar el material.
+            if line.recipe_id is None and line.prepared_product_id is None:
                 issues.append(self._line_issue(line, ProductionReadinessCode.MISSING_RECIPE))
                 continue
             if line.quantity is None:
                 issues.append(self._line_issue(line, ProductionReadinessCode.MISSING_QUANTITY))
                 continue
-            if line.material_grams_per_piece is None or line.required_material_quantity is None:
+            if line.required_material_quantity is None:
                 issues.append(
                     self._line_issue(line, ProductionReadinessCode.MISSING_MATERIAL_GRAMS)
                 )
@@ -491,7 +576,9 @@ class ProductionOrderService:
                 )
                 continue
 
-            converted = await self._to_stock_uom(line.required_material_quantity, prepared)
+            converted = await self._to_stock_uom(
+                line.required_material_quantity, prepared, line.required_material_uom
+            )
             if converted is None:
                 issues.append(
                     self._line_issue(
@@ -591,9 +678,19 @@ class ProductionOrderService:
             uom=uom,
         )
 
-    async def _to_stock_uom(self, grams: Decimal, prepared: Product) -> Decimal | None:
-        """Pasa un requerimiento en gramos a la unidad base del preparado.
+    async def _to_stock_uom(
+        self, quantity: Decimal, prepared: Product, source_uom: str | None = None
+    ) -> Decimal | None:
+        """Pasa un requerimiento a la unidad base del preparado.
 
+        Cuando el requerimiento ya viene EN esa unidad no hay nada que
+        convertir, y ese es el caso normal de una linea con material base: la
+        cantidad por pieza se expreso desde el principio en la unidad del
+        material. Un preparado que el almacen lleva en mililitros se consume en
+        mililitros, sin puente ninguno.
+
+        El resto es el camino legacy, donde el requerimiento siempre viene en
+        gramos porque `material_grams_per_piece` no sabe decir otra cosa.
         Devuelve `None` cuando la conversion no es legitima, y ese `None` es la
         parte importante:
 
@@ -607,6 +704,8 @@ class ProductionOrderService:
           falso, y descontaria del almacen una cantidad que nadie decidio.
           Como la orden de produccion todavia no elige lote, se bloquea.
         """
+        if source_uom is not None and source_uom == prepared.base_uom_code:
+            return quantity
         uom = await self._session.get(UnitOfMeasure, prepared.base_uom_code or "")
         if uom is None or not uom.active:
             return None
@@ -614,7 +713,12 @@ class ProductionOrderService:
             return None
         if uom.factor_to_base <= 0:
             return None
-        return grams / uom.factor_to_base
+        # Solo se convierte desde gramos: es lo unico que el camino legacy sabe
+        # producir. Una unidad distinta que no coincida con la del preparado no
+        # se adivina.
+        if source_uom is not None and source_uom != REQUIREMENT_UOM:
+            return None
+        return quantity / uom.factor_to_base
 
     # -- arranque: el unico punto que mueve inventario ---------------------
     async def _require_paid_quotation(self, order: ProductionOrder) -> None:

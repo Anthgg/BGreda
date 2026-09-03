@@ -164,6 +164,25 @@ class _ResolvedCalculation:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedBodyMaterial:
+    """El material base ya resuelto, tal como llega al motor tecnico.
+
+    No es un campo del contrato HTTP a proposito. `POST /quotations/calculate`
+    es publico, y un cliente que pudiera mandar el costo del cuerpo de la pieza
+    seria autoridad de precio. Lo rellena el Cotizador, dentro del backend,
+    despues de resolver el material contra el maestro.
+    """
+
+    #: Importe del material del cuerpo para TODA la linea, ya calculado.
+    amount: Decimal
+    #: Identidad del maestro usado. Entra en la huella para que cambiarle el
+    #: costo a un material invalide los borradores que lo cotizaron, igual que
+    #: hace la version de receta en el camino legacy.
+    product_id: int
+    product_updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class FiringEstimateOverride:
     """Costo de quema simulado y trazable para consumidores internos."""
 
@@ -516,10 +535,25 @@ class QuotationService:
         return await self._commercial()
 
     async def _recipe_materials(
-        self, payload: QuotationCalculateIn, product: Product
+        self,
+        payload: QuotationCalculateIn,
+        product: Product,
+        body_material: ResolvedBodyMaterial | None = None,
     ) -> tuple[Decimal, RecipeVersion | None, list[str], list[str]]:
-        """Costo de materiales, version usada, avisos y materiales sin precio."""
+        """Costo de materiales, version usada, avisos y materiales sin precio.
+
+        Dos caminos que no se mezclan. Si la linea trae MATERIAL BASE, su costo
+        ya viene resuelto y aqui no se calcula nada: el cuerpo de la pieza se
+        costeo contra el maestro del material, que es donde el usuario lo
+        eligio. Si no lo trae, se conserva el camino legacy por receta y gramos
+        exactamente como estaba, para que ninguna cotizacion ya emitida cambie
+        de importe por esta fase.
+        """
         if payload.recipe_id is None or payload.recipe_version_id is None:
+            if body_material is not None:
+                # Sin receta ya no significa sin material: una pieza de materia
+                # prima directa no tiene ninguna y esta perfectamente cotizada.
+                return body_material.amount, None, [], []
             return (
                 ZERO,
                 None,
@@ -553,6 +587,11 @@ class QuotationService:
                 "La version de receta indicada no existe o no esta activa",
                 code="RECIPE_VERSION_INVALID",
             )
+        if body_material is not None:
+            # La receta se valido igual —viaja en las columnas legacy y tiene
+            # que seguir siendo una receta real— pero el importe lo pone el
+            # material base. Costear las dos cosas sumaria el cuerpo dos veces.
+            return body_material.amount, version, [], []
         # La receta se cotiza en gramos y la cotizacion cuenta piezas. Sin saber
         # cuantos gramos lleva una pieza no hay costo que calcular: se avisa y se
         # devuelve cero, y confirmar queda bloqueado.
@@ -729,6 +768,7 @@ class QuotationService:
         payload: QuotationCalculateIn,
         *,
         firing_override: FiringEstimateOverride | None = None,
+        body_material: ResolvedBodyMaterial | None = None,
     ) -> _ResolvedCalculation:
         product = await self._product(payload.product_id)
         customer = await self._customer(payload.customer_id)
@@ -738,7 +778,7 @@ class QuotationService:
             recipe_version,
             recipe_warnings,
             materials_without_cost,
-        ) = await self._recipe_materials(payload, product)
+        ) = await self._recipe_materials(payload, product, body_material)
         if firing_override is None:
             firing_line, firing_cost, firing_snapshot, firing_warnings = await self._firing_source(
                 payload, product
@@ -905,6 +945,14 @@ class QuotationService:
                 recipe_version.fingerprint if recipe_version else None,
                 recipe_version.updated_at if recipe_version else None,
             ],
+            # Solo cuando hay material base. Anadir la clave siempre cambiaria
+            # la huella de todos los borradores ya guardados y les daria
+            # SOURCE_CHANGED al confirmar sin que nada hubiera cambiado.
+            **(
+                {"body_material": [body_material.product_id, body_material.product_updated_at]}
+                if body_material is not None
+                else {}
+            ),
             "firing": firing_source_key,
             "techniques": sorted((row.id, row.updated_at) for row in technique_rows.values()),
             "additionals": sorted((row.id, row.updated_at) for row in additional_rows.values()),
@@ -1069,18 +1117,27 @@ class QuotationService:
             other_cost_inputs=other_inputs,
         )
 
-    async def calculate(self, payload: QuotationCalculateIn) -> QuotationCalculateOut:
+    async def calculate(
+        self,
+        payload: QuotationCalculateIn,
+        *,
+        body_material: ResolvedBodyMaterial | None = None,
+    ) -> QuotationCalculateOut:
         """Simula sin insertar, emitir correlativo, consumir stock ni cambiar precios."""
-        return (await self._calculate(payload)).output
+        return (await self._calculate(payload, body_material=body_material)).output
 
     async def calculate_with_firing_estimate(
         self,
         payload: QuotationCalculateIn,
         estimate: FiringEstimateOverride,
+        *,
+        body_material: ResolvedBodyMaterial | None = None,
     ) -> QuotationCalculateOut:
         """Cotiza usando una quema simulada sin crear un evento productivo."""
 
-        return (await self._calculate(payload, firing_override=estimate)).output
+        return (
+            await self._calculate(payload, firing_override=estimate, body_material=body_material)
+        ).output
 
     @staticmethod
     def _identity(payload: QuotationCalculateIn) -> tuple[object, ...]:
