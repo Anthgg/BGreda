@@ -2163,6 +2163,13 @@ class QuotationBuilderService:
         )
         materials_complete = bool(
             item.production_snapshot.get("materials_applied_input") is not None
+            # Un material base ya dice que material lleva la pieza y cuanto.
+            # Exigirle ademas receta y gramos dejaria sin confirmar justo los
+            # dos casos que esta fase vino a hacer posibles: la materia prima
+            # directa, que no tiene receta, y el material que no se lleva en
+            # gramos. Que ese material se pueda costear lo vigila aparte
+            # `calculation_warnings`, unas lineas mas abajo.
+            or body_material_mod.stored_selection(item.production_snapshot) is not None
             or (
                 item.recipe_id is not None
                 and item.recipe_version_id is not None
