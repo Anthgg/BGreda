@@ -41,6 +41,8 @@ from app.models.settings import CommercialSettings
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
 from app.schemas.quotation_builder import (
+    BodyMaterialIn,
+    BodyMaterialOut,
     GlazePlanOut,
     GlazeSelectionItemIn,
     ProductDimensionCompletionIn,
@@ -56,7 +58,9 @@ from app.schemas.quotations import (
     QuotationCalculateIn,
     TechniqueSelectionIn,
 )
+from app.services import body_material as body_material_mod
 from app.services.audit import AuditRecorder
+from app.services.body_material import BodyMaterialResolver
 from app.services.firings import FiringService
 from app.services.preparations import (
     GlazeChoice,
@@ -65,7 +69,11 @@ from app.services.preparations import (
     PreparationValidationError,
 )
 from app.services.quotation_pdf import QuotationPdfService
-from app.services.quotations import FiringEstimateOverride, QuotationService
+from app.services.quotations import (
+    FiringEstimateOverride,
+    QuotationService,
+    ResolvedBodyMaterial,
+)
 from app.services.sequences import SequenceService
 
 logger = logging.getLogger(__name__)
@@ -95,6 +103,13 @@ BLOCKING_WARNING_CODES = frozenset(
         # Fase 009D
         "GLAZE_PIECE_WEIGHT_REQUIRED",
         "GLAZE_ML_REQUIRES_PREPARATION",
+        # Material base. Todos bloquean por el mismo motivo: sin material o sin
+        # su costo, confirmar dejaria una cotizacion que no se puede producir o
+        # cuyo cuerpo salio gratis.
+        body_material_mod.INVALID,
+        body_material_mod.UOM_UNKNOWN,
+        body_material_mod.COST_UNAVAILABLE,
+        body_material_mod.UNSUPPORTED_UOM_COSTING,
     }
 )
 _DIMENSION_QUANTUM = Decimal(1).scaleb(-QUANTITY_SCALE)
@@ -486,6 +501,29 @@ def _stored_glaze_plan(snapshot: dict[str, Any]) -> GlazePlanOut | None:
     return GlazePlanOut.model_validate(plan)
 
 
+def _stored_body_material(snapshot: dict[str, Any]) -> BodyMaterialOut | None:
+    """El material base guardado de una linea, o `None` si es anterior a esto."""
+    stored = body_material_mod.stored_selection(snapshot)
+    return BodyMaterialOut.model_validate(stored) if stored is not None else None
+
+
+def _body_material_input(snapshot: dict[str, Any]) -> BodyMaterialIn | None:
+    """Recupera la ELECCION del usuario, nunca los derivados.
+
+    Se reconstruye solo lo que el usuario tecleo —que material y cuanto— y el
+    resto (unidad, costo, requerimiento) se vuelve a resolver contra el
+    maestro. Devolverlo tal cual congelaria en un borrador un costo que
+    todavia tiene que poder moverse.
+    """
+    stored = body_material_mod.stored_selection(snapshot)
+    if stored is None:
+        return None
+    quantity = _snapshot_decimal(stored.get("quantity_per_piece"))
+    if quantity is None or quantity <= ZERO:
+        return None
+    return BodyMaterialIn(product_id=int(stored["product_id"]), quantity_per_piece=quantity)
+
+
 def _glaze_inputs(snapshot: dict[str, Any]) -> list[GlazeSelectionItemIn]:
     """Recupera la eleccion de esmaltes guardada en el snapshot.
 
@@ -587,6 +625,16 @@ class QuotationBuilderService:
         # la estimacion suelta. Duplicar la matematica aqui la haria
         # divergir en silencio en cuanto una de las dos cambiara.
         self._preparations = PreparationService(session, audit)
+        # El material base se resuelve y se costea en un solo sitio, y ese
+        # sitio es el backend. El navegador manda que material y cuanto; todo
+        # lo demas —unidad, costo unitario, requerimiento— sale de aqui.
+        self._body_materials = BodyMaterialResolver(session)
+
+    async def list_body_materials(
+        self, *, search: str | None = None, limit: int = 50, offset: int = 0
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Catalogo de materiales que pueden formar el cuerpo de una pieza."""
+        return await self._body_materials.list_options(search=search, limit=limit, offset=offset)
 
     async def _glaze_plan(
         self, item: QuotationBuilderItemIn, product: Product
@@ -1076,10 +1124,39 @@ class QuotationBuilderService:
                     warnings.append("FIRING_REQUIRED")
                 elif _firings_without_kiln(item, payload.kiln_id):
                     warnings.append("FIRING_KILN_REQUIRED")
-            if item.materials_applied is None and (recipe_id is None or version_id is None):
-                warnings.append("RECIPE_REQUIRED")
-            if item.materials_applied is None and item.material_grams_per_piece is None:
-                warnings.append("MATERIAL_GRAMS_PER_PIECE_REQUIRED")
+            # El material base, cuando lo hay, es la autoridad del cuerpo de la
+            # pieza y de su costo. Se resuelve ANTES de los avisos de receta
+            # porque es lo que decide si esos avisos siguen teniendo sentido:
+            # una pieza de materia prima directa no tiene receta y no le falta
+            # nada.
+            body_material = (
+                await self._body_materials.resolve(
+                    item.body_material.product_id,
+                    item.body_material.quantity_per_piece,
+                    item.quantity,
+                )
+                if item.body_material is not None
+                else None
+            )
+            body_material_snapshot = (
+                body_material_mod.snapshot(body_material) if body_material is not None else None
+            )
+            if body_material is not None:
+                warnings.extend(body_material.warnings)
+                # Las columnas legacy siguen escribiendose, pero ya no son la
+                # eleccion del usuario: son la PROCEDENCIA del preparado. Para
+                # una materia prima quedan en NULL, que es la verdad — no hay
+                # receta que anotar— y por eso la orden de produccion tiene que
+                # leer el snapshot y no estas columnas.
+                recipe_id = body_material.recipe_id
+                version_id = body_material.recipe_version_id
+                version_fingerprint = body_material.recipe_version_fingerprint
+                auto_selected = False
+            elif item.materials_applied is None:
+                if recipe_id is None or version_id is None:
+                    warnings.append("RECIPE_REQUIRED")
+                if item.material_grams_per_piece is None:
+                    warnings.append("MATERIAL_GRAMS_PER_PIECE_REQUIRED")
             if "KILN_CAPACITY_EXCEEDED" in production_warnings:
                 warnings.append("KILN_CAPACITY_EXCEEDED")
 
@@ -1148,11 +1225,19 @@ class QuotationBuilderService:
                     customer_id=payload.customer_id,
                     product_id=product.id,
                     quantity=item.quantity,
-                    recipe_id=recipe_id,
-                    recipe_version_id=version_id,
+                    # Una linea con material base no manda receta al motor de
+                    # costos. No es que sobre: es que su costo ya esta resuelto
+                    # y pasarla haria que el motor volviera a costear el cuerpo
+                    # por la formula, cobrandolo dos veces por dos vias.
+                    recipe_id=None if body_material is not None else recipe_id,
+                    recipe_version_id=None if body_material is not None else version_id,
                     firing_line_id=item.firing_line_id,
                     materials_applied=item.materials_applied,
-                    material_grams_per_piece=item.material_grams_per_piece,
+                    material_grams_per_piece=(
+                        body_material.grams_per_piece
+                        if body_material is not None
+                        else item.material_grams_per_piece
+                    ),
                     techniques=item.techniques,
                     additionals=item.additionals,
                     days_adjustment=item.days_adjustment,
@@ -1166,11 +1251,26 @@ class QuotationBuilderService:
                     markup_percent=item.markup_percent,
                     commercial_sale_unit_price=item.commercial_sale_unit_price,
                 )
+                # Cero cuando el material no se pudo costear. No es un costo de
+                # cero: es «no se sabe», y ya viaja como aviso bloqueante.
+                # Pasar None haria que el motor cayera al camino legacy y
+                # avisara de una receta que esta linea no necesita.
+                resolved_body_material = (
+                    ResolvedBodyMaterial(
+                        amount=body_material.material_cost or ZERO,
+                        product_id=body_material.product.id,
+                        product_updated_at=body_material.product.updated_at,
+                    )
+                    if body_material is not None and body_material.product is not None
+                    else None
+                )
                 calculation = (
-                    await self._quotations.calculate(quotation_input)
+                    await self._quotations.calculate(
+                        quotation_input, body_material=resolved_body_material
+                    )
                     if item.firing_line_id is not None
                     else await self._quotations.calculate_with_firing_estimate(
-                        quotation_input, estimate
+                        quotation_input, estimate, body_material=resolved_body_material
                     )
                 )
                 warnings.extend(calculation.warnings)
@@ -1227,7 +1327,16 @@ class QuotationBuilderService:
                     recipe_version_fingerprint_snapshot=version_fingerprint,
                     recipe_auto_selected=auto_selected,
                     materials_applied_input=item.materials_applied,
-                    material_grams_per_piece=item.material_grams_per_piece,
+                    material_grams_per_piece=(
+                        body_material.grams_per_piece
+                        if body_material is not None
+                        else item.material_grams_per_piece
+                    ),
+                    body_material=(
+                        BodyMaterialOut.model_validate(body_material_snapshot)
+                        if body_material_snapshot is not None
+                        else None
+                    ),
                     glaze_plan=GlazePlanOut.model_validate(glaze_plan) if glaze_plan else None,
                     glaze_unit=item.glaze_unit,
                     glaze_selection_touched=(item.glaze_selection_touched or bool(item.glazes)),
@@ -1300,6 +1409,15 @@ class QuotationBuilderService:
                             }
                             for glaze in item.glazes
                         ],
+                        # Clave propia, como glaze_plan: la eleccion del
+                        # material del cuerpo y su plan ya resuelto. Ausente en
+                        # las lineas legacy, y ausente se lee como «esta linea
+                        # es anterior», nunca como «no tiene material».
+                        **(
+                            {body_material_mod.SNAPSHOT_KEY: body_material_snapshot}
+                            if body_material_snapshot is not None
+                            else {}
+                        ),
                     },
                     techniques=(
                         [value.model_dump(mode="json") for value in calculation.techniques]
@@ -1958,6 +2076,7 @@ class QuotationBuilderService:
                     dimensions_overridden=bool(
                         item.production_snapshot.get("dimensions_overridden")
                     ),
+                    body_material=_body_material_input(item.production_snapshot),
                     recipe_id=item.recipe_id,
                     recipe_version_id=item.recipe_version_id,
                     materials_applied=item.production_snapshot.get("materials_applied_input"),
@@ -2099,6 +2218,10 @@ class QuotationBuilderService:
                 ),
                 dimensions_overridden=bool(item.production_snapshot.get("dimensions_overridden")),
                 quantity=item.quantity,
+                # Lo guardado, no lo recalculado. En una confirmada esto es
+                # historia: el material y su costo son los de entonces aunque
+                # el maestro haya cambiado despues.
+                body_material=_stored_body_material(item.production_snapshot),
                 recipe_id=item.recipe_id,
                 recipe_version_id=item.recipe_version_id,
                 recipe_version_fingerprint_snapshot=(item.recipe_version_fingerprint_snapshot),
