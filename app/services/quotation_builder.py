@@ -2455,12 +2455,20 @@ class QuotationBuilderService:
         # Se valoran con la politica CONGELADA de la fila: una cotizacion ya
         # guardada no puede cambiar de importe porque alguien edite el IGV o el
         # paso de redondeo despues.
-        cargos = price_commercial_lines(
-            row.commercial_lines,
-            tax_percent=row.tax_percentage_snapshot,
-            rounding_step=_frozen_rounding_step(row),
-            currency=row.currency_code_snapshot,
-            exchange_rate=row.exchange_rate_snapshot,
+        # Sin cargos no hay nada que valorar, y por tanto tampoco hace falta
+        # politica: pedirla igualmente rompia la LECTURA de cualquier borrador
+        # todavia sin productos —incluido el que crea el puente—, que es algo
+        # perfectamente valido. La politica se exige donde se usa, no antes.
+        cargos = (
+            price_commercial_lines(
+                row.commercial_lines,
+                tax_percent=row.tax_percentage_snapshot,
+                rounding_step=_frozen_rounding_step(row),
+                currency=row.currency_code_snapshot,
+                exchange_rate=row.exchange_rate_snapshot,
+            )
+            if row.commercial_lines
+            else _CommercialLinesTotals(net=ZERO, tax=ZERO, gross=ZERO, lines=[])
         )
         item_outputs = [
             QuotationBuilderItemOut(

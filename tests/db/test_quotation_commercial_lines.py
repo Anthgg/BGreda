@@ -560,6 +560,7 @@ async def test_otro_cargo_no_sirve_como_contexto_comercial(
     bastaria con colar el primero para que el segundo pasara.
     """
     vacia = await api.post(BUILDER, json={"name": "Sin productos 2"}, headers=head(admin_csrf))
+    assert vacia.status_code == 201, vacia.text
     borrador_id = vacia.json()["id"]
     proto = await _prototipo_cualquiera(api, admin_csrf)
 
@@ -584,7 +585,8 @@ async def test_con_producto_el_cargo_entra_y_el_puente_sigue_creando_borradores(
     borrador = await _borrador(api, admin_csrf, db_session)
     proto = await _prototipo_cualquiera(api, admin_csrf)
     antes = await api.get(f"{BUILDER}/{borrador['id']}", headers=head(admin_csrf))
-    neto_antes = Decimal(antes.json()["quotation_net"])
+    assert antes.status_code == 200, antes.text
+    neto_antes = Decimal(antes.json()["quotation_net_total"])
 
     creado = await api.post(
         f"{BUILDER}/{borrador['id']}/commercial-lines",
