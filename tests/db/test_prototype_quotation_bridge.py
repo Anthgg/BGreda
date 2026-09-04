@@ -669,3 +669,90 @@ async def test_lo_que_se_declara_al_dar_de_alta_la_muestra_se_guarda(
 
     lineas = await _lineas_material(db_session, fila.id)
     assert [linea.material_role for linea in lineas] == [PrototypeMaterialRole.BODY]
+
+
+@pytest.mark.asyncio
+async def test_editar_la_ficha_la_guarda_de_verdad(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """TECHNICAL_SPECIFICATIONS_PERSIST_ON_UPDATE.
+
+    Se relee desde PostgreSQL despues del commit, y no de la respuesta del PUT:
+    una respuesta se construye desde el objeto en memoria y puede devolver
+    intacto lo que se acaba de mandar aunque no haya llegado a la columna.
+
+    La ficha se reemplaza ENTERA. Que la tecnica anterior desaparezca al mandar
+    solo el ancho no es una perdida: es un formulario, y conservar a medias
+    daria una ficha que nadie escribio.
+    """
+    creado = await api.post(
+        PROTOTYPES,
+        json={
+            "name": "E2E-009K1 ficha",
+            "quantity": 1,
+            "technical_specifications": {"width_cm": "9", "technique": "Colado"},
+        },
+        headers=head(admin_csrf),
+    )
+    assert creado.status_code == 201, creado.text
+    proto_id = creado.json()["id"]
+
+    editada = await api.put(
+        f"{PROTOTYPES}/{proto_id}",
+        json={"technical_specifications": {"width_cm": "12", "height_cm": "18"}},
+        headers=head(admin_csrf),
+    )
+    assert editada.status_code == 200, editada.text
+
+    db_session.expire_all()
+    fila = await db_session.get(Prototype, proto_id)
+    assert fila is not None
+    assert fila.technical_specifications == {"width_cm": "12", "height_cm": "18"}
+
+
+@pytest.mark.asyncio
+async def test_la_muestra_sucesora_hereda_la_ficha_y_los_roles(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """TECHNICAL_SPECIFICATIONS_SUCCESSOR_PRESERVED.
+
+    Repetir una muestra rechazada es rehacer la MISMA pieza: la ficha tecnica y
+    el rol de cada material son de la pieza, no del intento. Las notas si son
+    nuevas, porque explican por que se repite.
+    """
+    barro = await _material(api, admin_csrf, nombre="Arcilla sucesora 009K1")
+    creado = await api.post(
+        PROTOTYPES,
+        json={
+            "name": "E2E-009K1 sucesora",
+            "quantity": 1,
+            "technical_specifications": {"width_cm": "15", "mold": "Molde 3"},
+            "materials": [{"product_id": barro["id"], "quantity": "40", "material_role": "BODY"}],
+        },
+        headers=head(admin_csrf),
+    )
+    assert creado.status_code == 201, creado.text
+    proto_id = creado.json()["id"]
+
+    for accion in ("start", "complete"):
+        assert (
+            await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
+        ).status_code == 200
+    rechazo = await api.post(f"{PROTOTYPES}/{proto_id}/reject", json={}, headers=head(admin_csrf))
+    assert rechazo.status_code == 200, rechazo.text
+
+    sucesora = await api.post(
+        f"{PROTOTYPES}/{proto_id}/successor",
+        json={"notes": "Se repite: la boca quedo ovalada"},
+        headers=head(admin_csrf),
+    )
+    assert sucesora.status_code == 201, sucesora.text
+
+    db_session.expire_all()
+    fila = await db_session.get(Prototype, sucesora.json()["id"])
+    assert fila is not None
+    assert fila.technical_specifications == {"width_cm": "15", "mold": "Molde 3"}
+    assert fila.notes == "Se repite: la boca quedo ovalada"
+
+    lineas = await _lineas_material(db_session, fila.id)
+    assert [linea.material_role for linea in lineas] == [PrototypeMaterialRole.BODY]
