@@ -500,3 +500,99 @@ async def test_cada_mutacion_del_cargo_deja_su_rastro(
     )
     assert rechazado.status_code == 422
     assert await _eventos() == ["CREATE", "UPDATE", "DELETE"]
+
+
+# ---------------------------------------------------------------------------
+# El cargo necesita que ya exista politica comercial
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_un_cargo_no_puede_ser_la_primera_linea_economica(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_LINE_REQUIRES_PRODUCT_COMMERCIAL_CONTEXT.
+
+    Una cotizacion sin productos no ha congelado ni IGV ni paso de redondeo
+    —sus totales son nulos—, asi que valorar un cargo dentro de ella obligaria
+    a inventarse la politica. Este es el caso que el puente produce cuando la
+    muestra no dice de que producto es, y en produccion respondia 500.
+
+    Se comprueba ademas que el rechazo no deja nada escrito: un 422 que hubiera
+    guardado la fila seria peor que el 500.
+    """
+    vacia = await api.post(BUILDER, json={"name": "Sin productos"}, headers=head(admin_csrf))
+    assert vacia.status_code == 201, vacia.text
+    borrador_id = vacia.json()["id"]
+    proto = await _prototipo_cualquiera(api, admin_csrf)
+    antes = await _inventario(db_session)
+
+    respuesta = await api.post(
+        f"{BUILDER}/{borrador_id}/commercial-lines",
+        json=_linea(prototype_id=proto),
+        headers=head(admin_csrf),
+    )
+    assert respuesta.status_code == 422, respuesta.text
+    assert respuesta.json()["error"]["code"] == "QUOTATION_COMMERCIAL_LINE_WITHOUT_PRODUCT"
+    # El mensaje dice QUE hacer, no que fallo un calculo.
+    assert "producto" in respuesta.json()["error"]["message"].lower()
+
+    db_session.expire_all()
+    guardadas = await db_session.scalar(
+        select(func.count())
+        .select_from(QuotationCommercialLine)
+        .where(QuotationCommercialLine.quotation_id == borrador_id)
+    )
+    assert guardadas == 0
+    assert await _inventario(db_session) == antes
+
+    # Y la cotizacion sigue siendo legible: el rechazo no la deja rota.
+    relectura = await api.get(f"{BUILDER}/{borrador_id}", headers=head(admin_csrf))
+    assert relectura.status_code == 200, relectura.text
+    assert relectura.json()["commercial_lines"] == []
+
+
+@pytest.mark.asyncio
+async def test_otro_cargo_no_sirve_como_contexto_comercial(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Un cargo NO establece politica, asi que dos vacios tampoco.
+
+    Si el guard mirara «hay alguna linea economica» en vez de «hay producto»,
+    bastaria con colar el primero para que el segundo pasara.
+    """
+    vacia = await api.post(BUILDER, json={"name": "Sin productos 2"}, headers=head(admin_csrf))
+    borrador_id = vacia.json()["id"]
+    proto = await _prototipo_cualquiera(api, admin_csrf)
+
+    for _ in range(2):
+        respuesta = await api.post(
+            f"{BUILDER}/{borrador_id}/commercial-lines",
+            json=_linea(prototype_id=proto),
+            headers=head(admin_csrf),
+        )
+        assert respuesta.status_code == 422, respuesta.text
+
+
+@pytest.mark.asyncio
+async def test_con_producto_el_cargo_entra_y_el_puente_sigue_creando_borradores(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El guard no rompe el camino normal ni el del puente.
+
+    Con producto, el cargo entra y usa la politica YA resuelta por la
+    cotizacion: no estrena redondeo propio ni vuelve a aplicar el impuesto.
+    """
+    borrador = await _borrador(api, admin_csrf, db_session)
+    proto = await _prototipo_cualquiera(api, admin_csrf)
+    antes = await api.get(f"{BUILDER}/{borrador['id']}", headers=head(admin_csrf))
+    neto_antes = Decimal(antes.json()["quotation_net"])
+
+    creado = await api.post(
+        f"{BUILDER}/{borrador['id']}/commercial-lines",
+        json=_linea(prototype_id=proto),
+        headers=head(admin_csrf),
+    )
+    assert creado.status_code == 201, creado.text
+
+    despues = await api.get(f"{BUILDER}/{borrador['id']}", headers=head(admin_csrf))
+    linea = despues.json()["commercial_lines"][0]
+    assert Decimal(despues.json()["quotation_net"]) - neto_antes == Decimal(linea["line_total_net"])

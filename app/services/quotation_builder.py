@@ -227,6 +227,25 @@ class QuotationCommercialLineNotFoundError(APIError):
     message = "El cargo comercial no existe en esta cotizacion"
 
 
+class QuotationCommercialLineWithoutProductError(APIError):
+    """Un cargo comercial no puede ser la primera linea economica.
+
+    El IGV, el paso de redondeo y la moneda de una cotizacion los CONGELAN sus
+    lineas de producto al calcularse. Una cotizacion sin productos todavia no
+    tiene esa politica —sus totales son nulos—, asi que valorar un cargo dentro
+    de ella obligaria a inventarsela, y un importe inventado acaba en una
+    factura. Se pide primero el producto y despues el cargo, que ademas es el
+    orden real del trabajo: se cotiza la pieza y se le suma la muestra.
+
+    Un cargo comercial NO establece politica: por eso no basta con que existan
+    otros cargos.
+    """
+
+    status_code = 422
+    code = "QUOTATION_COMMERCIAL_LINE_WITHOUT_PRODUCT"
+    message = "Agregue al menos un producto a la cotizacion antes de anadir un cargo comercial"
+
+
 class QuotationCommercialLinePrototypeInvalidError(APIError):
     """El cargo dice venir de una muestra que no existe.
 
@@ -693,6 +712,27 @@ def price_commercial_lines(
     return _CommercialLinesTotals(net=neto, tax=tax, gross=bruto, lines=lineas)
 
 
+def _frozen_rounding_step(row: Quotation) -> Decimal:
+    """El paso de redondeo que la cotizacion dejo CONGELADO en sus productos.
+
+    Antes esto caia en cero cuando no encontraba ninguno, y cero no es un paso
+    de redondeo: `ceil_to_step` lo rechaza, asi que una cotizacion sin lineas
+    de producto respondia 500 en cuanto se le anadia un cargo. El valor de
+    relleno no evitaba el problema; lo escondia hasta el unico sitio donde ya
+    no se podia explicar.
+
+    Ahora no hay relleno. Que falte significa que falta:
+    `_ensure_commercial_context` lo impide antes de guardar nada, y si aun asi
+    apareciera una fila en ese estado es un defecto de invariante que tiene que
+    verse, no un importe calculado con una politica inventada.
+    """
+    for item in row.items:
+        plan = item.production_snapshot.get("commercial_plan")
+        if plan:
+            return _snapshot_decimal(plan.get("rounding_step"))
+    raise QuotationCommercialLineWithoutProductError()
+
+
 class QuotationBuilderService:
     def __init__(
         self,
@@ -998,6 +1038,21 @@ class QuotationBuilderService:
     def _ensure_draft(row: Quotation) -> None:
         if row.status is not QuotationStatus.DRAFT:
             raise QuotationBuilderNotEditableError()
+
+    @staticmethod
+    def _ensure_commercial_context(row: Quotation) -> None:
+        """Exige que la cotizacion ya tenga politica comercial congelada.
+
+        La autoridad son las LINEAS DE PRODUCTO: son las unicas que, al
+        calcularse, dejan escrito el paso de redondeo en su plan comercial. Se
+        comprueba que exista ese plan y no solo que haya filas, porque una
+        linea a medio configurar tampoco lo ha congelado.
+
+        Vive en el servicio y no en la ruta para que cualquier camino que anada
+        un cargo obtenga el mismo contrato.
+        """
+        if not any(item.production_snapshot.get("commercial_plan") for item in row.items):
+            raise QuotationCommercialLineWithoutProductError()
 
     @staticmethod
     def _ensure_fresh(row: Quotation, expected: datetime) -> None:
@@ -2121,6 +2176,7 @@ class QuotationBuilderService:
     ) -> QuotationBuilderOut:
         row = await self._get(quotation_id, for_update=True)
         self._ensure_draft(row)
+        self._ensure_commercial_context(row)
         await self._validate_commercial_line(payload)
 
         row.commercial_lines.append(
@@ -2402,16 +2458,7 @@ class QuotationBuilderService:
         cargos = price_commercial_lines(
             row.commercial_lines,
             tax_percent=row.tax_percentage_snapshot,
-            rounding_step=next(
-                (
-                    _snapshot_decimal(
-                        item.production_snapshot.get("commercial_plan", {}).get("rounding_step")
-                    )
-                    for item in row.items
-                    if item.production_snapshot.get("commercial_plan")
-                ),
-                ZERO,
-            ),
+            rounding_step=_frozen_rounding_step(row),
             currency=row.currency_code_snapshot,
             exchange_rate=row.exchange_rate_snapshot,
         )
