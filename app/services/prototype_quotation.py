@@ -207,7 +207,11 @@ class PrototypeQuotationBridge:
 
         fila = await self._session.get(Quotation, creada.id)
         assert fila is not None
-        fila.origin_prototype_id = prototype.id
+        # Se asigna la MUESTRA, no su id. La fila se cargo cuando el origen
+        # todavia era nulo, asi que la relacion quedo resuelta como «ninguna»;
+        # tocar solo la columna deja ese None cacheado y la respuesta sale sin
+        # el codigo. Asignar el objeto actualiza las dos cosas a la vez.
+        fila.origin_prototype = prototype
         await self._session.flush()
 
         self._audit.record_action(
