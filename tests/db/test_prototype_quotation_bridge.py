@@ -665,7 +665,14 @@ async def test_lo_que_se_declara_al_dar_de_alta_la_muestra_se_guarda(
     db_session.expire_all()
     fila = await db_session.get(Prototype, creado.json()["id"])
     assert fila is not None
-    assert fila.technical_specifications == {"width_cm": "12", "technique": "Torno"}
+    # `evaluation` viaja con su valor por defecto: la ficha admite criterios y
+    # esta muestra no declaro ninguno. Se afirma el dict COMPLETO a proposito,
+    # para que un campo nuevo que empiece a guardarse solo se vea aqui.
+    assert fila.technical_specifications == {
+        "width_cm": "12",
+        "technique": "Torno",
+        "evaluation": [],
+    }
 
     lineas = await _lineas_material(db_session, fila.id)
     assert [linea.material_role for linea in lineas] == [PrototypeMaterialRole.BODY]
@@ -707,7 +714,13 @@ async def test_editar_la_ficha_la_guarda_de_verdad(
     db_session.expire_all()
     fila = await db_session.get(Prototype, proto_id)
     assert fila is not None
-    assert fila.technical_specifications == {"width_cm": "12", "height_cm": "18"}
+    # Exacto, no un subconjunto: lo que se prueba es que la ficha se REEMPLAZA.
+    # Si `technique` sobreviviera al PUT que no lo menciona, esto se cae.
+    assert fila.technical_specifications == {
+        "width_cm": "12",
+        "height_cm": "18",
+        "evaluation": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -720,24 +733,28 @@ async def test_la_muestra_sucesora_hereda_la_ficha_y_los_roles(
     el rol de cada material son de la pieza, no del intento. Las notas si son
     nuevas, porque explican por que se repite.
     """
-    barro = await _material(api, admin_csrf, nombre="Arcilla sucesora 009K1")
-    creado = await api.post(
-        PROTOTYPES,
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_suc")
+    proto_id = datos["prototipo"]["id"]
+    ficha = await api.put(
+        f"{PROTOTYPES}/{proto_id}",
+        json={"technical_specifications": {"width_cm": "15", "mold": "Molde 3"}},
+        headers=head(admin_csrf),
+    )
+    assert ficha.status_code == 200, ficha.text
+    materiales = await api.put(
+        f"{PROTOTYPES}/{proto_id}/materials",
         json={
-            "name": "E2E-009K1 sucesora",
-            "quantity": 1,
-            "technical_specifications": {"width_cm": "15", "mold": "Molde 3"},
-            "materials": [{"product_id": barro["id"], "quantity": "40", "material_role": "BODY"}],
+            "materials": [
+                {"product_id": datos["barro"]["id"], "quantity": "40", "material_role": "BODY"}
+            ]
         },
         headers=head(admin_csrf),
     )
-    assert creado.status_code == 201, creado.text
-    proto_id = creado.json()["id"]
+    assert materiales.status_code == 200, materiales.text
 
     for accion in ("start", "complete"):
-        assert (
-            await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
-        ).status_code == 200
+        respuesta = await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
+        assert respuesta.status_code == 200, respuesta.text
     rechazo = await api.post(f"{PROTOTYPES}/{proto_id}/reject", json={}, headers=head(admin_csrf))
     assert rechazo.status_code == 200, rechazo.text
 
@@ -751,7 +768,11 @@ async def test_la_muestra_sucesora_hereda_la_ficha_y_los_roles(
     db_session.expire_all()
     fila = await db_session.get(Prototype, sucesora.json()["id"])
     assert fila is not None
-    assert fila.technical_specifications == {"width_cm": "15", "mold": "Molde 3"}
+    assert fila.technical_specifications == {
+        "width_cm": "15",
+        "mold": "Molde 3",
+        "evaluation": [],
+    }
     assert fila.notes == "Se repite: la boca quedo ovalada"
 
     lineas = await _lineas_material(db_session, fila.id)
