@@ -322,3 +322,72 @@ def price_line(data: LinePricingInput) -> LinePricing:
         line_total_net=line_total_net,
         line_total_tax=line_total_gross - line_total_net,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CommercialLinePricingInput:
+    """Lo que hace falta para poner precio a un cargo comercial."""
+
+    quantity: int
+    #: El importe NETO que tecleo una persona, ya en la moneda de emision.
+    #: Misma regla que el precio manual de una linea de producto: quien escribe
+    #: 200 cotizando en dolares quiere cobrar doscientos dolares.
+    manual_net_amount: Decimal
+    tax_percent: Decimal
+    rounding_step: Decimal
+    currency: str
+    exchange_rate: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class CommercialLinePricing:
+    """El cargo ya valorado, con las mismas cifras que una linea de producto."""
+
+    quantity: int
+    net_unit: Decimal
+    tax_percent: Decimal
+    line_total_net: Decimal
+    line_total_tax: Decimal
+    line_total_gross: Decimal
+
+
+def price_commercial_line(data: CommercialLinePricingInput) -> CommercialLinePricing:
+    """Valora un cargo comercial: IGV y redondeo, nada mas.
+
+    Lo que NO hace es la razon de que exista esta funcion aparte. Un cargo no
+    recibe factor de produccion, ni margen, ni costos fijos, ni asignacion de
+    quema: no es una pieza que se fabrique, es un concepto que se cobra. Si
+    pasara por `price_line`, un cargo de 200 se cobraria multiplicado por el
+    factor y por el margen, y nadie sabria de donde salio la diferencia.
+
+    Lo que SI comparte es el final del camino —el mismo redondeo hacia arriba y
+    la misma reconstruccion de neto e impuesto—, porque el documento tiene que
+    sumar: si el cargo redondeara distinto que las lineas, el total del PDF
+    dejaria de ser la suma de lo que el PDF enumera.
+    """
+    if data.quantity <= 0:
+        raise PricingError("La cantidad del cargo debe ser un entero mayor que cero")
+    if data.manual_net_amount <= ZERO:
+        raise PricingError("El importe del cargo debe ser mayor que cero")
+    if data.tax_percent < ZERO:
+        raise PricingError("El porcentaje de impuesto no puede ser negativo")
+
+    # Valida la coherencia moneda/tasa sin convertir el importe: el manual ya
+    # esta en la moneda de emision.
+    convert_net_to_quote_currency(ZERO, data.currency, data.exchange_rate)
+
+    raw_net_unit = data.manual_net_amount
+    raw_gross_unit = raw_net_unit + raw_net_unit * data.tax_percent / HUNDRED
+    final_gross_unit = ceil_to_step(raw_gross_unit, data.rounding_step)
+    final_net_unit, _final_tax_unit = reconstruct_net_and_tax(final_gross_unit, data.tax_percent)
+
+    line_total_gross = final_gross_unit * Decimal(data.quantity)
+    line_total_net = final_net_unit * Decimal(data.quantity)
+    return CommercialLinePricing(
+        quantity=data.quantity,
+        net_unit=final_net_unit,
+        tax_percent=data.tax_percent,
+        line_total_net=line_total_net,
+        line_total_tax=line_total_gross - line_total_net,
+        line_total_gross=line_total_gross,
+    )

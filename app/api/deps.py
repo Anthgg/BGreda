@@ -39,6 +39,7 @@ from app.services.preparations import PreparationService
 from app.services.production import ProductionOrderService
 from app.services.production_pdf import ProductionPdfService
 from app.services.profiles import ProfileRepository, SqlAlchemyProfileRepository
+from app.services.prototype_quotation import PrototypeQuotationBridge
 from app.services.prototypes import PrototypeService
 from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
@@ -476,3 +477,17 @@ async def get_prototype_service(
 
 
 PrototypeServiceDep = Annotated[PrototypeService, Depends(get_prototype_service)]
+
+
+async def get_prototype_quotation_bridge(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    prototypes: PrototypeServiceDep,
+    builder: QuotationBuilderServiceDep,
+) -> PrototypeQuotationBridge:
+    return PrototypeQuotationBridge(session, audit, prototypes, builder)
+
+
+PrototypeQuotationBridgeDep = Annotated[
+    PrototypeQuotationBridge, Depends(get_prototype_quotation_bridge)
+]

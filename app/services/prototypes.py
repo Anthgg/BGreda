@@ -42,6 +42,8 @@ from app.models.prototypes import (
     Prototype,
     PrototypeApproval,
     PrototypeMaterialLine,
+    PrototypeMaterialRole,
+    PrototypeMaterialStage,
     PrototypeStatus,
 )
 from app.models.quotations import Quotation, QuotationItem, QuotationPaymentStatus
@@ -203,10 +205,17 @@ class PrototypeReadiness:
 
 @dataclass(frozen=True, slots=True)
 class MaterialInput:
-    """Un material elegido para la muestra, tal y como llega del cliente."""
+    """Un material elegido para la muestra, tal y como llega del cliente.
+
+    `quantity` es la PREVISTA: lo que se autoriza gastar. La real la escribe el
+    arranque a partir del movimiento de inventario, y no viaja desde el cliente
+    por el mismo motivo por el que no viaja el saldo.
+    """
 
     product_id: int
     quantity: Decimal
+    material_role: PrototypeMaterialRole | None = None
+    stage: PrototypeMaterialStage | None = None
 
 
 class PrototypeService:
@@ -457,7 +466,9 @@ class PrototypeService:
                 PrototypeMaterialLine(
                     product_id=product.id,
                     sort_order=orden,
-                    quantity=entrada.quantity,
+                    quantity_planned=entrada.quantity,
+                    material_role=entrada.material_role,
+                    stage=entrada.stage,
                     uom_code=product.base_uom_code,
                     product_name_snapshot=product.name,
                     product_internal_reference_snapshot=product.internal_reference,
@@ -482,12 +493,12 @@ class PrototypeService:
             raise PrototypeNotEditableError()
 
         antes = [
-            f"{linea.product_internal_reference_snapshot}:{linea.quantity}"
+            f"{linea.product_internal_reference_snapshot}:{linea.quantity_planned}"
             for linea in prototype.lines
         ]
         await self._replace_materials(prototype, materials)
         despues = [
-            f"{linea.product_internal_reference_snapshot}:{linea.quantity}"
+            f"{linea.product_internal_reference_snapshot}:{linea.quantity_planned}"
             for linea in prototype.lines
         ]
 
@@ -559,17 +570,17 @@ class PrototypeService:
                         PrototypeReadinessCode.STOCK_MISSING,
                         product_id=linea.product_id,
                         product_name=linea.product_name_snapshot,
-                        required_quantity=linea.quantity,
+                        required_quantity=linea.quantity_planned,
                         uom=linea.uom_code,
                     )
                 )
-            elif balance.quantity < linea.quantity:
+            elif balance.quantity < linea.quantity_planned:
                 issues.append(
                     PrototypeIssue(
                         PrototypeReadinessCode.INSUFFICIENT_STOCK,
                         product_id=linea.product_id,
                         product_name=linea.product_name_snapshot,
-                        required_quantity=linea.quantity,
+                        required_quantity=linea.quantity_planned,
                         available_quantity=balance.quantity,
                         uom=linea.uom_code,
                     )
@@ -618,14 +629,21 @@ class PrototypeService:
             await self._inventory.apply_movement(
                 product=product,
                 location=location,
-                quantity=-linea.quantity,
+                quantity=-linea.quantity_planned,
                 movement_type=MovementType.PROTOTYPE_OUT,
                 reason=f"Prototipo {prototype.code}",
                 user_id=user.id,
                 user_name=user.display_name,
                 prototype_id=prototype.id,
             )
-            consumido.append(f"{linea.product_internal_reference_snapshot}:{linea.quantity}")
+            # Lo REAL se escribe aqui, dentro de la transaccion que lo
+            # descuenta. Si algo falla despues, la transaccion se deshace
+            # entera y la columna se queda nula: no puede haber consumo
+            # registrado sin movimiento que lo respalde.
+            linea.quantity_actual = linea.quantity_planned
+            consumido.append(
+                f"{linea.product_internal_reference_snapshot}:{linea.quantity_planned}"
+            )
 
         momento = datetime.now(UTC)
         prototype.status = PrototypeStatus.STARTED
@@ -790,7 +808,12 @@ class PrototypeService:
                 target_days=anterior.target_days,
                 notes=notes,
                 materials=[
-                    MaterialInput(product_id=linea.product_id, quantity=linea.quantity)
+                    MaterialInput(
+                        product_id=linea.product_id,
+                        quantity=linea.quantity_planned,
+                        material_role=linea.material_role,
+                        stage=linea.stage,
+                    )
                     for linea in anterior.lines
                 ],
                 user=user,
@@ -925,8 +948,12 @@ class PrototypeService:
                     sort_order=linea.sort_order,
                     product_name=linea.product_name_snapshot,
                     product_internal_reference=linea.product_internal_reference_snapshot,
-                    quantity=linea.quantity,
+                    quantity=linea.quantity_planned,
+                    quantity_planned=linea.quantity_planned,
+                    quantity_actual=linea.quantity_actual,
                     uom_code=linea.uom_code,
+                    material_role=linea.material_role,
+                    stage=linea.stage,
                 )
                 for linea in prototype.lines
             ],

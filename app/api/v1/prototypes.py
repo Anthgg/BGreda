@@ -14,12 +14,13 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    PrototypeQuotationBridgeDep,
     PrototypeServiceDep,
     WorkshopUserDep,
 )
@@ -33,6 +34,7 @@ from app.schemas.prototypes import (
     PrototypeSuccessorIn,
     PrototypeUpdateIn,
 )
+from app.schemas.quotation_builder import QuotationBuilderOut
 from app.services.prototypes import MaterialInput
 
 router = APIRouter(prefix="/prototypes", tags=["prototipos"])
@@ -278,3 +280,35 @@ async def create_prototype_successor(
     result = await service.present(prototype)
     await session.commit()
     return result
+
+
+@router.post(
+    "/{prototype_id}/final-quotation",
+    response_model=QuotationBuilderOut,
+    responses={
+        201: {"description": "Se creo la cotizacion final."},
+        200: {"description": "Ya existia un borrador de esta muestra; se devuelve ese."},
+        409: {"description": "La muestra no esta aprobada o fue sustituida."},
+    },
+)
+async def create_final_quotation(
+    prototype_id: int,
+    bridge: PrototypeQuotationBridgeDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> QuotationBuilderOut:
+    """Crea la cotizacion final a partir de una muestra aprobada.
+
+    Devuelve 201 cuando la crea y **200 cuando ya existia**, en vez de un
+    conflicto: pulsar dos veces o reintentar por un timeout no es un error del
+    usuario, y la respuesta util en ese caso es la misma cotizacion, no una
+    negativa.
+
+    Es administrativa. La matriz de 009J deja al taller ejecutar la muestra,
+    pero cotizar es decidir un precio.
+    """
+    quotation, created = await bridge.create_final_quotation(prototype_id, user=admin)
+    await session.commit()
+    response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    return quotation

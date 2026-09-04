@@ -372,6 +372,20 @@ class Quotation(Base, TimestampMixin):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    #: Fase 009K.1. De que muestra aprobada nacio esta cotizacion.
+    #:
+    #: Es una relacion DISTINTA de `prototypes.quotation_id`, y por eso no se
+    #: llama igual: aquella dice «con que pedido se autorizo fabricar la
+    #: muestra», esta dice «esta cotizacion nacio de esta muestra». Las dos
+    #: pueden existir a la vez y apuntar a cotizaciones distintas.
+    #:
+    #: Nulo en todo lo anterior, que no nacio de ninguna muestra. El indice
+    #: unico PARCIAL de 0022 —solo sobre los borradores— permite recotizar la
+    #: misma muestra mas adelante sin dejar dos borradores gemelos hoy.
+    origin_prototype_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prototypes.id", ondelete="RESTRICT"), index=True
+    )
+
     #: Fase 009H. Eje de cobro, independiente de `status`. Nulo significa que
     #: el pago no lo registro el sistema —todo lo anterior a 009H— y no debe
     #: leerse como «no pagada»: de esas filas no sabemos nada.
@@ -750,4 +764,73 @@ class QuotationProductPriceUpdate(Base):
     __table_args__ = (
         UniqueConstraint("quotation_id", name="uq_price_update_quotation"),
         CheckConstraint("new_price >= 0", name="new_price_non_negative"),
+    )
+
+
+class CommercialLineKind(StrEnum):
+    """Que representa una linea comercial de la cotizacion.
+
+    Empieza con un solo valor a proposito. Inventar veinte conceptos que nadie
+    ha pedido es como se llenan los enums de valores muertos que despues nadie
+    se atreve a quitar.
+    """
+
+    PROTOTYPE = "PROTOTYPE"
+
+
+class QuotationCommercialLine(Base, TimestampMixin):
+    """Un cargo comercial de la cotizacion que NO es un producto a fabricar.
+
+    Existe porque el prototipo se cobra «como una linea mas» y no cabia en
+    ninguna estructura previa:
+
+    - `quotation_items` exige `product_id` y es de donde la orden de produccion
+      saca lo que hay que fabricar y descontar. Un cargo ahi acabaria, antes o
+      despues, intentando salir del almacen.
+    - Los adicionales, tecnicas y otros costos son entradas de COSTO tecnico:
+      el motor los multiplica por el factor de produccion y por el margen. Un
+      cargo de 200 no se cobraria a 200.
+
+    Por eso el importe es NETO y entra al subtotal comercial ya formado, sin
+    pasar por el factor ni por el margen. Lo que si reutiliza es todo lo demas
+    del motor: moneda, tipo de cambio, IGV y redondeo.
+    """
+
+    __tablename__ = "quotation_commercial_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[CommercialLineKind] = mapped_column(
+        StrEnumType(CommercialLineKind, 32), nullable=False
+    )
+    #: Congelada al escribirla. «Prototipo PRT-2026-000007» tiene que seguir
+    #: diciendo lo mismo dentro de un ano, aunque la muestra se renombre.
+    description: Mapped[str] = mapped_column(String(200), nullable=False)
+    prototype_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prototypes.id", ondelete="RESTRICT"), index=True
+    )
+    quantity: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    #: El importe NETO que teclea una persona autorizada. **No hay formula**: el
+    #: negocio dijo que la muestra se cobra, no cuanto cuesta. Inventar aqui un
+    #: «costo x 3» daria un precio creible que nadie decidio.
+    manual_net_amount: Mapped[Decimal] = mapped_column(calculation_numeric(), nullable=False)
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="quantity_positive"),
+        # Cero no es un cargo: es una linea que no cobra nada y que nadie
+        # revisaria. El dia que haya muestras gratuitas sera una decision
+        # explicita del negocio, con su propia forma de decirlo.
+        CheckConstraint("manual_net_amount > 0", name="amount_positive"),
+        # Un cargo de prototipo sin prototipo no se puede describir ni auditar.
+        CheckConstraint(
+            "kind <> 'PROTOTYPE' OR prototype_id IS NOT NULL",
+            name="prototype_kind_requires_prototype",
+        ),
     )
