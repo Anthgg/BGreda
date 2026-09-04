@@ -1958,6 +1958,11 @@ class QuotationBuilderService:
             source_fingerprint=preview.source_fingerprint,
             created_by_id=user.id,
             items=[],
+            # Inicializada, y no cargada despues: una coleccion sin cargar en
+            # una fila recien creada dispara un lazy load, y `_apply` la lee
+            # desde codigo sincrono. Es el mismo motivo por el que `items`
+            # tambien se construye vacia aqui.
+            commercial_lines=[],
         )
         self._session.add(row)
         await self._session.flush()

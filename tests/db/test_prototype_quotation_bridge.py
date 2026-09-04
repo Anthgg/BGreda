@@ -23,6 +23,7 @@ from app.models.prototypes import Prototype, PrototypeMaterialLine
 from app.models.quotations import Quotation, QuotationStatus
 from tests.db.test_prototypes import (
     PROTOTYPES,
+    _como_operario,
     _material,
     _muestra_lista,
 )
@@ -484,13 +485,17 @@ async def test_el_esmalte_de_la_muestra_no_se_convierte_en_plan_de_esmaltes(
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_el_taller_no_cotiza(
-    api: httpx.AsyncClient, admin_csrf: str, operator_csrf: str, db_session: AsyncSession
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """Cotizar es decidir un precio, y eso es administracion (matriz de 009J)."""
     datos = await _aprobada(api, admin_csrf, db_session, suffix="_br_rbac")
     antes = await _cotizaciones(db_session)
 
-    respuesta = await api.post(_final(datos["prototipo"]["id"]), headers=head(operator_csrf))
+    # El cambio de sesion va AQUI, no en una fixture: el montaje de arriba se
+    # hace como admin y le pisaria la cookie al operario, dejando su token
+    # CSRF emparejado con la sesion equivocada.
+    operario = await _como_operario(api)
+    respuesta = await api.post(_final(datos["prototipo"]["id"]), headers=head(operario))
     assert respuesta.status_code == 403, respuesta.text
     assert await _cotizaciones(db_session) == antes
 

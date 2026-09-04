@@ -27,6 +27,7 @@ from tests.db.test_production_orders_api import (
     crear_orden,
     crear_ubicacion,
 )
+from tests.db.test_prototypes import _como_operario
 from tests.db.test_quotation_builder_api import BUILDER, _complete_payload, head
 
 CARGO = "Prototipo PRT-2026-000099"
@@ -401,7 +402,7 @@ async def test_la_orden_de_produccion_no_ve_el_cargo(
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_el_taller_no_pone_precios(
-    api: httpx.AsyncClient, admin_csrf: str, operator_csrf: str, db_session: AsyncSession
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """COMMERCIAL_LINE_RBAC.
 
@@ -413,10 +414,12 @@ async def test_el_taller_no_pone_precios(
     proto = await _prototipo_cualquiera(api, admin_csrf)
     antes = await _inventario(db_session)
 
+    # El cambio de sesion va aqui: el montaje se hizo como admin.
+    operario = await _como_operario(api)
     respuesta = await api.post(
         f"{BUILDER}/{borrador['id']}/commercial-lines",
         json=_linea(prototype_id=proto),
-        headers=head(operator_csrf),
+        headers=head(operario),
     )
     assert respuesta.status_code == 403, respuesta.text
 
