@@ -12,7 +12,7 @@ dejan los saldos exactamente como estaban.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Response, status
 
@@ -71,6 +71,19 @@ async def list_prototypes(
     )
 
 
+def _ficha(payload: PrototypeCreateIn | PrototypeUpdateIn) -> dict[str, Any] | None:
+    """La ficha tecnica, lista para JSONB.
+
+    Se serializa en modo JSON porque los `Decimal` de las medidas no caben tal
+    cual en la columna, y se descartan los campos vacios: guardar una ficha
+    llena de `null` haria imposible distinguir «no lo declaro» de «lo declaro
+    vacio», que es justamente la distincion de la que depende el puente.
+    """
+    if payload.technical_specifications is None:
+        return None
+    return payload.technical_specifications.model_dump(mode="json", exclude_none=True)
+
+
 @router.post("", response_model=PrototypeOut, status_code=status.HTTP_201_CREATED)
 async def create_prototype(
     payload: PrototypeCreateIn,
@@ -92,8 +105,14 @@ async def create_prototype(
         stock_location_id=payload.stock_location_id,
         target_days=payload.target_days,
         notes=payload.notes,
+        technical_specifications=_ficha(payload),
         materials=[
-            MaterialInput(product_id=item.product_id, quantity=item.quantity)
+            MaterialInput(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                material_role=item.material_role,
+                stage=item.stage,
+            )
             for item in payload.materials
         ],
         user=actor,
@@ -130,6 +149,7 @@ async def update_prototype(
         stock_location_id=payload.stock_location_id,
         target_days=payload.target_days,
         notes=payload.notes,
+        technical_specifications=_ficha(payload),
         user=actor,
     )
     result = await service.present(prototype)
@@ -154,7 +174,12 @@ async def set_prototype_materials(
     prototype = await service.set_materials(
         prototype_id,
         [
-            MaterialInput(product_id=item.product_id, quantity=item.quantity)
+            MaterialInput(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                material_role=item.material_role,
+                stage=item.stage,
+            )
             for item in payload.materials
         ],
         user=actor,

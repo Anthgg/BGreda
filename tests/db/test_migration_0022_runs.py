@@ -123,7 +123,10 @@ async def _insertar(connection: AsyncConnection, tabla: str, valores: dict[str, 
         if columna in fila:
             continue
         if tipo in ("numeric", "integer", "bigint", "smallint", "double precision", "real"):
-            fila[columna] = 0
+            # 1 y no 0: varias columnas monetarias llevan un CHECK de positivo
+            # estricto. Un neutro que viola una restriccion ajena a 0022 haria
+            # fallar la prueba por algo que no esta probando.
+            fila[columna] = 1
         elif tipo == "boolean":
             fila[columna] = False
         elif tipo.startswith("timestamp") or tipo == "date":

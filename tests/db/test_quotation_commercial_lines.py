@@ -393,7 +393,12 @@ async def test_la_orden_de_produccion_no_ve_el_cargo(
     ubicacion = await crear_ubicacion(api, admin_csrf, "Almacen cargos 009K1")
     ordenes: dict[str, list[tuple[int, str | None, str | None]]] = {}
     for etiqueta, borrador in (("sin", sin_cargo), ("con", con_cargo)):
-        confirmada = await confirmada_y_pagada(api, admin_csrf, borrador)
+        # Se relee antes de confirmar. Anadir un cargo CAMBIA la cotizacion, y
+        # confirmar con el `updated_at` de antes choca contra el bloqueo
+        # optimista —que es exactamente lo que tiene que hacer—.
+        fresco = await api.get(f"{BUILDER}/{borrador['id']}", headers=head(admin_csrf))
+        assert fresco.status_code == 200, fresco.text
+        confirmada = await confirmada_y_pagada(api, admin_csrf, fresco.json())
         creada = await crear_orden(
             api, admin_csrf, quotation_id=confirmada["id"], location_id=ubicacion
         )

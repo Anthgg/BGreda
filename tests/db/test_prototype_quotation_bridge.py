@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockMovement
 from app.models.masters import Product
-from app.models.prototypes import Prototype, PrototypeMaterialLine
+from app.models.prototypes import Prototype, PrototypeMaterialLine, PrototypeMaterialRole
 from app.models.quotations import Quotation, QuotationStatus
 from tests.db.test_prototypes import (
     PROTOTYPES,
@@ -63,21 +63,30 @@ async def _movimientos(db_session: AsyncSession) -> int:
     return int(await db_session.scalar(select(func.count()).select_from(StockMovement)) or 0)
 
 
+async def _liga_producto(
+    api: httpx.AsyncClient, csrf: str, datos: dict[str, Any], **extra: Any
+) -> None:
+    """La muestra tiene que decir DE QUE producto es.
+
+    Sin ese vinculo el puente no tiene nada que precargar y devuelve un
+    borrador sin lineas, que es lo que fija
+    `test_una_muestra_sin_producto_da_un_borrador_vacio_y_no_uno_inventado`.
+    """
+    respuesta = await api.put(
+        f"{PROTOTYPES}/{datos['prototipo']['id']}",
+        json={"product_id": datos["producto"]["id"], **extra},
+        headers=head(csrf),
+    )
+    assert respuesta.status_code == 200, respuesta.text
+
+
 async def _aprobada(
     api: httpx.AsyncClient, csrf: str, db_session: AsyncSession, *, suffix: str, **extra: Any
 ) -> dict[str, Any]:
     """Una muestra fabricada, completada y aprobada: la unica que autoriza cotizar."""
     datos = await _muestra_lista(api, csrf, db_session, suffix=suffix, **extra)
     proto_id = datos["prototipo"]["id"]
-    # La muestra tiene que decir DE QUE producto es. Sin ese vinculo el puente
-    # no tiene nada que precargar y devuelve un borrador vacio, que es
-    # justamente lo que comprueba `test_una_muestra_sin_producto_...`.
-    ligada = await api.put(
-        f"{PROTOTYPES}/{proto_id}",
-        json={"product_id": datos["producto"]["id"]},
-        headers=head(csrf),
-    )
-    assert ligada.status_code == 200, ligada.text
+    await _liga_producto(api, csrf, datos)
     assert (await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(csrf))).status_code == 200
     assert (
         await api.post(f"{PROTOTYPES}/{proto_id}/complete", headers=head(csrf))
@@ -372,13 +381,7 @@ async def test_el_material_del_cuerpo_sale_del_consumo_real_dividido_entre_las_p
     barro = datos["barro"]
 
     # Dos piezas de muestra, y el barro declarado como CUERPO.
-    assert (
-        await api.put(
-            f"{PROTOTYPES}/{proto_id}",
-            json={"quantity": 2},
-            headers=head(admin_csrf),
-        )
-    ).status_code == 200
+    await _liga_producto(api, admin_csrf, datos, quantity=2)
     materiales = await api.put(
         f"{PROTOTYPES}/{proto_id}/materials",
         json={
@@ -423,6 +426,7 @@ async def test_con_dos_cuerpos_declarados_el_puente_no_elige(
 ) -> None:
     """Dos BODY es ambiguedad, y la ambiguedad la resuelve una persona."""
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_2body")
+    await _liga_producto(api, admin_csrf, datos)
     proto_id = datos["prototipo"]["id"]
     segundo = await _material(api, admin_csrf, nombre="Arcilla E2E dos_br_2body")
     await api.post(
@@ -466,6 +470,7 @@ async def test_el_esmalte_de_la_muestra_no_se_convierte_en_plan_de_esmaltes(
     pesos relativos. No hay traduccion honesta entre las dos cosas.
     """
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_glaze")
+    await _liga_producto(api, admin_csrf, datos)
     proto_id = datos["prototipo"]["id"]
     materiales = await api.put(
         f"{PROTOTYPES}/{proto_id}/materials",
@@ -630,3 +635,37 @@ async def test_una_muestra_sin_producto_da_un_borrador_vacio_y_no_uno_inventado(
     fila = await db_session.get(Quotation, creada.json()["id"])
     assert fila is not None
     assert fila.origin_prototype_id == proto_id
+
+
+@pytest.mark.asyncio
+async def test_lo_que_se_declara_al_dar_de_alta_la_muestra_se_guarda(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """La ficha y el rol del material sobreviven al alta, no solo a la edicion.
+
+    Aceptar un campo en el esquema y no escribirlo devuelve 201 y pierde el
+    dato en silencio: el taller rellena la ficha, la ve confirmada, y el puente
+    no encuentra nada que precargar. Se comprueba releyendo desde la base y no
+    desde la respuesta, porque una respuesta puede reflejar lo que se mando en
+    vez de lo que se guardo.
+    """
+    barro = await _material(api, admin_csrf, nombre="Arcilla alta 009K1")
+    creado = await api.post(
+        PROTOTYPES,
+        json={
+            "name": "E2E-009K1 alta",
+            "quantity": 1,
+            "technical_specifications": {"width_cm": "12", "technique": "Torno"},
+            "materials": [{"product_id": barro["id"], "quantity": "30", "material_role": "BODY"}],
+        },
+        headers=head(admin_csrf),
+    )
+    assert creado.status_code == 201, creado.text
+
+    db_session.expire_all()
+    fila = await db_session.get(Prototype, creado.json()["id"])
+    assert fila is not None
+    assert fila.technical_specifications == {"width_cm": "12", "technique": "Torno"}
+
+    lineas = await _lineas_material(db_session, fila.id)
+    assert [linea.material_role for linea in lineas] == [PrototypeMaterialRole.BODY]

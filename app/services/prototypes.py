@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
@@ -322,6 +323,7 @@ class PrototypeService:
         stock_location_id: int | None,
         target_days: int | None,
         notes: str | None,
+        technical_specifications: dict[str, Any] | None,
         materials: list[MaterialInput],
         user: AuthenticatedUser,
         supersedes_prototype_id: int | None = None,
@@ -349,6 +351,7 @@ class PrototypeService:
             requested_at=datetime.now(UTC),
             target_days=target_days,
             notes=notes,
+            technical_specifications=technical_specifications,
             supersedes_prototype_id=supersedes_prototype_id,
             created_by=user.id,
             created_by_name=user.display_name,
@@ -395,6 +398,7 @@ class PrototypeService:
         stock_location_id: int | None,
         target_days: int | None,
         notes: str | None,
+        technical_specifications: dict[str, Any] | None,
         user: AuthenticatedUser,
     ) -> Prototype:
         """Edita la muestra mientras todavia no ha gastado nada."""
@@ -419,6 +423,10 @@ class PrototypeService:
             ("stock_location_id", stock_location_id),
             ("target_days", target_days),
             ("notes", notes),
+            # La ficha se reemplaza ENTERA, como los materiales: es un
+            # formulario, no un parche. Mandar solo el ancho y que el sistema
+            # conservara un alto viejo daria una ficha que nadie escribio.
+            ("technical_specifications", technical_specifications),
         ):
             if valor is None:
                 continue
@@ -807,6 +815,11 @@ class PrototypeService:
                 stock_location_id=anterior.stock_location_id,
                 target_days=anterior.target_days,
                 notes=notes,
+                # La ficha viaja con la sucesora igual que el producto y los
+                # materiales: repetir la muestra es volver a hacer la MISMA
+                # pieza, no empezar de cero. Las notas si son nuevas, porque
+                # explican por que se repite.
+                technical_specifications=anterior.technical_specifications,
                 materials=[
                     MaterialInput(
                         product_id=linea.product_id,
