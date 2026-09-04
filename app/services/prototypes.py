@@ -918,6 +918,7 @@ class PrototypeService:
         from app.schemas.prototypes import (
             PrototypeIssueOut,
             PrototypeMaterialOut,
+            PrototypeOriginQuotationOut,
             PrototypeOut,
             PrototypeReadinessOut,
         )
@@ -928,6 +929,16 @@ class PrototypeService:
             else None
         )
         readiness = await self.evaluate_readiness(prototype)
+        # Las cotizaciones que NACIERON de esta muestra. Se consultan aqui y no
+        # por relacion: son pocas, se leen una sola vez, y una coleccion cargada
+        # en cada listado costaria una consulta por fila.
+        originadas = (
+            await self._session.execute(
+                select(Quotation.id, Quotation.code, Quotation.status)
+                .where(Quotation.origin_prototype_id == prototype.id)
+                .order_by(Quotation.id)
+            )
+        ).all()
 
         return PrototypeOut(
             id=prototype.id,
@@ -954,6 +965,11 @@ class PrototypeService:
                 if quotation is not None and quotation.payment_status is not None
                 else None
             ),
+            origin_quotation_ids=[fila.id for fila in originadas],
+            origin_quotations=[
+                PrototypeOriginQuotationOut(id=fila.id, code=fila.code, status=fila.status.value)
+                for fila in originadas
+            ],
             materials=[
                 PrototypeMaterialOut(
                     id=linea.id,

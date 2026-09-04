@@ -468,6 +468,13 @@ class QuotationBuilderOut(BaseModel):
     code: str | None = None
     workflow: QuotationWorkflow = QuotationWorkflow.COTIZADOR
     status: QuotationStatus = QuotationStatus.DRAFT
+    #: Fase 009K.1. De que muestra nacio esta cotizacion, si nacio de alguna.
+    #: Nulo en todo lo anterior y en lo que se cotiza sin muestra previa. El
+    #: codigo viaja al lado porque la pantalla escribe «PRT-2026-000007», no un
+    #: numero de fila, y sin el tendria que pedir la muestra entera solo para
+    #: pintar una etiqueta.
+    origin_prototype_id: int | None = None
+    origin_prototype_code: str | None = None
     name: str | None = None
     customer_id: int | None = None
     customer_name_snapshot: str | None = None

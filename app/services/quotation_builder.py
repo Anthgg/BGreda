@@ -2557,6 +2557,10 @@ class QuotationBuilderService:
             code=row.code,
             workflow=row.workflow,
             status=row.status,
+            origin_prototype_id=row.origin_prototype_id,
+            origin_prototype_code=(
+                row.origin_prototype.code if row.origin_prototype is not None else None
+            ),
             name=row.name,
             customer_id=row.customer_id,
             customer_name_snapshot=row.customer_name_snapshot,

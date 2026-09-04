@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.models.masters import Partner, Product
+    from app.models.prototypes import Prototype
 
 from sqlalchemy import (
     Boolean,
@@ -384,6 +385,16 @@ class Quotation(Base, TimestampMixin):
     #: misma muestra mas adelante sin dejar dos borradores gemelos hoy.
     origin_prototype_id: Mapped[int | None] = mapped_column(
         ForeignKey("prototypes.id", ondelete="RESTRICT"), index=True
+    )
+    #: Se carga con la cotizacion porque el unico sitio que la lee —el armado
+    #: de la respuesta— es codigo SINCRONO: una relacion perezosa ahi no seria
+    #: una consulta de mas, seria un `MissingGreenlet` en cada lectura.
+    #: `foreign_keys` es obligatorio: hay DOS caminos entre las dos tablas
+    #: —la muestra apunta a la cotizacion que la pidio, y desde 0022 la
+    #: cotizacion apunta a la muestra de la que nacio— y sin decir cual se usa
+    #: SQLAlchemy no puede elegir.
+    origin_prototype: Mapped[Prototype | None] = relationship(
+        lazy="selectin", foreign_keys="Quotation.origin_prototype_id"
     )
 
     #: Fase 009H. Eje de cobro, independiente de `status`. Nulo significa que

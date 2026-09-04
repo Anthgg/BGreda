@@ -239,6 +239,14 @@ class PrototypeSummaryOut(BaseModel):
     material_count: int
 
 
+class PrototypeOriginQuotationOut(BaseModel):
+    """Una cotizacion nacida de esta muestra."""
+
+    id: int
+    code: str
+    status: str
+
+
 class PrototypeOut(PrototypeSummaryOut):
     notes: str | None
     #: Fase 009K.1. Nula en las muestras anteriores a 0022, y esa nulidad es la
@@ -247,6 +255,10 @@ class PrototypeOut(PrototypeSummaryOut):
     #: De que cotizaciones fue origen esta muestra, si de alguna. La activa
     #: —el borrador— es como mucho una; las demas son historia.
     origin_quotation_ids: list[int] = Field(default_factory=list)
+    #: Las mismas, con lo que hace falta para pintarlas: una pantalla que solo
+    #: recibe ids no puede escribir «CTZ-2026-000123» sin ir a buscarlas una
+    #: por una, y el estado es lo que distingue el borrador vivo del historial.
+    origin_quotations: list[PrototypeOriginQuotationOut] = Field(default_factory=list)
     #: Si la cotizacion de origen consta cobrada. Viaja para que la pantalla
     #: pueda decir POR QUE no se puede arrancar, no para decidirlo: la
     #: autoridad es el backend.

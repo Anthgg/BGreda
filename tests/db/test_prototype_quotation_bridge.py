@@ -27,7 +27,7 @@ from tests.db.test_prototypes import (
     _material,
     _muestra_lista,
 )
-from tests.db.test_quotation_builder_api import head
+from tests.db.test_quotation_builder_api import _complete_payload, head
 
 BUILDER = "/api/v1/quotation-builder"
 
@@ -777,3 +777,51 @@ async def test_la_muestra_sucesora_hereda_la_ficha_y_los_roles(
 
     lineas = await _lineas_material(db_session, fila.id)
     assert [linea.material_role for linea in lineas] == [PrototypeMaterialRole.BODY]
+
+
+@pytest.mark.asyncio
+async def test_el_origen_se_puede_leer_desde_los_dos_lados(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El vinculo existe en la base; hace falta que ADEMAS se pueda leer.
+
+    Guardar `origin_prototype_id` y no exponerlo deja el dato encerrado: la
+    pantalla del Cotizador no puede decir de que muestra viene, y la de la
+    muestra no puede llevar a la cotizacion. Se comprueban las dos direcciones
+    contra la API, que es por donde mira el navegador.
+    """
+    datos = await _aprobada(api, admin_csrf, db_session, suffix="_br_link")
+    proto_id = datos["prototipo"]["id"]
+
+    creada = await api.post(_final(proto_id), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    cotizacion = creada.json()
+
+    # Cotizador -> muestra, con codigo: la pantalla escribe «PRT-...», no un id.
+    assert cotizacion["origin_prototype_id"] == proto_id
+    assert cotizacion["origin_prototype_code"] == datos["prototipo"]["code"]
+
+    # Muestra -> cotizacion, tambien con codigo y estado.
+    detalle = await api.get(f"{PROTOTYPES}/{proto_id}", headers=head(admin_csrf))
+    assert detalle.status_code == 200, detalle.text
+    origen = detalle.json()["origin_quotations"]
+    assert [fila["id"] for fila in origen] == [cotizacion["id"]]
+    assert origen[0]["code"] == cotizacion["code"]
+    assert origen[0]["status"] == "DRAFT"
+    assert detalle.json()["origin_quotation_ids"] == [cotizacion["id"]]
+
+
+@pytest.mark.asyncio
+async def test_una_cotizacion_sin_muestra_no_se_inventa_un_origen(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Lo normal es cotizar sin muestra previa, y eso debe leerse como nulo.
+
+    Si el campo llegara con cualquier cosa distinta de `null`, la pantalla
+    pintaria una procedencia que nadie registro.
+    """
+    payload, _productos = await _complete_payload(api, admin_csrf, db_session)
+    creada = await api.post(BUILDER, json=payload, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    assert creada.json()["origin_prototype_id"] is None
+    assert creada.json()["origin_prototype_code"] is None
