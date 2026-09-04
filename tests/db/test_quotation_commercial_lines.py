@@ -52,6 +52,25 @@ async def _borrador(api: httpx.AsyncClient, csrf: str, db_session: AsyncSession)
     return dict(creada.json())
 
 
+async def _gemelos(
+    api: httpx.AsyncClient, csrf: str, db_session: AsyncSession
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Dos borradores identicos a partir de UN solo montaje.
+
+    El montaje crea cliente y productos con nombres fijos, asi que llamarlo dos
+    veces choca contra los maestros. Se arma una vez y se envia dos: ademas de
+    no chocar, garantiza que los dos borradores son de verdad gemelos y no dos
+    escenarios parecidos.
+    """
+    payload, _productos = await _complete_payload(api, csrf, db_session)
+    creados = []
+    for _ in range(2):
+        creada = await api.post(BUILDER, json=payload, headers=head(csrf))
+        assert creada.status_code == 201, creada.text
+        creados.append(dict(creada.json()))
+    return creados[0], creados[1]
+
+
 async def _prototipo_cualquiera(api: httpx.AsyncClient, csrf: str) -> int:
     """Una muestra minima: el cargo de tipo PROTOTYPE exige apuntar a una."""
     creado = await api.post(
@@ -361,8 +380,7 @@ async def test_la_orden_de_produccion_no_ve_el_cargo(
     lo que hace que la prueba siga valiendo cuando el modelo de produccion
     cambie por otros motivos.
     """
-    sin_cargo = await _borrador(api, admin_csrf, db_session)
-    con_cargo = await _borrador(api, admin_csrf, db_session)
+    sin_cargo, con_cargo = await _gemelos(api, admin_csrf, db_session)
     proto = await _prototipo_cualquiera(api, admin_csrf)
 
     anadido = await api.post(

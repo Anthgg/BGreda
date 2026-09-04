@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -31,7 +32,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from app.models.masters import Partner
-    from app.schemas.quotation_builder import QuotationBuilderOut
+    from app.schemas.quotation_builder import CommercialLineOut, QuotationBuilderOut
 
 
 def format_currency(amount: Decimal | None, symbol: str = "S/") -> str:
@@ -463,6 +464,31 @@ def build_quotation_pdf_document(
     )
 
 
+def _build_draft_commercial_lines_doc(
+    lines: Sequence[CommercialLineOut], currency_symbol: str, offset: int
+) -> list[QuotationDocCommercialLine]:
+    """Los mismos cargos, para el PDF del borrador.
+
+    El borrador se construye desde el esquema y la confirmada desde el ORM, asi
+    que hay dos constructores. Lo que NO puede haber son dos documentos: quien
+    revisa la previsualizacion tiene que ver exactamente lo que va a firmar, y
+    un cargo que aparece solo al confirmar es una sorpresa en la factura.
+    """
+    return [
+        QuotationDocCommercialLine(
+            item_number=offset + index,
+            description=line.description,
+            quantity=line.quantity,
+            quantity_formatted=format_quantity(Decimal(line.quantity)),
+            unit_price_formatted=format_currency(line.manual_net_amount, currency_symbol),
+            subtotal_formatted=format_currency(
+                line.manual_net_amount * Decimal(line.quantity), currency_symbol
+            ),
+        )
+        for index, line in enumerate(lines, start=1)
+    ]
+
+
 def build_draft_quotation_pdf_document(
     quotation_out: QuotationBuilderOut,
     customer: Partner | None = None,
@@ -606,11 +632,17 @@ def build_draft_quotation_pdf_document(
     # 7. Cuentas bancarias comerciales
     bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
 
+    # 8. Cargos comerciales (Fase 009K.1)
+    commercial_doc = _build_draft_commercial_lines_doc(
+        quotation_out.commercial_lines, currency_symbol, len(items)
+    )
+
     return QuotationPdfDocument(
         company=company_doc,
         customer=customer_doc,
         document=document_header,
         items=items,
+        commercial_lines=commercial_doc,
         totals=totals_doc,
         conditions=conditions_doc,
         bank_accounts=bank_accounts_doc,

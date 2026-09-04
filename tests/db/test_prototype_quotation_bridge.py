@@ -69,6 +69,15 @@ async def _aprobada(
     """Una muestra fabricada, completada y aprobada: la unica que autoriza cotizar."""
     datos = await _muestra_lista(api, csrf, db_session, suffix=suffix, **extra)
     proto_id = datos["prototipo"]["id"]
+    # La muestra tiene que decir DE QUE producto es. Sin ese vinculo el puente
+    # no tiene nada que precargar y devuelve un borrador vacio, que es
+    # justamente lo que comprueba `test_una_muestra_sin_producto_...`.
+    ligada = await api.put(
+        f"{PROTOTYPES}/{proto_id}",
+        json={"product_id": datos["producto"]["id"]},
+        headers=head(csrf),
+    )
+    assert ligada.status_code == 200, ligada.text
     assert (await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(csrf))).status_code == 200
     assert (
         await api.post(f"{PROTOTYPES}/{proto_id}/complete", headers=head(csrf))
@@ -305,6 +314,7 @@ async def test_las_medidas_salen_de_la_ficha_estructurada_y_no_de_las_notas(
     editada = await api.put(
         f"{PROTOTYPES}/{proto_id}",
         json={
+            "product_id": datos["producto"]["id"],
             "notes": "Especificaciones\nAncho cm: 99\nAlto cm: 99\nLargo cm: 99",
             "technical_specifications": {
                 "width_cm": "12",
@@ -591,3 +601,32 @@ async def test_arrancar_dos_veces_no_reescribe_el_consumo(
         .where(StockMovement.prototype_id == proto_id)
     )
     assert salidas == 1
+
+
+@pytest.mark.asyncio
+async def test_una_muestra_sin_producto_da_un_borrador_vacio_y_no_uno_inventado(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Una muestra puede no decir de que producto es, y entonces no hay que precargar.
+
+    El puente no elige un producto por parecido ni deja la linea a medias con
+    un hueco donde iria: devuelve el borrador sin lineas y que la persona que
+    cotiza ponga el producto. Precargar aqui seria adivinar.
+    """
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_sinprod")
+    proto_id = datos["prototipo"]["id"]
+    for accion in ("start", "complete"):
+        assert (
+            await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
+        ).status_code == 200
+    assert (
+        await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    ).status_code == 200
+
+    creada = await api.post(_final(proto_id), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    assert creada.json()["items"] == []
+
+    fila = await db_session.get(Quotation, creada.json()["id"])
+    assert fila is not None
+    assert fila.origin_prototype_id == proto_id

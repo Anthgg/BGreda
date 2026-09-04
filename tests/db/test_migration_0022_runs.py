@@ -12,14 +12,16 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from app.db.session import normalize_database_url
 
@@ -95,34 +97,82 @@ async def _current(engine: AsyncEngine) -> str | None:
         return await connection.scalar(text("SELECT version_num FROM alembic_version"))
 
 
+async def _insertar(connection: AsyncConnection, tabla: str, valores: dict[str, Any]) -> int:
+    """INSERT que completa solo las columnas obligatorias que no le importan.
+
+    Aqui no hay servicios: se prueba el ESQUEMA, y montar una fila por SQL
+    obliga a rellenar cada NOT NULL de la tabla aunque no tenga nada que ver
+    con 0022. Enumerarlas a mano ataria esta prueba al resto del modelo: cada
+    columna obligatoria que alguien anadiera en otra fase la rompería sin que
+    hubiese pasado nada con la migracion. Se consultan al catalogo y se
+    rellenan con un valor neutro; lo que la prueba afirma va en `valores`.
+    """
+    faltantes = (
+        await connection.execute(
+            text(
+                "SELECT column_name, data_type FROM information_schema.columns"
+                " WHERE table_name = :tabla AND is_nullable = 'NO'"
+                "   AND column_default IS NULL AND is_identity = 'NO'"
+            ),
+            {"tabla": tabla},
+        )
+    ).all()
+
+    fila = dict(valores)
+    for columna, tipo in faltantes:
+        if columna in fila:
+            continue
+        if tipo in ("numeric", "integer", "bigint", "smallint", "double precision", "real"):
+            fila[columna] = 0
+        elif tipo == "boolean":
+            fila[columna] = False
+        elif tipo.startswith("timestamp") or tipo == "date":
+            fila[columna] = datetime.now(UTC)
+        elif tipo == "jsonb" or tipo == "json":
+            fila[columna] = "{}"
+        else:
+            fila[columna] = f"QA-{columna}"[:32]
+
+    columnas = ", ".join(fila)
+    marcas = ", ".join(f":{nombre}" for nombre in fila)
+    # S608: los VALORES siguen viajando como parametros ligados. Lo interpolado
+    # son el nombre de tabla, que es un literal de este archivo, y los nombres de
+    # columna, que salen del catalogo de PostgreSQL. Nada de esto llega de fuera.
+    consulta = f"INSERT INTO {tabla} ({columnas}) VALUES ({marcas}) RETURNING id"  # noqa: S608
+    return int(await connection.scalar(text(consulta), fila) or 0)
+
+
 async def _prototipo(engine: AsyncEngine, code: str) -> int:
     """Una muestra minima, por SQL directo: aqui no hay servicios, hay esquema."""
     async with engine.begin() as connection:
-        return int(
-            await connection.scalar(
-                text(
-                    "INSERT INTO prototypes (code, name, quantity, status, approval, requested_at)"
-                    " VALUES (:code, :code, 1, 'CREATED', 'PENDING', now()) RETURNING id"
-                ),
-                {"code": code},
-            )
-            or 0
+        return await _insertar(
+            connection,
+            "prototypes",
+            {
+                "code": code,
+                "name": code,
+                "quantity": 1,
+                "status": "CREATED",
+                "approval": "PENDING",
+                "requested_at": datetime.now(UTC),
+            },
         )
 
 
 async def _cotizacion(engine: AsyncEngine, code: str, status: str, origen: int | None) -> int:
     async with engine.begin() as connection:
-        return int(
-            await connection.scalar(
-                text(
-                    "INSERT INTO quotations (code, name, status, workflow, quantity,"
-                    " source_fingerprint, origin_prototype_id)"
-                    " VALUES (:code, :code, :status, 'COTIZADOR', 1, :fp, :origen)"
-                    " RETURNING id"
-                ),
-                {"code": code, "status": status, "fp": code.ljust(64, "0")[:64], "origen": origen},
-            )
-            or 0
+        return await _insertar(
+            connection,
+            "quotations",
+            {
+                "code": code,
+                "name": code,
+                "status": status,
+                "workflow": "COTIZADOR",
+                "quantity": 1,
+                "source_fingerprint": code.ljust(64, "0")[:64],
+                "origin_prototype_id": origen,
+            },
         )
 
 
@@ -149,30 +199,37 @@ async def test_lo_historico_queda_en_nulo_y_no_se_inventa(migration_engine: Asyn
     _upgrade("0021")
     prototipo = await _prototipo(migration_engine, "PRT-HIST-0001")
     async with migration_engine.begin() as connection:
-        await connection.execute(
-            text(
-                "INSERT INTO quotations (code, name, status, workflow, quantity,"
-                " source_fingerprint)"
-                " VALUES ('CTZ-HIST-1', 'historica', 'CONFIRMED', 'LEGACY', 1, :fp)"
-            ),
-            {"fp": "h" * 64},
+        await _insertar(
+            connection,
+            "quotations",
+            {
+                "code": "CTZ-HIST-1",
+                "name": "historica",
+                "status": "CONFIRMED",
+                "workflow": "LEGACY",
+                "quantity": 1,
+                "source_fingerprint": "h" * 64,
+            },
         )
         # Un material historico: producto real cualquiera del catalogo de prueba.
-        producto = await connection.scalar(
-            text("INSERT INTO product_categories (name) VALUES ('QA 0022') RETURNING id")
-        )
-        material = await connection.scalar(
-            text(
-                "INSERT INTO products (internal_reference, name, product_type,"
-                " product_category_id, active) VALUES ('QA-0022-1', 'Arcilla QA',"
-                " 'RAW_MATERIAL', :cat, true) RETURNING id"
-            ),
-            {"cat": producto},
+        producto = await _insertar(connection, "product_categories", {"name": "QA 0022"})
+        material = await _insertar(
+            connection,
+            "products",
+            {
+                "internal_reference": "QA-0022-1",
+                "name": "Arcilla QA",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": producto,
+                "active": True,
+            },
         )
         await connection.execute(
             text(
                 "INSERT INTO prototype_material_lines (prototype_id, product_id, sort_order,"
-                " quantity, uom_code) VALUES (:p, :m, 0, 30, 'g')"
+                " quantity, uom_code, product_name_snapshot,"
+                " product_internal_reference_snapshot)"
+                " VALUES (:p, :m, 0, 30, 'g', 'Arcilla QA', 'QA-0022-1')"
             ),
             {"p": prototipo, "m": material},
         )
@@ -219,16 +276,17 @@ async def test_el_backend_anterior_sigue_pudiendo_operar(migration_engine: Async
     prototipo = await _prototipo(migration_engine, "PRT-0022-COMPAT")
 
     async with migration_engine.begin() as connection:
-        categoria = await connection.scalar(
-            text("INSERT INTO product_categories (name) VALUES ('QA compat') RETURNING id")
-        )
-        material = await connection.scalar(
-            text(
-                "INSERT INTO products (internal_reference, name, product_type,"
-                " product_category_id, active) VALUES ('QA-COMPAT-1', 'Arcilla compat',"
-                " 'RAW_MATERIAL', :cat, true) RETURNING id"
-            ),
-            {"cat": categoria},
+        categoria = await _insertar(connection, "product_categories", {"name": "QA compat"})
+        material = await _insertar(
+            connection,
+            "products",
+            {
+                "internal_reference": "QA-COMPAT-1",
+                "name": "Arcilla compat",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": categoria,
+                "active": True,
+            },
         )
         # El INSERT tal cual lo escribia el modelo de 009K.
         await connection.execute(
