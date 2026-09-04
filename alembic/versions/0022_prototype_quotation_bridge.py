@@ -74,9 +74,10 @@ cargo de 200 no se cobraria a 200.
 
 BACKFILL: NONE. Lo previsto historico se queda intacto en su columna de
 siempre, y `quantity_actual` en NULL: que lo previsto coincidiera con lo real
-no esta demostrado para las muestras anteriores, y afirmarlo seria inventarlo. Las cotizaciones existentes no nacieron de
-ninguna muestra, los prototipos anteriores no tienen ficha estructurada y sus
-materiales no tienen rol. NULL dice exactamente eso. Deducir el rol de las
+no esta demostrado para las muestras anteriores, y afirmarlo seria inventarlo.
+Las cotizaciones existentes no nacieron de ninguna muestra, los prototipos
+anteriores no tienen ficha estructurada y sus materiales no tienen rol. NULL
+dice exactamente eso. Deducir el rol de las
 lineas historicas por el nombre del producto —«LAB70005 parece barniz»— seria
 reescribir historia con una heuristica.
 
