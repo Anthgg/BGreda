@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
@@ -42,6 +43,8 @@ from app.models.prototypes import (
     Prototype,
     PrototypeApproval,
     PrototypeMaterialLine,
+    PrototypeMaterialRole,
+    PrototypeMaterialStage,
     PrototypeStatus,
 )
 from app.models.quotations import Quotation, QuotationItem, QuotationPaymentStatus
@@ -203,10 +206,17 @@ class PrototypeReadiness:
 
 @dataclass(frozen=True, slots=True)
 class MaterialInput:
-    """Un material elegido para la muestra, tal y como llega del cliente."""
+    """Un material elegido para la muestra, tal y como llega del cliente.
+
+    `quantity` es la PREVISTA: lo que se autoriza gastar. La real la escribe el
+    arranque a partir del movimiento de inventario, y no viaja desde el cliente
+    por el mismo motivo por el que no viaja el saldo.
+    """
 
     product_id: int
     quantity: Decimal
+    material_role: PrototypeMaterialRole | None = None
+    stage: PrototypeMaterialStage | None = None
 
 
 class PrototypeService:
@@ -313,6 +323,7 @@ class PrototypeService:
         stock_location_id: int | None,
         target_days: int | None,
         notes: str | None,
+        technical_specifications: dict[str, Any] | None,
         materials: list[MaterialInput],
         user: AuthenticatedUser,
         supersedes_prototype_id: int | None = None,
@@ -340,6 +351,7 @@ class PrototypeService:
             requested_at=datetime.now(UTC),
             target_days=target_days,
             notes=notes,
+            technical_specifications=technical_specifications,
             supersedes_prototype_id=supersedes_prototype_id,
             created_by=user.id,
             created_by_name=user.display_name,
@@ -386,6 +398,7 @@ class PrototypeService:
         stock_location_id: int | None,
         target_days: int | None,
         notes: str | None,
+        technical_specifications: dict[str, Any] | None,
         user: AuthenticatedUser,
     ) -> Prototype:
         """Edita la muestra mientras todavia no ha gastado nada."""
@@ -410,6 +423,10 @@ class PrototypeService:
             ("stock_location_id", stock_location_id),
             ("target_days", target_days),
             ("notes", notes),
+            # La ficha se reemplaza ENTERA, como los materiales: es un
+            # formulario, no un parche. Mandar solo el ancho y que el sistema
+            # conservara un alto viejo daria una ficha que nadie escribio.
+            ("technical_specifications", technical_specifications),
         ):
             if valor is None:
                 continue
@@ -457,7 +474,9 @@ class PrototypeService:
                 PrototypeMaterialLine(
                     product_id=product.id,
                     sort_order=orden,
-                    quantity=entrada.quantity,
+                    quantity_planned=entrada.quantity,
+                    material_role=entrada.material_role,
+                    stage=entrada.stage,
                     uom_code=product.base_uom_code,
                     product_name_snapshot=product.name,
                     product_internal_reference_snapshot=product.internal_reference,
@@ -482,12 +501,12 @@ class PrototypeService:
             raise PrototypeNotEditableError()
 
         antes = [
-            f"{linea.product_internal_reference_snapshot}:{linea.quantity}"
+            f"{linea.product_internal_reference_snapshot}:{linea.quantity_planned}"
             for linea in prototype.lines
         ]
         await self._replace_materials(prototype, materials)
         despues = [
-            f"{linea.product_internal_reference_snapshot}:{linea.quantity}"
+            f"{linea.product_internal_reference_snapshot}:{linea.quantity_planned}"
             for linea in prototype.lines
         ]
 
@@ -559,17 +578,17 @@ class PrototypeService:
                         PrototypeReadinessCode.STOCK_MISSING,
                         product_id=linea.product_id,
                         product_name=linea.product_name_snapshot,
-                        required_quantity=linea.quantity,
+                        required_quantity=linea.quantity_planned,
                         uom=linea.uom_code,
                     )
                 )
-            elif balance.quantity < linea.quantity:
+            elif balance.quantity < linea.quantity_planned:
                 issues.append(
                     PrototypeIssue(
                         PrototypeReadinessCode.INSUFFICIENT_STOCK,
                         product_id=linea.product_id,
                         product_name=linea.product_name_snapshot,
-                        required_quantity=linea.quantity,
+                        required_quantity=linea.quantity_planned,
                         available_quantity=balance.quantity,
                         uom=linea.uom_code,
                     )
@@ -618,14 +637,21 @@ class PrototypeService:
             await self._inventory.apply_movement(
                 product=product,
                 location=location,
-                quantity=-linea.quantity,
+                quantity=-linea.quantity_planned,
                 movement_type=MovementType.PROTOTYPE_OUT,
                 reason=f"Prototipo {prototype.code}",
                 user_id=user.id,
                 user_name=user.display_name,
                 prototype_id=prototype.id,
             )
-            consumido.append(f"{linea.product_internal_reference_snapshot}:{linea.quantity}")
+            # Lo REAL se escribe aqui, dentro de la transaccion que lo
+            # descuenta. Si algo falla despues, la transaccion se deshace
+            # entera y la columna se queda nula: no puede haber consumo
+            # registrado sin movimiento que lo respalde.
+            linea.quantity_actual = linea.quantity_planned
+            consumido.append(
+                f"{linea.product_internal_reference_snapshot}:{linea.quantity_planned}"
+            )
 
         momento = datetime.now(UTC)
         prototype.status = PrototypeStatus.STARTED
@@ -789,8 +815,18 @@ class PrototypeService:
                 stock_location_id=anterior.stock_location_id,
                 target_days=anterior.target_days,
                 notes=notes,
+                # La ficha viaja con la sucesora igual que el producto y los
+                # materiales: repetir la muestra es volver a hacer la MISMA
+                # pieza, no empezar de cero. Las notas si son nuevas, porque
+                # explican por que se repite.
+                technical_specifications=anterior.technical_specifications,
                 materials=[
-                    MaterialInput(product_id=linea.product_id, quantity=linea.quantity)
+                    MaterialInput(
+                        product_id=linea.product_id,
+                        quantity=linea.quantity_planned,
+                        material_role=linea.material_role,
+                        stage=linea.stage,
+                    )
                     for linea in anterior.lines
                 ],
                 user=user,
@@ -882,6 +918,7 @@ class PrototypeService:
         from app.schemas.prototypes import (
             PrototypeIssueOut,
             PrototypeMaterialOut,
+            PrototypeOriginQuotationOut,
             PrototypeOut,
             PrototypeReadinessOut,
         )
@@ -892,6 +929,16 @@ class PrototypeService:
             else None
         )
         readiness = await self.evaluate_readiness(prototype)
+        # Las cotizaciones que NACIERON de esta muestra. Se consultan aqui y no
+        # por relacion: son pocas, se leen una sola vez, y una coleccion cargada
+        # en cada listado costaria una consulta por fila.
+        originadas = (
+            await self._session.execute(
+                select(Quotation.id, Quotation.code, Quotation.status)
+                .where(Quotation.origin_prototype_id == prototype.id)
+                .order_by(Quotation.id)
+            )
+        ).all()
 
         return PrototypeOut(
             id=prototype.id,
@@ -918,6 +965,11 @@ class PrototypeService:
                 if quotation is not None and quotation.payment_status is not None
                 else None
             ),
+            origin_quotation_ids=[fila.id for fila in originadas],
+            origin_quotations=[
+                PrototypeOriginQuotationOut(id=fila.id, code=fila.code, status=fila.status.value)
+                for fila in originadas
+            ],
             materials=[
                 PrototypeMaterialOut(
                     id=linea.id,
@@ -925,8 +977,12 @@ class PrototypeService:
                     sort_order=linea.sort_order,
                     product_name=linea.product_name_snapshot,
                     product_internal_reference=linea.product_internal_reference_snapshot,
-                    quantity=linea.quantity,
+                    quantity=linea.quantity_planned,
+                    quantity_planned=linea.quantity_planned,
+                    quantity_actual=linea.quantity_actual,
                     uom_code=linea.uom_code,
+                    material_role=linea.material_role,
+                    stage=linea.stage,
                 )
                 for linea in prototype.lines
             ],

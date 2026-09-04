@@ -12,11 +12,75 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.prototypes import PrototypeApproval, PrototypeStatus
+from app.models.prototypes import (
+    PrototypeApproval,
+    PrototypeMaterialRole,
+    PrototypeMaterialStage,
+    PrototypeStatus,
+)
 from app.services.prototypes import PrototypeReadinessCode
+
+
+class PrototypeEvaluationCriterionIn(BaseModel):
+    """Un criterio evaluado de la muestra.
+
+    Es una LISTA porque en el cuaderno del taller lo es: la misma muestra se
+    juzga por medidas, por acabado, por forma y por color, cada uno con su
+    resultado. Aplanarlo a un solo criterio obligaria a elegir cual de los
+    cuatro se guarda.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    criterion: str = Field(min_length=1, max_length=120)
+    #: Vocabulario del cuaderno: Pendiente / Conforme / No conforme /
+    #: Requiere ajuste. No se valida contra un enum todavia porque el taller
+    #: sigue anadiendo criterios y cerrarlo hoy seria adelantarse.
+    result: str | None = Field(default=None, max_length=60)
+    note: str | None = Field(default=None, max_length=2000)
+    responsible: str | None = Field(default=None, max_length=120)
+    requires_adjustment: bool | None = None
+    new_sample: bool | None = None
+
+
+class PrototypeTechnicalSpecificationsIn(BaseModel):
+    """La ficha del taller, estructurada.
+
+    Los nombres y las unidades salen del cuaderno real
+    (`Control_Prototipos_Taller_Greda.xlsx`, hoja «Especificaciones»), no de lo
+    que pareciera razonable: ahi el peso es «Peso estimado g» y las medidas son
+    centimetros, asi que la unidad va en el nombre del campo y no hay un campo
+    de unidad que alguien pueda contradecir.
+
+    Todo es opcional. Una muestra se registra justamente para averiguar lo que
+    todavia no se sabe, y exigir el color de algo que aun no se ha esmaltado
+    dejaria sin registrar la muestra.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    responsible: str | None = Field(default=None, max_length=120)
+    priority: str | None = Field(default=None, max_length=40)
+
+    width_cm: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=6)
+    height_cm: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=6)
+    length_cm: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=6)
+    depth_cm: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=6)
+    estimated_weight_g: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=6)
+
+    technique: str | None = Field(default=None, max_length=120)
+    finish: str | None = Field(default=None, max_length=120)
+    mold: str | None = Field(default=None, max_length=120)
+    color: str | None = Field(default=None, max_length=120)
+    reference: str | None = Field(default=None, max_length=120)
+    technical_notes: str | None = Field(default=None, max_length=2000)
+
+    requires_new_sample: bool | None = None
+    evaluation: list[PrototypeEvaluationCriterionIn] = Field(default_factory=list, max_length=50)
 
 
 class PrototypeMaterialIn(BaseModel):
@@ -28,6 +92,12 @@ class PrototypeMaterialIn(BaseModel):
     #: En la unidad base del material. La conversion no se inventa aqui: si el
     #: producto se lleva en gramos, la cantidad son gramos.
     quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    #: Fase 009K.1. Cuerpo, acabado u otro. `None` en lo que no lo declara, y
+    #: ese hueco es el que impide precargar el material base sin adivinar.
+    material_role: PrototypeMaterialRole | None = None
+    #: En que etapa del trabajo se gasta. Independiente del rol: no se deduce
+    #: uno del otro aunque en muchos casos coincidan.
+    stage: PrototypeMaterialStage | None = None
 
 
 class PrototypeCreateIn(BaseModel):
@@ -47,6 +117,9 @@ class PrototypeCreateIn(BaseModel):
     stock_location_id: int | None = Field(default=None, gt=0)
     target_days: int | None = Field(default=None, gt=0)
     notes: str | None = None
+    #: Fase 009K.1. La ficha del taller, estructurada. `notes` vuelve a ser
+    #: solo observaciones humanas: el puente al Cotizador lee de aqui.
+    technical_specifications: PrototypeTechnicalSpecificationsIn | None = None
     materials: list[PrototypeMaterialIn] = Field(default_factory=list, max_length=100)
 
 
@@ -62,6 +135,9 @@ class PrototypeUpdateIn(BaseModel):
     stock_location_id: int | None = Field(default=None, gt=0)
     target_days: int | None = Field(default=None, gt=0)
     notes: str | None = None
+    #: Fase 009K.1. La ficha del taller, estructurada. `notes` vuelve a ser
+    #: solo observaciones humanas: el puente al Cotizador lee de aqui.
+    technical_specifications: PrototypeTechnicalSpecificationsIn | None = None
 
 
 class PrototypeMaterialsIn(BaseModel):
@@ -99,8 +175,31 @@ class PrototypeMaterialOut(BaseModel):
     sort_order: int
     product_name: str
     product_internal_reference: str
+    #: Lo autorizado a gastar.
+    #:
+    #: Se sigue llamando `quantity` en el contrato publico A PROPOSITO. El
+    #: frontend que hay desplegado lee ese nombre, y sigue vivo durante todo el
+    #: despliegue de esta fase: base primero, backend despues, navegador al
+    #: final. Romper el nombre para mejorarlo dejaria la pantalla en blanco
+    #: durante esa ventana. `quantity_planned` viaja al lado, con el mismo
+    #: valor, para que el cliente nuevo pueda usar el nombre que no miente.
     quantity: Decimal
+    quantity_planned: Decimal
+    #: Lo que de verdad salio del almacen. Nulo mientras no se ha arrancado, y
+    #: nulo para siempre en lo anterior a 0022. Es la cifra de la que se deriva
+    #: el material base de la cotizacion final: lo previsto no sirve, porque no
+    #: es lo que la muestra aprobada consumio.
+    #:
+    #: **Solo lectura para el cliente.** La escribe el arranque a partir del
+    #: movimiento de inventario; aceptarla desde fuera seria dejar que alguien
+    #: declarara un consumo que el almacen no respalda.
+    quantity_actual: Decimal | None = None
     uom_code: str
+    #: Nulo en las lineas anteriores a 0022. Sin rol no se precarga material
+    #: base: se le pide a una persona que lo declare.
+    material_role: PrototypeMaterialRole | None = None
+    #: En que etapa del trabajo se gasta. Eje distinto del rol.
+    stage: PrototypeMaterialStage | None = None
 
 
 class PrototypeIssueOut(BaseModel):
@@ -140,8 +239,26 @@ class PrototypeSummaryOut(BaseModel):
     material_count: int
 
 
+class PrototypeOriginQuotationOut(BaseModel):
+    """Una cotizacion nacida de esta muestra."""
+
+    id: int
+    code: str
+    status: str
+
+
 class PrototypeOut(PrototypeSummaryOut):
     notes: str | None
+    #: Fase 009K.1. Nula en las muestras anteriores a 0022, y esa nulidad es la
+    #: que impide precargar sus medidas: no se parsea `notes` para fingirla.
+    technical_specifications: dict[str, Any] | None = None
+    #: De que cotizaciones fue origen esta muestra, si de alguna. La activa
+    #: —el borrador— es como mucho una; las demas son historia.
+    origin_quotation_ids: list[int] = Field(default_factory=list)
+    #: Las mismas, con lo que hace falta para pintarlas: una pantalla que solo
+    #: recibe ids no puede escribir «CTZ-2026-000123» sin ir a buscarlas una
+    #: por una, y el estado es lo que distingue el borrador vivo del historial.
+    origin_quotations: list[PrototypeOriginQuotationOut] = Field(default_factory=list)
     #: Si la cotizacion de origen consta cobrada. Viaja para que la pantalla
     #: pueda decir POR QUE no se puede arrancar, no para decidirlo: la
     #: autoridad es el backend.

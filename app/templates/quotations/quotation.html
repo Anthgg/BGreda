@@ -234,6 +234,21 @@
       <td class="col-subtotal">{{ item.subtotal_formatted }}</td>
     </tr>
     {% endfor %}
+    {# Cargos comerciales: se cobran y no se fabrican, asi que no llevan
+       material, gramaje, dimensiones ni unidad. Inventarselos les daria
+       apariencia de producto. #}
+    {% for line in doc.commercial_lines %}
+    <tr>
+      <td class="col-num">{{ line.item_number }}</td>
+      <td class="col-desc">
+        <div class="doc-cell-title">{{ line.description }}</div>
+      </td>
+      <td class="col-qty">{{ line.quantity_formatted }}</td>
+      <td class="col-uom">&mdash;</td>
+      <td class="col-price">{{ line.unit_price_formatted }}</td>
+      <td class="col-subtotal">{{ line.subtotal_formatted }}</td>
+    </tr>
+    {% endfor %}
   </tbody>
 </table>
 

@@ -12,14 +12,15 @@ dejan los saldos exactamente como estaban.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    PrototypeQuotationBridgeDep,
     PrototypeServiceDep,
     WorkshopUserDep,
 )
@@ -33,6 +34,7 @@ from app.schemas.prototypes import (
     PrototypeSuccessorIn,
     PrototypeUpdateIn,
 )
+from app.schemas.quotation_builder import QuotationBuilderOut
 from app.services.prototypes import MaterialInput
 
 router = APIRouter(prefix="/prototypes", tags=["prototipos"])
@@ -69,6 +71,19 @@ async def list_prototypes(
     )
 
 
+def _ficha(payload: PrototypeCreateIn | PrototypeUpdateIn) -> dict[str, Any] | None:
+    """La ficha tecnica, lista para JSONB.
+
+    Se serializa en modo JSON porque los `Decimal` de las medidas no caben tal
+    cual en la columna, y se descartan los campos vacios: guardar una ficha
+    llena de `null` haria imposible distinguir «no lo declaro» de «lo declaro
+    vacio», que es justamente la distincion de la que depende el puente.
+    """
+    if payload.technical_specifications is None:
+        return None
+    return payload.technical_specifications.model_dump(mode="json", exclude_none=True)
+
+
 @router.post("", response_model=PrototypeOut, status_code=status.HTTP_201_CREATED)
 async def create_prototype(
     payload: PrototypeCreateIn,
@@ -90,8 +105,14 @@ async def create_prototype(
         stock_location_id=payload.stock_location_id,
         target_days=payload.target_days,
         notes=payload.notes,
+        technical_specifications=_ficha(payload),
         materials=[
-            MaterialInput(product_id=item.product_id, quantity=item.quantity)
+            MaterialInput(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                material_role=item.material_role,
+                stage=item.stage,
+            )
             for item in payload.materials
         ],
         user=actor,
@@ -128,6 +149,7 @@ async def update_prototype(
         stock_location_id=payload.stock_location_id,
         target_days=payload.target_days,
         notes=payload.notes,
+        technical_specifications=_ficha(payload),
         user=actor,
     )
     result = await service.present(prototype)
@@ -152,7 +174,12 @@ async def set_prototype_materials(
     prototype = await service.set_materials(
         prototype_id,
         [
-            MaterialInput(product_id=item.product_id, quantity=item.quantity)
+            MaterialInput(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                material_role=item.material_role,
+                stage=item.stage,
+            )
             for item in payload.materials
         ],
         user=actor,
@@ -278,3 +305,35 @@ async def create_prototype_successor(
     result = await service.present(prototype)
     await session.commit()
     return result
+
+
+@router.post(
+    "/{prototype_id}/final-quotation",
+    response_model=QuotationBuilderOut,
+    responses={
+        201: {"description": "Se creo la cotizacion final."},
+        200: {"description": "Ya existia un borrador de esta muestra; se devuelve ese."},
+        409: {"description": "La muestra no esta aprobada o fue sustituida."},
+    },
+)
+async def create_final_quotation(
+    prototype_id: int,
+    bridge: PrototypeQuotationBridgeDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> QuotationBuilderOut:
+    """Crea la cotizacion final a partir de una muestra aprobada.
+
+    Devuelve 201 cuando la crea y **200 cuando ya existia**, en vez de un
+    conflicto: pulsar dos veces o reintentar por un timeout no es un error del
+    usuario, y la respuesta util en ese caso es la misma cotizacion, no una
+    negativa.
+
+    Es administrativa. La matriz de 009J deja al taller ejecutar la muestra,
+    pero cotizar es decidir un precio.
+    """
+    quotation, created = await bridge.create_final_quotation(prototype_id, user=admin)
+    await session.commit()
+    response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    return quotation

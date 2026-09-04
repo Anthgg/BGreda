@@ -13,6 +13,7 @@ from app.api.deps import (
 from app.schemas.quotation_builder import (
     BodyMaterialOptionOut,
     BodyMaterialOptionPage,
+    CommercialLineIn,
     QuotationBuilderConfirmIn,
     QuotationBuilderCreateIn,
     QuotationBuilderDraftIn,
@@ -208,5 +209,62 @@ async def duplicate_quotation_builder(
     session: DbSessionDep,
 ) -> QuotationBuilderOut:
     result = await service.duplicate(quotation_id, user=admin)
+    await session.commit()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Cargos comerciales (Fase 009K.1)
+#
+# Subrecurso de la cotizacion, no modulo aparte: viven y mueren con ella y solo
+# se pueden tocar mientras es borrador. La lista viaja dentro de la cotizacion,
+# asi que aqui solo hacen falta las tres mutaciones.
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{quotation_id}/commercial-lines",
+    response_model=QuotationBuilderOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_commercial_line(
+    quotation_id: int,
+    payload: CommercialLineIn,
+    service: QuotationBuilderServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> QuotationBuilderOut:
+    """Anade un cargo comercial al borrador.
+
+    Devuelve la cotizacion entera y no solo el cargo: anadirlo mueve el
+    subtotal, el IGV y el total, y quien lo anade necesita ver esos numeros sin
+    tener que pedirlos otra vez.
+    """
+    result = await service.add_commercial_line(quotation_id, payload, user=admin)
+    await session.commit()
+    return result
+
+
+@router.put("/{quotation_id}/commercial-lines/{line_id}", response_model=QuotationBuilderOut)
+async def update_commercial_line(
+    quotation_id: int,
+    line_id: int,
+    payload: CommercialLineIn,
+    service: QuotationBuilderServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> QuotationBuilderOut:
+    result = await service.update_commercial_line(quotation_id, line_id, payload, user=admin)
+    await session.commit()
+    return result
+
+
+@router.delete("/{quotation_id}/commercial-lines/{line_id}", response_model=QuotationBuilderOut)
+async def delete_commercial_line(
+    quotation_id: int,
+    line_id: int,
+    service: QuotationBuilderServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> QuotationBuilderOut:
+    result = await service.delete_commercial_line(quotation_id, line_id, user=admin)
     await session.commit()
     return result

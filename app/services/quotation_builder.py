@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -19,17 +20,22 @@ from app.core.errors import APIError
 from app.core.precision import QUANTITY_SCALE
 from app.core.pricing import (
     BASE_CURRENCY,
+    CommercialLinePricingInput,
     LinePricingInput,
     allocate_fixed_costs,
+    price_commercial_line,
     price_line,
 )
 from app.models.audit import AuditAction
 from app.models.firings import FiringType
 from app.models.masters import Partner, Product
+from app.models.prototypes import Prototype
 from app.models.quotations import (
+    CommercialLineKind,
     OtherCost,
     OtherCostCalculationType,
     Quotation,
+    QuotationCommercialLine,
     QuotationItem,
     QuotationPaymentStatus,
     QuotationStatus,
@@ -43,6 +49,8 @@ from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
 from app.schemas.quotation_builder import (
     BodyMaterialIn,
     BodyMaterialOut,
+    CommercialLineIn,
+    CommercialLineOut,
     GlazePlanOut,
     GlazeSelectionItemIn,
     ProductDimensionCompletionIn,
@@ -80,6 +88,9 @@ logger = logging.getLogger(__name__)
 
 ZERO = Decimal(0)
 BUILDER_ENTITY = "quotation_builder"
+#: Entidad de auditoria de los cargos comerciales. Aparte de la cotizacion
+#: para que el historial diga QUE se toco, no solo que algo cambio.
+COMMERCIAL_LINE_ENTITY = "quotation_commercial_line"
 PRODUCTION_DIMENSIONS = ("length", "width", "height")
 ALL_DIMENSIONS = ("width", "height", "length", "depth")
 HIDDEN_WARNING_CODES = {"DISCOUNT_RULE_BLOCKED_BY_SOURCE"}
@@ -208,6 +219,24 @@ class QuotationBuilderNotEditableError(APIError):
     status_code = 409
     code = "QUOTATION_BUILDER_NOT_EDITABLE"
     message = "Solo un borrador del Cotizador se puede editar"
+
+
+class QuotationCommercialLineNotFoundError(APIError):
+    status_code = 404
+    code = "QUOTATION_COMMERCIAL_LINE_NOT_FOUND"
+    message = "El cargo comercial no existe en esta cotizacion"
+
+
+class QuotationCommercialLinePrototypeInvalidError(APIError):
+    """El cargo dice venir de una muestra que no existe.
+
+    Se comprueba aqui y no solo con la clave foranea porque un error de
+    integridad llega como 500 y no explica nada; esto explica que falta.
+    """
+
+    status_code = 422
+    code = "QUOTATION_COMMERCIAL_LINE_PROTOTYPE_INVALID"
+    message = "La muestra indicada en el cargo no existe"
 
 
 class QuotationBuilderNotPayableError(APIError):
@@ -605,6 +634,65 @@ def _glaze_plan_snapshot(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _CommercialLinesTotals:
+    """Lo que los cargos comerciales aportan al documento."""
+
+    net: Decimal
+    tax: Decimal
+    gross: Decimal
+    lines: list[CommercialLineOut]
+
+
+def price_commercial_lines(
+    rows: Sequence[QuotationCommercialLine],
+    *,
+    tax_percent: Decimal,
+    rounding_step: Decimal,
+    currency: str,
+    exchange_rate: Decimal | None,
+) -> _CommercialLinesTotals:
+    """Valora los cargos de una cotizacion. UNICA composicion de su total.
+
+    Existe una sola porque hay DOS caminos de salida —el calculado desde el
+    payload y el releido desde la fila— y sumar los cargos por separado en cada
+    uno es exactamente como se cobra un concepto dos veces. Los dos llaman
+    aqui, y aqui se llama una vez a `price_commercial_line`, que es quien sabe
+    de impuesto y redondeo.
+    """
+    lineas: list[CommercialLineOut] = []
+    neto = tax = bruto = ZERO
+    for row in rows:
+        valorada = price_commercial_line(
+            CommercialLinePricingInput(
+                quantity=row.quantity,
+                manual_net_amount=row.manual_net_amount,
+                tax_percent=tax_percent,
+                rounding_step=rounding_step,
+                currency=currency,
+                exchange_rate=exchange_rate,
+            )
+        )
+        neto += valorada.line_total_net
+        tax += valorada.line_total_tax
+        bruto += valorada.line_total_gross
+        lineas.append(
+            CommercialLineOut(
+                id=row.id,
+                kind=row.kind.value,
+                description=row.description,
+                prototype_id=row.prototype_id,
+                quantity=row.quantity,
+                manual_net_amount=row.manual_net_amount,
+                sort_order=row.sort_order,
+                line_total_net=valorada.line_total_net,
+                line_total_tax=valorada.line_total_tax,
+                line_total_gross=valorada.line_total_gross,
+            )
+        )
+    return _CommercialLinesTotals(net=neto, tax=tax, gross=bruto, lines=lineas)
+
+
 class QuotationBuilderService:
     def __init__(
         self,
@@ -629,6 +717,24 @@ class QuotationBuilderService:
         # sitio es el backend. El navegador manda que material y cuanto; todo
         # lo demas —unidad, costo unitario, requerimiento— sale de aqui.
         self._body_materials = BodyMaterialResolver(session)
+
+    def _commercial_totals(
+        self, row: Quotation, preview: QuotationBuilderOut
+    ) -> _CommercialLinesTotals:
+        """Valora los cargos de esta cotizacion con su misma politica monetaria.
+
+        La tasa es la del ENCABEZADO, no la de un producto: un cargo no tiene
+        producto del que heredarla. El paso de redondeo y la moneda salen del
+        mismo calculo que acaba de valorar las lineas, para que el documento
+        siga sumando.
+        """
+        return price_commercial_lines(
+            row.commercial_lines,
+            tax_percent=preview.tax_percentage_snapshot,
+            rounding_step=preview.rounding_step,
+            currency=preview.currency_code_snapshot,
+            exchange_rate=preview.exchange_rate_snapshot,
+        )
 
     async def list_body_materials(
         self, *, search: str | None = None, limit: int = 50, offset: int = 0
@@ -1709,8 +1815,12 @@ class QuotationBuilderService:
             (item.effective_profit_total for item in preview.items), ZERO
         )
         row.effective_markup_percent = ZERO
-        row.commercial_subtotal = preview.commercial_subtotal
-        row.commercial_total = preview.total_with_tax
+        # Los cargos comerciales entran al total AQUI y solo aqui. `preview`
+        # trae los productos; los cargos viven en la fila y no en el payload,
+        # porque se administran por su propio subrecurso.
+        cargos = self._commercial_totals(row, preview)
+        row.commercial_subtotal = preview.commercial_subtotal + cargos.net
+        row.commercial_total = preview.total_with_tax + cargos.gross
         row.commercial_unit_price_with_tax = ZERO
         row.currency_code_snapshot = preview.currency_code_snapshot
         row.currency_symbol_snapshot = preview.currency_symbol_snapshot
@@ -1718,8 +1828,8 @@ class QuotationBuilderService:
         row.exchange_rate_source_snapshot = preview.exchange_rate_source_snapshot
         row.tax_percentage_snapshot = preview.tax_percentage_snapshot
         row.tax_rate_source_snapshot = preview.tax_rate_source_snapshot
-        row.tax_amount = preview.tax_amount
-        row.total_with_tax = preview.total_with_tax
+        row.tax_amount = preview.tax_amount + cargos.tax
+        row.total_with_tax = preview.total_with_tax + cargos.gross
         row.unit_price_with_tax = ZERO
         row.source_fingerprint = preview.source_fingerprint
         row.calculation_warnings = preview.warnings
@@ -1848,6 +1958,11 @@ class QuotationBuilderService:
             source_fingerprint=preview.source_fingerprint,
             created_by_id=user.id,
             items=[],
+            # Inicializada, y no cargada despues: una coleccion sin cargar en
+            # una fila recien creada dispara un lazy load, y `_apply` la lee
+            # desde codigo sincrono. Es el mismo motivo por el que `items`
+            # tambien se construye vacia aqui.
+            commercial_lines=[],
         )
         self._session.add(row)
         await self._session.flush()
@@ -1992,6 +2107,103 @@ class QuotationBuilderService:
             metadata={"code": row.code, "status": row.status.value},
         )
         return await self.get(row.id)
+
+    # ------------------------------------------------------------------
+    # Cargos comerciales (Fase 009K.1)
+    #
+    # Son un subrecurso de la cotizacion, no un modulo aparte: viven y mueren
+    # con ella, y solo tienen sentido dentro de un borrador. Cada mutacion
+    # recalcula la cotizacion entera en vez de ajustar los totales a mano —un
+    # segundo sitio que suma acabaria dando otro numero que el primero—.
+    # ------------------------------------------------------------------
+    async def add_commercial_line(
+        self, quotation_id: int, payload: CommercialLineIn, *, user: AuthenticatedUser
+    ) -> QuotationBuilderOut:
+        row = await self._get(quotation_id, for_update=True)
+        self._ensure_draft(row)
+        await self._validate_commercial_line(payload)
+
+        row.commercial_lines.append(
+            QuotationCommercialLine(
+                kind=CommercialLineKind(payload.kind),
+                description=payload.description,
+                prototype_id=payload.prototype_id,
+                quantity=payload.quantity,
+                manual_net_amount=payload.manual_net_amount,
+                sort_order=payload.sort_order,
+            )
+        )
+        await self._session.flush()
+        await self._recalculate(row)
+        self._audit_commercial_line(row, AuditAction.CREATE, payload.description, user)
+        return await self.get(row.id)
+
+    async def update_commercial_line(
+        self, quotation_id: int, line_id: int, payload: CommercialLineIn, *, user: AuthenticatedUser
+    ) -> QuotationBuilderOut:
+        row = await self._get(quotation_id, for_update=True)
+        self._ensure_draft(row)
+        await self._validate_commercial_line(payload)
+
+        linea = next((item for item in row.commercial_lines if item.id == line_id), None)
+        if linea is None:
+            raise QuotationCommercialLineNotFoundError()
+        linea.kind = CommercialLineKind(payload.kind)
+        linea.description = payload.description
+        linea.prototype_id = payload.prototype_id
+        linea.quantity = payload.quantity
+        linea.manual_net_amount = payload.manual_net_amount
+        linea.sort_order = payload.sort_order
+        await self._session.flush()
+        await self._recalculate(row)
+        self._audit_commercial_line(row, AuditAction.UPDATE, payload.description, user)
+        return await self.get(row.id)
+
+    async def delete_commercial_line(
+        self, quotation_id: int, line_id: int, *, user: AuthenticatedUser
+    ) -> QuotationBuilderOut:
+        row = await self._get(quotation_id, for_update=True)
+        self._ensure_draft(row)
+        linea = next((item for item in row.commercial_lines if item.id == line_id), None)
+        if linea is None:
+            raise QuotationCommercialLineNotFoundError()
+        descripcion = linea.description
+        row.commercial_lines.remove(linea)
+        await self._session.flush()
+        await self._recalculate(row)
+        self._audit_commercial_line(row, AuditAction.DELETE, descripcion, user)
+        return await self.get(row.id)
+
+    async def _validate_commercial_line(self, payload: CommercialLineIn) -> None:
+        """Un cargo de prototipo tiene que apuntar a una muestra que exista."""
+        if payload.prototype_id is None:
+            return
+        existe = await self._session.get(Prototype, payload.prototype_id)
+        if existe is None:
+            raise QuotationCommercialLinePrototypeInvalidError()
+
+    async def _recalculate(self, row: Quotation) -> None:
+        """Vuelve a calcular la cotizacion entera tras tocar un cargo.
+
+        Se rehace el mismo camino que usa guardar —reconstruir la entrada desde
+        lo almacenado y volver a aplicar— en vez de sumar el cargo a los
+        totales existentes. Ajustarlos a mano crearia una segunda aritmetica
+        que, en cuanto la primera cambiara, empezaria a dar otro numero.
+        """
+        preview = await self.preview(self._to_input(row))
+        await self._apply(row, preview)
+
+    def _audit_commercial_line(
+        self, row: Quotation, action: AuditAction, description: str, user: AuthenticatedUser
+    ) -> None:
+        self._audit.record_action(
+            entity_type=COMMERCIAL_LINE_ENTITY,
+            entity_id=str(row.id),
+            action=action,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={"code": row.code, "description": description},
+        )
 
     @staticmethod
     def _technique_input(value: dict[str, Any]) -> TechniqueSelectionIn:
@@ -2184,6 +2396,25 @@ class QuotationBuilderService:
         )
 
     def _stored_output(self, row: Quotation) -> QuotationBuilderOut:
+        # Se valoran con la politica CONGELADA de la fila: una cotizacion ya
+        # guardada no puede cambiar de importe porque alguien edite el IGV o el
+        # paso de redondeo despues.
+        cargos = price_commercial_lines(
+            row.commercial_lines,
+            tax_percent=row.tax_percentage_snapshot,
+            rounding_step=next(
+                (
+                    _snapshot_decimal(
+                        item.production_snapshot.get("commercial_plan", {}).get("rounding_step")
+                    )
+                    for item in row.items
+                    if item.production_snapshot.get("commercial_plan")
+                ),
+                ZERO,
+            ),
+            currency=row.currency_code_snapshot,
+            exchange_rate=row.exchange_rate_snapshot,
+        )
         item_outputs = [
             QuotationBuilderItemOut(
                 id=item.id,
@@ -2326,6 +2557,10 @@ class QuotationBuilderService:
             code=row.code,
             workflow=row.workflow,
             status=row.status,
+            origin_prototype_id=row.origin_prototype_id,
+            origin_prototype_code=(
+                row.origin_prototype.code if row.origin_prototype is not None else None
+            ),
             name=row.name,
             customer_id=row.customer_id,
             customer_name_snapshot=row.customer_name_snapshot,
@@ -2337,9 +2572,17 @@ class QuotationBuilderService:
             items=item_outputs,
             item_count=len(item_outputs),
             commercial_subtotal=row.commercial_subtotal,
-            quotation_net_total=sum((item.line_total_net for item in item_outputs), ZERO),
-            quotation_tax_total=sum((item.line_total_tax for item in item_outputs), ZERO),
-            quotation_gross_total=sum((item.line_total_gross for item in item_outputs), ZERO),
+            commercial_lines=cargos.lines,
+            # Los totales de cabecera ya vienen sumados en la fila: `_apply`
+            # los guardo con los cargos dentro. Aqui solo se reconstruyen los
+            # desgloses, y por eso se vuelven a sumar los cargos a las lineas
+            # de producto —no a `row.*`, que los cobraria dos veces—.
+            quotation_net_total=sum((item.line_total_net for item in item_outputs), ZERO)
+            + cargos.net,
+            quotation_tax_total=sum((item.line_total_tax for item in item_outputs), ZERO)
+            + cargos.tax,
+            quotation_gross_total=sum((item.line_total_gross for item in item_outputs), ZERO)
+            + cargos.gross,
             production_factor=next(
                 (item.production_factor for item in item_outputs if item.production_factor),
                 ZERO,

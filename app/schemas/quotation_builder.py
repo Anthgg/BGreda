@@ -120,6 +120,49 @@ class BodyMaterialOptionPage(BaseModel):
     total: int = 0
 
 
+class CommercialLineIn(_Strict):
+    """Un cargo comercial de la cotizacion, tal como lo teclea una persona.
+
+    El importe es NETO y ya en la moneda de emision, igual que el precio manual
+    de una linea de producto: quien escribe 200 cotizando en dolares quiere
+    cobrar doscientos dolares. El impuesto, el redondeo y los totales los pone
+    el backend.
+    """
+
+    kind: Literal["PROTOTYPE"] = "PROTOTYPE"
+    description: Annotated[str, Field(min_length=1, max_length=200)]
+    prototype_id: PositiveInt | None = None
+    quantity: PositiveInt = 1
+    manual_net_amount: Annotated[
+        Decimal, Field(gt=0, le=100_000_000, max_digits=36, decimal_places=18)
+    ]
+    sort_order: SortOrder = 0
+
+    @model_validator(mode="after")
+    def prototype_kind_needs_prototype(self) -> CommercialLineIn:
+        """Un cargo de prototipo sin prototipo no se puede describir ni auditar."""
+        if self.kind == "PROTOTYPE" and self.prototype_id is None:
+            raise ValueError("Un cargo de prototipo debe indicar de que muestra es")
+        return self
+
+
+class CommercialLineOut(BaseModel):
+    """El cargo ya valorado. Todo lo monetario derivado lo pone el backend."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: str
+    description: str
+    prototype_id: int | None = None
+    quantity: int
+    manual_net_amount: Decimal
+    sort_order: int
+    line_total_net: Decimal
+    line_total_tax: Decimal
+    line_total_gross: Decimal
+
+
 class GlazeSelectionItemIn(_Strict):
     """Intencion del usuario sobre un esmalte de la linea. Nada derivado.
 
@@ -425,6 +468,13 @@ class QuotationBuilderOut(BaseModel):
     code: str | None = None
     workflow: QuotationWorkflow = QuotationWorkflow.COTIZADOR
     status: QuotationStatus = QuotationStatus.DRAFT
+    #: Fase 009K.1. De que muestra nacio esta cotizacion, si nacio de alguna.
+    #: Nulo en todo lo anterior y en lo que se cotiza sin muestra previa. El
+    #: codigo viaja al lado porque la pantalla escribe «PRT-2026-000007», no un
+    #: numero de fila, y sin el tendria que pedir la muestra entera solo para
+    #: pintar una etiqueta.
+    origin_prototype_id: int | None = None
+    origin_prototype_code: str | None = None
     name: str | None = None
     customer_id: int | None = None
     customer_name_snapshot: str | None = None
@@ -432,6 +482,10 @@ class QuotationBuilderOut(BaseModel):
     kiln_snapshot: dict[str, Any] = Field(default_factory=dict)
     production_summary: dict[str, Any] = Field(default_factory=dict)
     items: list[QuotationBuilderItemOut] = Field(default_factory=list)
+    #: Fase 009K.1. Cargos comerciales: conceptos que se cobran y no se
+    #: fabrican. Entran en el subtotal, el IGV y el total, y no llevan factor
+    #: ni margen de producto.
+    commercial_lines: list[CommercialLineOut] = Field(default_factory=list)
     item_count: int = 0
     commercial_subtotal: Decimal = Decimal(0)
     tax_percentage_snapshot: Decimal = Decimal(0)

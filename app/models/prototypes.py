@@ -31,6 +31,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -42,6 +43,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -189,7 +191,18 @@ class Prototype(Base, TimestampMixin):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    #: Observaciones humanas. Texto libre, y solo eso.
     notes: Mapped[str | None] = mapped_column(Text)
+
+    #: Fase 009K.1. La ficha del taller, estructurada. En 009K estos campos se
+    #: componian dentro de `notes` porque no habia esquema autorizado: servia
+    #: para que lo leyera una persona, no para transferirlo. Construir una
+    #: cotizacion partiendo ese texto ataria el backend a un formato que decide
+    #: el navegador, y bastaria que alguien editara la nota para que el puente
+    #: empezara a inventar medidas.
+    #:
+    #: Nulo en los prototipos anteriores a 0022. No se rellena leyendo `notes`.
+    technical_specifications: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     #: A que muestra anterior sustituye. Una rechazada no se reescribe: se
     #: crea la siguiente y se dice de cual viene. Asi el historial conserva que
@@ -244,6 +257,38 @@ class Prototype(Base, TimestampMixin):
     )
 
 
+class PrototypeMaterialRole(StrEnum):
+    """Que papel juega un material dentro de la muestra.
+
+    Existe porque sin el no habia forma honesta de saber cual de los materiales
+    es el CUERPO de la pieza, y ese es el unico que puede viajar al Cotizador
+    como material base. Deducirlo del nombre del producto funciona hasta el dia
+    que alguien registra una arcilla que se usa de engobe.
+
+    `None` sigue siendo valido: es lo que tienen las lineas anteriores a 0022 y
+    significa «nadie lo declaro», no «otro».
+    """
+
+    BODY = "BODY"
+    GLAZE = "GLAZE"
+    OTHER = "OTHER"
+
+
+class PrototypeMaterialStage(StrEnum):
+    """En que etapa del trabajo se gasta el material.
+
+    Eje INDEPENDIENTE del rol, y el cuaderno del taller lo lleva en su propia
+    columna porque lo es: un barniz puede ser GLAZE en etapa FIRING, y una
+    mezcla de prueba puede ser BODY en LIQUID_TEST. Fundirlos en un solo campo
+    obligaria a elegir cual de las dos preguntas se responde.
+    """
+
+    PREPARATION = "PREPARATION"
+    FIRING = "FIRING"
+    LIQUID_TEST = "LIQUID_TEST"
+    ADJUSTMENT = "ADJUSTMENT"
+
+
 class PrototypeMaterialLine(Base, TimestampMixin):
     """Un material que ESTA muestra va a gastar. Elegido, nunca deducido.
 
@@ -267,13 +312,43 @@ class PrototypeMaterialLine(Base, TimestampMixin):
     )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    quantity: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
+    #: Lo que se AUTORIZO gastar. Es lo que el arranque intenta descontar.
+    #:
+    #: El atributo se llama `quantity_planned` y la columna sigue siendo
+    #: `quantity`. No es descuido: renombrarla en la base habria roto la
+    #: revision del backend que sigue sirviendo trafico mientras la base ya
+    #: esta migrada —el despliegue es DB primero—. El nombre claro vive en
+    #: Python, donde no cuesta una ventana de caida.
+    quantity_planned: Mapped[Decimal] = mapped_column(
+        "quantity", stock_quantity_numeric(), nullable=False
+    )
+    #: Lo que de verdad SALIO del almacen. Nulo mientras la muestra no ha
+    #: arrancado, y nulo para siempre en las lineas anteriores a 0022: que lo
+    #: previsto coincidiera con lo real no esta demostrado y no se afirma.
+    #:
+    #: Lo escribe `start`, dentro de la misma transaccion que crea el
+    #: `PROTOTYPE_OUT`. El movimiento es la autoridad; esta columna lo copia,
+    #: porque dos sitios diciendo cuanto se gasto acaban discrepando.
+    quantity_actual: Mapped[Decimal | None] = mapped_column(stock_quantity_numeric())
     #: La unidad en que se declaro, que es la base del producto. Se guarda para
     #: que la linea siga diciendo lo que decia si manana el maestro cambia.
     uom_code: Mapped[str] = mapped_column(String(32), nullable=False)
 
     product_name_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
     product_internal_reference_snapshot: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    #: Fase 009K.1. Cuerpo, acabado u otro. Nulo en las lineas anteriores a
+    #: 0022, y ese nulo no se rellena: una muestra historica no dijo cual era
+    #: su cuerpo, y adivinarlo ahora seria inventarlo.
+    material_role: Mapped[PrototypeMaterialRole | None] = mapped_column(
+        StrEnumType(PrototypeMaterialRole, 16), nullable=True
+    )
+    #: Fase 009K.1. Etapa del trabajo. Nula en lo anterior a 0022, y ese nulo
+    #: tampoco se deduce del rol: que un cuerpo suela gastarse en preparacion
+    #: no significa que esta muestra lo hiciera.
+    stage: Mapped[PrototypeMaterialStage | None] = mapped_column(
+        StrEnumType(PrototypeMaterialStage, 16), nullable=True
+    )
 
     __table_args__ = (
         # El mismo material una sola vez. Dos lineas del mismo insumo se
@@ -282,6 +357,9 @@ class PrototypeMaterialLine(Base, TimestampMixin):
         UniqueConstraint("prototype_id", "product_id", name="uq_prototype_material_product"),
         UniqueConstraint("prototype_id", "sort_order", name="uq_prototype_material_sort_order"),
         CheckConstraint("quantity > 0", name="quantity_positive"),
+        CheckConstraint(
+            "quantity_actual IS NULL OR quantity_actual > 0", name="quantity_actual_positive"
+        ),
         CheckConstraint("length(btrim(uom_code)) > 0", name="uom_not_blank"),
     )
 
