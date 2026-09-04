@@ -9,6 +9,7 @@ detecta: el importe sigue teniendo pinta de precio.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -18,6 +19,11 @@ from app.core.pricing import (
     PricingError,
     price_commercial_line,
     price_line,
+)
+from app.services.quotation_builder import (
+    QuotationBuilderService,
+    QuotationCommercialLineWithoutProductError,
+    _frozen_rounding_step,
 )
 
 PASO = Decimal("0.5")
@@ -127,3 +133,56 @@ def test_un_cargo_no_puede_ser_gratis_ni_negativo() -> None:
 def test_la_cantidad_multiplica_el_cargo() -> None:
     cargo = price_commercial_line(_cargo(quantity=3, manual_net_amount=Decimal(50)))
     assert cargo.line_total_net == Decimal(150)
+
+
+# ---------------------------------------------------------------------------
+# El guard de contexto comercial, sin base de datos
+# ---------------------------------------------------------------------------
+class _LineaFalsa:
+    def __init__(self, snapshot: dict[str, Any]) -> None:
+        self.production_snapshot = snapshot
+
+
+class _CotizacionFalsa:
+    def __init__(self, *lineas: _LineaFalsa) -> None:
+        self.items = list(lineas)
+
+
+def test_una_linea_de_producto_sin_plan_comercial_no_habilita_cargos() -> None:
+    """PARTIAL_PRODUCT_WITHOUT_COMMERCIAL_PLAN.
+
+    El guard mira que exista PLAN, no que existan filas. Hoy el builder escribe
+    un plan en cada linea que guarda, asi que este estado no se alcanza por la
+    API —solo lo tendrian filas anteriores a 009E, que son LEGACY y el builder
+    ya rechaza—. Se prueba aqui, contra la condicion, porque fabricar el estado
+    por HTTP obligaria a inventarselo.
+    """
+    with pytest.raises(QuotationCommercialLineWithoutProductError):
+        QuotationBuilderService._ensure_commercial_context(
+            _CotizacionFalsa(_LineaFalsa({}))  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(QuotationCommercialLineWithoutProductError):
+        QuotationBuilderService._ensure_commercial_context(
+            _CotizacionFalsa()  # type: ignore[arg-type]
+        )
+
+    # Con plan congelado, pasa.
+    QuotationBuilderService._ensure_commercial_context(
+        _CotizacionFalsa(_LineaFalsa({"commercial_plan": {"rounding_step": "0.50"}}))  # type: ignore[arg-type]
+    )
+
+
+def test_sin_politica_congelada_el_redondeo_falla_en_vez_de_valer_cero() -> None:
+    """COMMERCIAL_LINE_MISSING_POLICY_DEFAULT: 0.
+
+    Cero no es un paso de redondeo: `ceil_to_step` lo rechaza. Devolverlo como
+    relleno convertia la ausencia de politica en un 500 lejos de su causa. Que
+    falte tiene que fallar aqui, donde todavia se puede explicar.
+    """
+    with pytest.raises(QuotationCommercialLineWithoutProductError):
+        _frozen_rounding_step(_CotizacionFalsa(_LineaFalsa({})))  # type: ignore[arg-type]
+
+    assert _frozen_rounding_step(
+        _CotizacionFalsa(_LineaFalsa({"commercial_plan": {"rounding_step": "0.50"}}))  # type: ignore[arg-type]
+    ) == Decimal("0.50")
