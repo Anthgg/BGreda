@@ -29,7 +29,9 @@ from app.core.pricing import (
 from app.models.audit import AuditAction
 from app.models.firings import FiringType
 from app.models.masters import Partner, Product
+from app.models.prototypes import Prototype
 from app.models.quotations import (
+    CommercialLineKind,
     OtherCost,
     OtherCostCalculationType,
     Quotation,
@@ -47,6 +49,7 @@ from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
 from app.schemas.quotation_builder import (
     BodyMaterialIn,
     BodyMaterialOut,
+    CommercialLineIn,
     CommercialLineOut,
     GlazePlanOut,
     GlazeSelectionItemIn,
@@ -85,6 +88,9 @@ logger = logging.getLogger(__name__)
 
 ZERO = Decimal(0)
 BUILDER_ENTITY = "quotation_builder"
+#: Entidad de auditoria de los cargos comerciales. Aparte de la cotizacion
+#: para que el historial diga QUE se toco, no solo que algo cambio.
+COMMERCIAL_LINE_ENTITY = "quotation_commercial_line"
 PRODUCTION_DIMENSIONS = ("length", "width", "height")
 ALL_DIMENSIONS = ("width", "height", "length", "depth")
 HIDDEN_WARNING_CODES = {"DISCOUNT_RULE_BLOCKED_BY_SOURCE"}
@@ -213,6 +219,24 @@ class QuotationBuilderNotEditableError(APIError):
     status_code = 409
     code = "QUOTATION_BUILDER_NOT_EDITABLE"
     message = "Solo un borrador del Cotizador se puede editar"
+
+
+class QuotationCommercialLineNotFoundError(APIError):
+    status_code = 404
+    code = "QUOTATION_COMMERCIAL_LINE_NOT_FOUND"
+    message = "El cargo comercial no existe en esta cotizacion"
+
+
+class QuotationCommercialLinePrototypeInvalidError(APIError):
+    """El cargo dice venir de una muestra que no existe.
+
+    Se comprueba aqui y no solo con la clave foranea porque un error de
+    integridad llega como 500 y no explica nada; esto explica que falta.
+    """
+
+    status_code = 422
+    code = "QUOTATION_COMMERCIAL_LINE_PROTOTYPE_INVALID"
+    message = "La muestra indicada en el cargo no existe"
 
 
 class QuotationBuilderNotPayableError(APIError):
@@ -2078,6 +2102,103 @@ class QuotationBuilderService:
             metadata={"code": row.code, "status": row.status.value},
         )
         return await self.get(row.id)
+
+    # ------------------------------------------------------------------
+    # Cargos comerciales (Fase 009K.1)
+    #
+    # Son un subrecurso de la cotizacion, no un modulo aparte: viven y mueren
+    # con ella, y solo tienen sentido dentro de un borrador. Cada mutacion
+    # recalcula la cotizacion entera en vez de ajustar los totales a mano —un
+    # segundo sitio que suma acabaria dando otro numero que el primero—.
+    # ------------------------------------------------------------------
+    async def add_commercial_line(
+        self, quotation_id: int, payload: CommercialLineIn, *, user: AuthenticatedUser
+    ) -> QuotationBuilderOut:
+        row = await self._get(quotation_id, for_update=True)
+        self._ensure_draft(row)
+        await self._validate_commercial_line(payload)
+
+        row.commercial_lines.append(
+            QuotationCommercialLine(
+                kind=CommercialLineKind(payload.kind),
+                description=payload.description,
+                prototype_id=payload.prototype_id,
+                quantity=payload.quantity,
+                manual_net_amount=payload.manual_net_amount,
+                sort_order=payload.sort_order,
+            )
+        )
+        await self._session.flush()
+        await self._recalculate(row)
+        self._audit_commercial_line(row, AuditAction.CREATE, payload.description, user)
+        return await self.get(row.id)
+
+    async def update_commercial_line(
+        self, quotation_id: int, line_id: int, payload: CommercialLineIn, *, user: AuthenticatedUser
+    ) -> QuotationBuilderOut:
+        row = await self._get(quotation_id, for_update=True)
+        self._ensure_draft(row)
+        await self._validate_commercial_line(payload)
+
+        linea = next((item for item in row.commercial_lines if item.id == line_id), None)
+        if linea is None:
+            raise QuotationCommercialLineNotFoundError()
+        linea.kind = CommercialLineKind(payload.kind)
+        linea.description = payload.description
+        linea.prototype_id = payload.prototype_id
+        linea.quantity = payload.quantity
+        linea.manual_net_amount = payload.manual_net_amount
+        linea.sort_order = payload.sort_order
+        await self._session.flush()
+        await self._recalculate(row)
+        self._audit_commercial_line(row, AuditAction.UPDATE, payload.description, user)
+        return await self.get(row.id)
+
+    async def delete_commercial_line(
+        self, quotation_id: int, line_id: int, *, user: AuthenticatedUser
+    ) -> QuotationBuilderOut:
+        row = await self._get(quotation_id, for_update=True)
+        self._ensure_draft(row)
+        linea = next((item for item in row.commercial_lines if item.id == line_id), None)
+        if linea is None:
+            raise QuotationCommercialLineNotFoundError()
+        descripcion = linea.description
+        row.commercial_lines.remove(linea)
+        await self._session.flush()
+        await self._recalculate(row)
+        self._audit_commercial_line(row, AuditAction.DELETE, descripcion, user)
+        return await self.get(row.id)
+
+    async def _validate_commercial_line(self, payload: CommercialLineIn) -> None:
+        """Un cargo de prototipo tiene que apuntar a una muestra que exista."""
+        if payload.prototype_id is None:
+            return
+        existe = await self._session.get(Prototype, payload.prototype_id)
+        if existe is None:
+            raise QuotationCommercialLinePrototypeInvalidError()
+
+    async def _recalculate(self, row: Quotation) -> None:
+        """Vuelve a calcular la cotizacion entera tras tocar un cargo.
+
+        Se rehace el mismo camino que usa guardar —reconstruir la entrada desde
+        lo almacenado y volver a aplicar— en vez de sumar el cargo a los
+        totales existentes. Ajustarlos a mano crearia una segunda aritmetica
+        que, en cuanto la primera cambiara, empezaria a dar otro numero.
+        """
+        preview = await self.preview(self._to_input(row))
+        await self._apply(row, preview)
+
+    def _audit_commercial_line(
+        self, row: Quotation, action: AuditAction, description: str, user: AuthenticatedUser
+    ) -> None:
+        self._audit.record_action(
+            entity_type=COMMERCIAL_LINE_ENTITY,
+            entity_id=str(row.id),
+            action=action,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={"code": row.code, "description": description},
+        )
 
     @staticmethod
     def _technique_input(value: dict[str, Any]) -> TechniqueSelectionIn:

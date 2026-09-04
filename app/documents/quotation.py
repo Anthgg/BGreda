@@ -162,6 +162,24 @@ class QuotationDocItem:
 
 
 @dataclass(slots=True)
+class QuotationDocCommercialLine:
+    """Un cargo comercial en el documento.
+
+    No reutiliza `QuotationDocItem` a proposito: aquel tiene material, gramaje,
+    dimensiones y unidad de medida, y un cargo no tiene ninguna de esas cosas.
+    Rellenarlas con huecos o inventarle una unidad le daria al cliente la
+    apariencia de un producto que no existe.
+    """
+
+    item_number: int
+    description: str
+    quantity: int = 1
+    quantity_formatted: str = "1"
+    unit_price_formatted: str = "S/ 0.00"
+    subtotal_formatted: str = "S/ 0.00"
+
+
+@dataclass(slots=True)
 class QuotationDocTotals:
     subtotal_formatted: str = "S/ 0.00"
     tax_percentage: Decimal = Decimal(0)
@@ -194,6 +212,8 @@ class QuotationPdfDocument:
     customer: CustomerDocInfo
     document: DocumentHeaderInfo
     items: list[QuotationDocItem] = field(default_factory=list)
+    #: Fase 009K.1. Conceptos que se cobran y no se fabrican.
+    commercial_lines: list[QuotationDocCommercialLine] = field(default_factory=list)
     totals: QuotationDocTotals = field(default_factory=QuotationDocTotals)
     conditions: CommercialDocConditions = field(default_factory=CommercialDocConditions)
     bank_accounts: list[BankAccountDocInfo] = field(default_factory=list)
@@ -235,6 +255,36 @@ def _build_bank_accounts_doc(
                     )
                 )
     return bank_accounts_doc
+
+
+def _build_commercial_lines_doc(
+    quotation: Quotation, currency_symbol: str, offset: int
+) -> list[QuotationDocCommercialLine]:
+    """Los cargos comerciales del documento, numerados tras los productos.
+
+    El importe que se imprime es el NETO que se tecleo, que es el mismo que
+    entro en el subtotal. No se recalcula nada aqui: el PDF muestra lo que el
+    backend decidio, y un documento que rehiciera la aritmetica podria acabar
+    imprimiendo un total distinto del que se guardo.
+
+    Del cargo NO sale al papel ni el prototipo del que viene ni ningun dato
+    fisico: el cliente ve un concepto y un importe.
+    """
+    if "commercial_lines" in sa_inspect(quotation).unloaded:
+        return []
+    return [
+        QuotationDocCommercialLine(
+            item_number=offset + index,
+            description=line.description,
+            quantity=line.quantity,
+            quantity_formatted=format_quantity(Decimal(line.quantity)),
+            unit_price_formatted=format_currency(line.manual_net_amount, currency_symbol),
+            subtotal_formatted=format_currency(
+                line.manual_net_amount * Decimal(line.quantity), currency_symbol
+            ),
+        )
+        for index, line in enumerate(quotation.commercial_lines, start=1)
+    ]
 
 
 def build_quotation_pdf_document(
@@ -398,11 +448,15 @@ def build_quotation_pdf_document(
     # 7. Cuentas bancarias comerciales
     bank_accounts_doc = _build_bank_accounts_doc(commercial_settings)
 
+    # 8. Cargos comerciales (Fase 009K.1)
+    commercial_doc = _build_commercial_lines_doc(quotation, currency_symbol, len(items))
+
     return QuotationPdfDocument(
         company=company_doc,
         customer=customer_doc,
         document=document_header,
         items=items,
+        commercial_lines=commercial_doc,
         totals=totals_doc,
         conditions=conditions_doc,
         bank_accounts=bank_accounts_doc,
