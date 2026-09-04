@@ -488,6 +488,19 @@ class Quotation(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by=lambda: (QuotationItem.sort_order.asc(), QuotationItem.id.asc()),
     )
+    #: Fase 009K.1. Cargos comerciales de la cotizacion. Se cargan siempre
+    #: —`selectin`— porque entran en el total de cabecera: una cotizacion que
+    #: se lea sin ellos daria un total menor sin que nada avisara.
+    commercial_lines: Mapped[list[QuotationCommercialLine]] = relationship(
+        "QuotationCommercialLine",
+        back_populates="quotation",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            QuotationCommercialLine.sort_order.asc(),
+            QuotationCommercialLine.id.asc(),
+        ),
+        lazy="selectin",
+    )
 
 
 class QuotationItem(Base, TimestampMixin):
@@ -802,6 +815,7 @@ class QuotationCommercialLine(Base, TimestampMixin):
     quotation_id: Mapped[int] = mapped_column(
         ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    quotation: Mapped[Quotation] = relationship("Quotation", back_populates="commercial_lines")
     kind: Mapped[CommercialLineKind] = mapped_column(
         StrEnumType(CommercialLineKind, 32), nullable=False
     )

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -19,8 +20,10 @@ from app.core.errors import APIError
 from app.core.precision import QUANTITY_SCALE
 from app.core.pricing import (
     BASE_CURRENCY,
+    CommercialLinePricingInput,
     LinePricingInput,
     allocate_fixed_costs,
+    price_commercial_line,
     price_line,
 )
 from app.models.audit import AuditAction
@@ -30,6 +33,7 @@ from app.models.quotations import (
     OtherCost,
     OtherCostCalculationType,
     Quotation,
+    QuotationCommercialLine,
     QuotationItem,
     QuotationPaymentStatus,
     QuotationStatus,
@@ -43,6 +47,7 @@ from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
 from app.schemas.quotation_builder import (
     BodyMaterialIn,
     BodyMaterialOut,
+    CommercialLineOut,
     GlazePlanOut,
     GlazeSelectionItemIn,
     ProductDimensionCompletionIn,
@@ -605,6 +610,65 @@ def _glaze_plan_snapshot(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _CommercialLinesTotals:
+    """Lo que los cargos comerciales aportan al documento."""
+
+    net: Decimal
+    tax: Decimal
+    gross: Decimal
+    lines: list[CommercialLineOut]
+
+
+def price_commercial_lines(
+    rows: Sequence[QuotationCommercialLine],
+    *,
+    tax_percent: Decimal,
+    rounding_step: Decimal,
+    currency: str,
+    exchange_rate: Decimal | None,
+) -> _CommercialLinesTotals:
+    """Valora los cargos de una cotizacion. UNICA composicion de su total.
+
+    Existe una sola porque hay DOS caminos de salida —el calculado desde el
+    payload y el releido desde la fila— y sumar los cargos por separado en cada
+    uno es exactamente como se cobra un concepto dos veces. Los dos llaman
+    aqui, y aqui se llama una vez a `price_commercial_line`, que es quien sabe
+    de impuesto y redondeo.
+    """
+    lineas: list[CommercialLineOut] = []
+    neto = tax = bruto = ZERO
+    for row in rows:
+        valorada = price_commercial_line(
+            CommercialLinePricingInput(
+                quantity=row.quantity,
+                manual_net_amount=row.manual_net_amount,
+                tax_percent=tax_percent,
+                rounding_step=rounding_step,
+                currency=currency,
+                exchange_rate=exchange_rate,
+            )
+        )
+        neto += valorada.line_total_net
+        tax += valorada.line_total_tax
+        bruto += valorada.line_total_gross
+        lineas.append(
+            CommercialLineOut(
+                id=row.id,
+                kind=row.kind.value,
+                description=row.description,
+                prototype_id=row.prototype_id,
+                quantity=row.quantity,
+                manual_net_amount=row.manual_net_amount,
+                sort_order=row.sort_order,
+                line_total_net=valorada.line_total_net,
+                line_total_tax=valorada.line_total_tax,
+                line_total_gross=valorada.line_total_gross,
+            )
+        )
+    return _CommercialLinesTotals(net=neto, tax=tax, gross=bruto, lines=lineas)
+
+
 class QuotationBuilderService:
     def __init__(
         self,
@@ -629,6 +693,24 @@ class QuotationBuilderService:
         # sitio es el backend. El navegador manda que material y cuanto; todo
         # lo demas —unidad, costo unitario, requerimiento— sale de aqui.
         self._body_materials = BodyMaterialResolver(session)
+
+    def _commercial_totals(
+        self, row: Quotation, preview: QuotationBuilderOut
+    ) -> _CommercialLinesTotals:
+        """Valora los cargos de esta cotizacion con su misma politica monetaria.
+
+        La tasa es la del ENCABEZADO, no la de un producto: un cargo no tiene
+        producto del que heredarla. El paso de redondeo y la moneda salen del
+        mismo calculo que acaba de valorar las lineas, para que el documento
+        siga sumando.
+        """
+        return price_commercial_lines(
+            row.commercial_lines,
+            tax_percent=preview.tax_percentage_snapshot,
+            rounding_step=preview.rounding_step,
+            currency=preview.currency_code_snapshot,
+            exchange_rate=preview.exchange_rate_snapshot,
+        )
 
     async def list_body_materials(
         self, *, search: str | None = None, limit: int = 50, offset: int = 0
@@ -1709,8 +1791,12 @@ class QuotationBuilderService:
             (item.effective_profit_total for item in preview.items), ZERO
         )
         row.effective_markup_percent = ZERO
-        row.commercial_subtotal = preview.commercial_subtotal
-        row.commercial_total = preview.total_with_tax
+        # Los cargos comerciales entran al total AQUI y solo aqui. `preview`
+        # trae los productos; los cargos viven en la fila y no en el payload,
+        # porque se administran por su propio subrecurso.
+        cargos = self._commercial_totals(row, preview)
+        row.commercial_subtotal = preview.commercial_subtotal + cargos.net
+        row.commercial_total = preview.total_with_tax + cargos.gross
         row.commercial_unit_price_with_tax = ZERO
         row.currency_code_snapshot = preview.currency_code_snapshot
         row.currency_symbol_snapshot = preview.currency_symbol_snapshot
@@ -1718,8 +1804,8 @@ class QuotationBuilderService:
         row.exchange_rate_source_snapshot = preview.exchange_rate_source_snapshot
         row.tax_percentage_snapshot = preview.tax_percentage_snapshot
         row.tax_rate_source_snapshot = preview.tax_rate_source_snapshot
-        row.tax_amount = preview.tax_amount
-        row.total_with_tax = preview.total_with_tax
+        row.tax_amount = preview.tax_amount + cargos.tax
+        row.total_with_tax = preview.total_with_tax + cargos.gross
         row.unit_price_with_tax = ZERO
         row.source_fingerprint = preview.source_fingerprint
         row.calculation_warnings = preview.warnings
@@ -2184,6 +2270,25 @@ class QuotationBuilderService:
         )
 
     def _stored_output(self, row: Quotation) -> QuotationBuilderOut:
+        # Se valoran con la politica CONGELADA de la fila: una cotizacion ya
+        # guardada no puede cambiar de importe porque alguien edite el IGV o el
+        # paso de redondeo despues.
+        cargos = price_commercial_lines(
+            row.commercial_lines,
+            tax_percent=row.tax_percentage_snapshot,
+            rounding_step=next(
+                (
+                    _snapshot_decimal(
+                        item.production_snapshot.get("commercial_plan", {}).get("rounding_step")
+                    )
+                    for item in row.items
+                    if item.production_snapshot.get("commercial_plan")
+                ),
+                ZERO,
+            ),
+            currency=row.currency_code_snapshot,
+            exchange_rate=row.exchange_rate_snapshot,
+        )
         item_outputs = [
             QuotationBuilderItemOut(
                 id=item.id,
@@ -2337,9 +2442,17 @@ class QuotationBuilderService:
             items=item_outputs,
             item_count=len(item_outputs),
             commercial_subtotal=row.commercial_subtotal,
-            quotation_net_total=sum((item.line_total_net for item in item_outputs), ZERO),
-            quotation_tax_total=sum((item.line_total_tax for item in item_outputs), ZERO),
-            quotation_gross_total=sum((item.line_total_gross for item in item_outputs), ZERO),
+            commercial_lines=cargos.lines,
+            # Los totales de cabecera ya vienen sumados en la fila: `_apply`
+            # los guardo con los cargos dentro. Aqui solo se reconstruyen los
+            # desgloses, y por eso se vuelven a sumar los cargos a las lineas
+            # de producto —no a `row.*`, que los cobraria dos veces—.
+            quotation_net_total=sum((item.line_total_net for item in item_outputs), ZERO)
+            + cargos.net,
+            quotation_tax_total=sum((item.line_total_tax for item in item_outputs), ZERO)
+            + cargos.tax,
+            quotation_gross_total=sum((item.line_total_gross for item in item_outputs), ZERO)
+            + cargos.gross,
             production_factor=next(
                 (item.production_factor for item in item_outputs if item.production_factor),
                 ZERO,
