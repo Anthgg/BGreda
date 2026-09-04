@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockMovement
 from app.models.masters import Product
-from app.models.prototypes import Prototype
+from app.models.prototypes import Prototype, PrototypeMaterialLine
 from app.models.quotations import Quotation, QuotationStatus
 from tests.db.test_prototypes import (
     PROTOTYPES,
@@ -33,6 +33,23 @@ BUILDER = "/api/v1/quotation-builder"
 
 def _final(prototype_id: int) -> str:
     return f"{PROTOTYPES}/{prototype_id}/final-quotation"
+
+
+async def _lineas_material(
+    db_session: AsyncSession, prototype_id: int
+) -> list[PrototypeMaterialLine]:
+    db_session.expire_all()
+    return list(
+        (
+            await db_session.execute(
+                select(PrototypeMaterialLine)
+                .where(PrototypeMaterialLine.prototype_id == prototype_id)
+                .order_by(PrototypeMaterialLine.sort_order)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def _cotizaciones(db_session: AsyncSession) -> int:
@@ -476,3 +493,96 @@ async def test_el_taller_no_cotiza(
     respuesta = await api.post(_final(datos["prototipo"]["id"]), headers=head(operator_csrf))
     assert respuesta.status_code == 403, respuesta.text
     assert await _cotizaciones(db_session) == antes
+
+
+# ---------------------------------------------------------------------------
+# El consumo real: lo escribe el arranque, y nadie mas
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_arrancar_escribe_el_consumo_real_junto_al_movimiento(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """QUANTITY_ACTUAL_ATOMIC.
+
+    Lo previsto son 30 g. Tras arrancar, el movimiento saca 30 y la columna
+    dice 30: son la misma cifra porque se escriben en la misma transaccion. Dos
+    sitios diciendo cuanto se gasto acabarian discrepando.
+    """
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_qa_ok", gramos="30")
+    proto_id = datos["prototipo"]["id"]
+
+    lineas_antes = await _lineas_material(db_session, proto_id)
+    assert [linea.quantity_planned for linea in lineas_antes] == [Decimal(30)]
+    assert [linea.quantity_actual for linea in lineas_antes] == [None]
+
+    assert (
+        await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    ).status_code == 200
+
+    lineas = await _lineas_material(db_session, proto_id)
+    assert [linea.quantity_actual for linea in lineas] == [Decimal(30)]
+
+    db_session.expire_all()
+    salida = (
+        (
+            await db_session.execute(
+                select(StockMovement.quantity).where(StockMovement.prototype_id == proto_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [Decimal(valor) for valor in salida] == [Decimal(-30)]
+
+
+@pytest.mark.asyncio
+async def test_un_arranque_que_falla_no_deja_consumo_registrado(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """FAILED_START_QUANTITY_ACTUAL_MUTATION: 0.
+
+    Sin saldo suficiente el arranque se rechaza, y la transaccion se deshace
+    entera: no puede quedar un consumo anotado que el almacen no respalde.
+    """
+    datos = await _muestra_lista(
+        api, admin_csrf, db_session, suffix="_qa_fail", gramos="30", existencia="5"
+    )
+    proto_id = datos["prototipo"]["id"]
+
+    respuesta = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert respuesta.status_code == 409, respuesta.text
+
+    lineas = await _lineas_material(db_session, proto_id)
+    assert [linea.quantity_actual for linea in lineas] == [None]
+    db_session.expire_all()
+    salidas = await db_session.scalar(
+        select(func.count())
+        .select_from(StockMovement)
+        .where(StockMovement.prototype_id == proto_id)
+    )
+    assert salidas == 0
+
+
+@pytest.mark.asyncio
+async def test_arrancar_dos_veces_no_reescribe_el_consumo(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """SECOND_START_QUANTITY_ACTUAL_MUTATION: 0."""
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_qa_twice", gramos="30")
+    proto_id = datos["prototipo"]["id"]
+    await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+
+    lineas_primero = await _lineas_material(db_session, proto_id)
+    await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    lineas_despues = await _lineas_material(db_session, proto_id)
+
+    assert [linea.quantity_actual for linea in lineas_despues] == [
+        linea.quantity_actual for linea in lineas_primero
+    ]
+    db_session.expire_all()
+    salidas = await db_session.scalar(
+        select(func.count())
+        .select_from(StockMovement)
+        .where(StockMovement.prototype_id == proto_id)
+    )
+    assert salidas == 1

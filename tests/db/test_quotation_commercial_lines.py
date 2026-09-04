@@ -17,9 +17,16 @@ from pypdf import PdfReader
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.audit import AuditEvent
 from app.models.inventory import StockBalance, StockMovement
+from app.models.production import ProductionOrderLine
 from app.models.quotations import QuotationCommercialLine
-from tests.db.test_production_orders_api import confirmar
+from tests.db.test_production_orders_api import (
+    confirmada_y_pagada,
+    confirmar,
+    crear_orden,
+    crear_ubicacion,
+)
 from tests.db.test_quotation_builder_api import BUILDER, _complete_payload, head
 
 CARGO = "Prototipo PRT-2026-000099"
@@ -333,3 +340,137 @@ async def test_el_pdf_muestra_el_cargo_y_no_ensena_nada_interno(
         "production_factor",
     ):
         assert interno not in texto
+
+
+# ---------------------------------------------------------------------------
+# Produccion: el cargo no existe
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_la_orden_de_produccion_no_ve_el_cargo(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_LINE_PRODUCTION_LINES: 0.
+
+    Se montan DOS cotizaciones identicas y a una se le anade el cargo. Las
+    ordenes que salen de ambas tienen que tener las mismas lineas y pedir el
+    mismo material: si el cargo se colara, aqui apareceria una linea de mas o
+    un requerimiento distinto.
+
+    Comparar contra un caso gemelo, y no contra una lista escrita a mano, es
+    lo que hace que la prueba siga valiendo cuando el modelo de produccion
+    cambie por otros motivos.
+    """
+    sin_cargo = await _borrador(api, admin_csrf, db_session)
+    con_cargo = await _borrador(api, admin_csrf, db_session)
+    proto = await _prototipo_cualquiera(api, admin_csrf)
+
+    anadido = await api.post(
+        f"{BUILDER}/{con_cargo['id']}/commercial-lines",
+        json=_linea(prototype_id=proto),
+        headers=head(admin_csrf),
+    )
+    assert anadido.status_code == 201, anadido.text
+
+    ubicacion = await crear_ubicacion(api, admin_csrf, "Almacen cargos 009K1")
+    ordenes: dict[str, list[tuple[int, str | None, str | None]]] = {}
+    for etiqueta, borrador in (("sin", sin_cargo), ("con", con_cargo)):
+        confirmada = await confirmada_y_pagada(api, admin_csrf, borrador)
+        creada = await crear_orden(
+            api, admin_csrf, quotation_id=confirmada["id"], location_id=ubicacion
+        )
+        assert creada.status_code == 201, creada.text
+        db_session.expire_all()
+        lineas = (
+            await db_session.execute(
+                select(
+                    ProductionOrderLine.product_id,
+                    ProductionOrderLine.required_material_quantity,
+                    ProductionOrderLine.required_material_uom,
+                )
+                .where(ProductionOrderLine.production_order_id == creada.json()["id"])
+                .order_by(ProductionOrderLine.sort_order)
+            )
+        ).all()
+        ordenes[etiqueta] = [(p, str(q), u) for p, q, u in lineas]
+
+    assert ordenes["con"] == ordenes["sin"], ordenes
+
+
+# ---------------------------------------------------------------------------
+# Permisos y rastro
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_el_taller_no_pone_precios(
+    api: httpx.AsyncClient, admin_csrf: str, operator_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_LINE_RBAC.
+
+    Un cargo comercial es un importe que se le cobra a alguien. El taller
+    ejecuta; decidir cuanto se cobra es administracion, igual que marcar una
+    cotizacion pagada.
+    """
+    borrador = await _borrador(api, admin_csrf, db_session)
+    proto = await _prototipo_cualquiera(api, admin_csrf)
+    antes = await _inventario(db_session)
+
+    respuesta = await api.post(
+        f"{BUILDER}/{borrador['id']}/commercial-lines",
+        json=_linea(prototype_id=proto),
+        headers=head(operator_csrf),
+    )
+    assert respuesta.status_code == 403, respuesta.text
+
+    db_session.expire_all()
+    creadas = await db_session.scalar(select(func.count()).select_from(QuotationCommercialLine))
+    assert creadas == 0
+    assert await _inventario(db_session) == antes
+
+
+@pytest.mark.asyncio
+async def test_cada_mutacion_del_cargo_deja_su_rastro(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """COMMERCIAL_LINE_*_AUDITED, y un rechazo no deja rastro de exito."""
+    borrador = await _borrador(api, admin_csrf, db_session)
+    proto = await _prototipo_cualquiera(api, admin_csrf)
+
+    async def _eventos() -> list[str]:
+        db_session.expire_all()
+        filas = (
+            (
+                await db_session.execute(
+                    select(AuditEvent.action)
+                    .where(AuditEvent.entity_type == "quotation_commercial_line")
+                    .order_by(AuditEvent.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [str(accion) for accion in filas]
+
+    creada = await api.post(
+        f"{BUILDER}/{borrador['id']}/commercial-lines",
+        json=_linea(prototype_id=proto),
+        headers=head(admin_csrf),
+    )
+    linea_id = creada.json()["commercial_lines"][0]["id"]
+    await api.put(
+        f"{BUILDER}/{borrador['id']}/commercial-lines/{linea_id}",
+        json=_linea(prototype_id=proto, manual_net_amount="75"),
+        headers=head(admin_csrf),
+    )
+    await api.delete(
+        f"{BUILDER}/{borrador['id']}/commercial-lines/{linea_id}", headers=head(admin_csrf)
+    )
+
+    assert await _eventos() == ["CREATE", "UPDATE", "DELETE"]
+
+    # Un intento rechazado no puede sumar un evento de exito.
+    rechazado = await api.post(
+        f"{BUILDER}/{borrador['id']}/commercial-lines",
+        json=_linea(prototype_id=999_999),
+        headers=head(admin_csrf),
+    )
+    assert rechazado.status_code == 422
+    assert await _eventos() == ["CREATE", "UPDATE", "DELETE"]
