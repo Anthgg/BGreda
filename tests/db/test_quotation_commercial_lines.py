@@ -597,4 +597,6 @@ async def test_con_producto_el_cargo_entra_y_el_puente_sigue_creando_borradores(
 
     despues = await api.get(f"{BUILDER}/{borrador['id']}", headers=head(admin_csrf))
     linea = despues.json()["commercial_lines"][0]
-    assert Decimal(despues.json()["quotation_net"]) - neto_antes == Decimal(linea["line_total_net"])
+    assert Decimal(despues.json()["quotation_net_total"]) - neto_antes == Decimal(
+        linea["line_total_net"]
+    )
