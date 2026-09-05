@@ -979,6 +979,7 @@ class PrototypeService:
             cancelled_at=prototype.cancelled_at,
             decided_at=prototype.decided_at,
             supersedes_prototype_id=prototype.supersedes_prototype_id,
+            prototype_quotation_id=prototype.prototype_quotation_id,
             material_count=len(prototype.lines),
             notes=prototype.notes,
             quotation_payment_status=(

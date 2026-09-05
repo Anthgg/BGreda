@@ -18,8 +18,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.firings import FiringType
 from app.models.prototype_quotations import (
-    PrototypeFiringType,
     PrototypeQuotationPaymentStatus,
     PrototypeQuotationStatus,
 )
@@ -77,7 +77,7 @@ class PrototypeQuotationDraftIn(_Strict):
     kiln_id: int | None = Field(default=None, gt=0)
     #: Sin valor por defecto a proposito: elegir BAJA en silencio cotizaria a
     #: una tarifa que nadie escogio.
-    firing_type: PrototypeFiringType | None = None
+    firing_type: FiringType | None = None
     firing_batches: int = Field(default=0, ge=0)
 
     drying_days: Decimal = Field(default=Decimal(0), ge=0, max_digits=18, decimal_places=6)
@@ -187,7 +187,7 @@ class PrototypeQuotationOut(BaseModel):
     mold_maker_price_override: Decimal | None = None
     mold_maker_days: Decimal
     kiln_id: int | None = None
-    firing_type: PrototypeFiringType | None = None
+    firing_type: FiringType | None = None
     firing_batches: int
     drying_days: Decimal
     adjustment_days: Decimal

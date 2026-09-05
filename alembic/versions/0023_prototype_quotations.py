@@ -132,7 +132,8 @@ def upgrade() -> None:
             "payment_status IN ('UNPAID', 'PAID')", name="pq_payment_status_allowed"
         ),
         sa.CheckConstraint(
-            "firing_type IS NULL OR firing_type IN ('BAJA', 'ALTA')", name="pq_firing_type_allowed"
+            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')",
+            name="pq_firing_type_allowed",
         ),
         sa.CheckConstraint("quantity > 0", name="pq_quantity_positive"),
         sa.CheckConstraint("design_days >= 0", name="pq_design_days_non_negative"),

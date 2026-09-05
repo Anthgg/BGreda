@@ -48,7 +48,6 @@ from app.models.production import (
 )
 from app.models.profile import Profile, UserRole
 from app.models.prototype_quotations import (
-    PrototypeFiringType,
     PrototypeQuotation,
     PrototypeQuotationMaterial,
     PrototypeQuotationPaymentStatus,
@@ -142,7 +141,6 @@ __all__ = [
     "Profile",
     "Prototype",
     "PrototypeApproval",
-    "PrototypeFiringType",
     "PrototypeMaterialLine",
     "PrototypeMaterialRole",
     "PrototypeQuotation",

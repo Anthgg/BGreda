@@ -50,6 +50,7 @@ from app.core.precision import (
 )
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
+from app.models.firings import FiringType
 
 if TYPE_CHECKING:
     from app.models.firings import Kiln
@@ -67,17 +68,6 @@ class PrototypeQuotationStatus(StrEnum):
 class PrototypeQuotationPaymentStatus(StrEnum):
     UNPAID = "UNPAID"
     PAID = "PAID"
-
-
-class PrototypeFiringType(StrEnum):
-    """Se copia el vocabulario de quemas para poder resolver la tarifa vigente.
-
-    No hay valor por defecto: elegir BAJA en silencio cotizaria a una tarifa
-    que nadie escogio.
-    """
-
-    BAJA = "BAJA"
-    ALTA = "ALTA"
 
 
 class PrototypeQuotation(Base, TimestampMixin):
@@ -153,9 +143,14 @@ class PrototypeQuotation(Base, TimestampMixin):
     )
 
     kiln_id: Mapped[int | None] = mapped_column(ForeignKey("kilns.id", ondelete="RESTRICT"))
-    firing_type: Mapped[PrototypeFiringType | None] = mapped_column(
-        StrEnumType(PrototypeFiringType, 8)
-    )
+    #: El MISMO vocabulario que las quemas —LOW/HIGH—, y no uno propio. Un
+    #: segundo juego de nombres para lo mismo obliga a traducir en cada
+    #: frontera, y basta con que alguien olvide una traduccion para que la
+    #: tarifa no se encuentre. «Baja» y «Alta» son etiquetas de pantalla.
+    #:
+    #: Sin valor por defecto: elegir una en silencio cotizaria a una tarifa que
+    #: nadie escogio.
+    firing_type: Mapped[FiringType | None] = mapped_column(StrEnumType(FiringType, 8))
     firing_batches: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     drying_days: Mapped[Decimal] = mapped_column(
@@ -208,7 +203,7 @@ class PrototypeQuotation(Base, TimestampMixin):
         CheckConstraint("status IN ('DRAFT', 'CONFIRMED', 'CANCELLED')", name="pq_status_allowed"),
         CheckConstraint("payment_status IN ('UNPAID', 'PAID')", name="pq_payment_status_allowed"),
         CheckConstraint(
-            "firing_type IS NULL OR firing_type IN ('BAJA', 'ALTA')",
+            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')",
             name="pq_firing_type_allowed",
         ),
         CheckConstraint("quantity > 0", name="pq_quantity_positive"),

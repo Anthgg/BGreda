@@ -41,7 +41,6 @@ from app.models.audit import AuditAction
 from app.models.firings import FiringType, Kiln, KilnRate
 from app.models.masters import Partner, Product
 from app.models.prototype_quotations import (
-    PrototypeFiringType,
     PrototypeQuotation,
     PrototypeQuotationMaterial,
     PrototypeQuotationPaymentStatus,
@@ -198,7 +197,7 @@ class PrototypeQuotationService:
         return fila
 
     async def _firing_rate(
-        self, kiln_id: int | None, firing_type: PrototypeFiringType | None, *, momento: date
+        self, kiln_id: int | None, firing_type: FiringType | None, *, momento: date
     ) -> tuple[Decimal, int]:
         """Tarifa vigente y dias por hornada del horno elegido.
 
@@ -215,7 +214,7 @@ class PrototypeQuotationService:
             select(KilnRate.rate)
             .where(
                 KilnRate.kiln_id == kiln_id,
-                KilnRate.firing_type == FiringType(firing_type.value),
+                KilnRate.firing_type == firing_type,
                 KilnRate.valid_from <= momento,
                 or_(KilnRate.valid_to.is_(None), KilnRate.valid_to > momento),
             )
