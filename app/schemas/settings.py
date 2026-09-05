@@ -232,6 +232,43 @@ class CommercialSettingsBase(_StrictModel):
         Field(gt=0, le=1_000, max_digits=9, decimal_places=6),
     ] = DEFAULT_PRODUCTION_FACTOR
 
+    #: Fase 009K.1.1. Tarifas de casa del Cotizador de Prototipos.
+    #:
+    #: Viven aqui y no en un modulo propio porque son politica comercial de la
+    #: casa, igual que el IGV o el paso de redondeo. Un segundo motor de
+    #: configuracion daria dos sitios donde mirar y uno quedaria viejo.
+    #:
+    #: **Cero es un valor legitimo** y no se corrige solo: significa que el
+    #: taller todavia no ha fijado esa tarifa. Convertirlo en 80, 100 o 350
+    #: —los numeros del Excel, que ahi estan marcados como EJEMPLO— pondria un
+    #: precio inventado en un documento que alguien firma.
+    #:
+    #: No admiten nulo, como `estimated_glaze_percent`: la columna es NOT NULL
+    #: y el formulario manda la configuracion entera, de modo que un PUT que
+    #: los omita los devuelve a cero. Ese es el contrato del endpoint, no un
+    #: descuido.
+    #:
+    #: La escala es la misma que la de los overrides de una CPR
+    #: (`max_digits=18, decimal_places=6`) a proposito: una tarifa que
+    #: Configuracion aceptara y el Cotizador rechazara como override seria una
+    #: trampa dificil de explicar.
+    prototype_design_rate: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=6)] = (
+        Decimal(0)
+    )
+    prototype_artist_rate: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=6)] = (
+        Decimal(0)
+    )
+    prototype_mold_maker_price: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=6)] = (
+        Decimal(0)
+    )
+    #: Tiempo, no dinero: dias que el matricero tarda por omision.
+    prototype_mold_maker_days: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=6)] = (
+        Decimal(0)
+    )
+    prototype_fixed_cost: Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=6)] = (
+        Decimal(0)
+    )
+
     #: Paso del redondeo contractual del precio bruto. Solo 0,50 o 1,00: un
     #: tercer valor produciria precios que no son multiplos de nada.
     rounding_step: Annotated[Decimal, Field(max_digits=9, decimal_places=6)] = DEFAULT_ROUNDING_STEP

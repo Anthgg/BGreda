@@ -1510,3 +1510,135 @@ async def test_el_cpr_no_ensena_al_cliente_lo_que_le_cuesta_al_taller(
 
     # Lo que si sale: el total acordado.
     assert "531.00" in texto
+
+
+# ---------------------------------------------------------------------------
+# LA TARIFA DE CASA Y EL OVERRIDE
+#
+# Nulo NO es cero. Nulo significa «cobra lo que cobre la casa», y por eso un
+# borrador con override vacio tiene que seguir viendo la tarifa VIGENTE: si al
+# crearlo se copiara el valor de Configuracion dentro del override, subir la
+# tarifa no alcanzaria a los borradores abiertos y nadie sabria por que.
+#
+# Al emitir cambia la regla, y tambien a proposito: lo que se firma se congela.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_un_borrador_sin_override_usa_la_tarifa_vigente_de_la_casa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NULL_OVERRIDE_USES_LIVE_SETTING: PASS."""
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_vivo")
+    datos = _payload(caso)
+    assert datos.get("design_rate_override") is None
+
+    respuesta = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    # 3 dias a la tarifa de la casa (80).
+    assert Decimal(respuesta.json()["costing"]["design_rate"]) == Decimal(80)
+
+
+@pytest.mark.asyncio
+async def test_subir_la_tarifa_alcanza_a_un_borrador_ya_guardado(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NULL_OVERRIDE_USES_LIVE_SETTING sobre un DRAFT que ya existe.
+
+    Este es el caso que de verdad importa: el borrador se guardo AYER con la
+    tarifa vieja y hoy la casa cobra otra cosa. Mientras nadie lo firme, vale
+    la de hoy.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_sube")
+    creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    documento = creada.json()
+    assert Decimal(documento["costing"]["design_rate"]) == Decimal(80)
+
+    await _ajustes(db_session, prototype_design_rate=Decimal(90))
+
+    devuelta = await api.get(f"{COTIZADOR}/{documento['id']}", headers=head(admin_csrf))
+    assert devuelta.status_code == 200, devuelta.text
+    assert Decimal(devuelta.json()["costing"]["design_rate"]) == Decimal(90)
+
+
+@pytest.mark.asyncio
+async def test_crear_un_borrador_no_copia_la_tarifa_dentro_del_override(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """DEFAULT_VALUE_COPIED_INTO_OVERRIDE: NO.
+
+    Se mira la COLUMNA, no la respuesta: copiar el valor ahi convertiria una
+    herencia en un precio pactado, y el sintoma solo aparecerian semanas
+    despues, cuando alguien subiera la tarifa y los borradores no se movieran.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_nocopia")
+    creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+
+    db_session.expire_all()
+    fila = await db_session.get(PrototypeQuotation, creada.json()["id"])
+    assert fila is not None
+    assert fila.design_rate_override is None
+    assert fila.artist_rate_override is None
+    assert fila.mold_maker_price_override is None
+    assert fila.fixed_cost_override is None
+
+
+@pytest.mark.asyncio
+async def test_un_override_explicito_manda_sobre_la_tarifa_de_la_casa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """EXPLICIT_OVERRIDE_WINS_OVER_SETTING: PASS."""
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_manda")
+    datos = _payload(caso) | {"design_rate_override": "95"}
+
+    respuesta = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    assert Decimal(respuesta.json()["costing"]["design_rate"]) == Decimal(95)
+
+    # Y sigue mandando aunque la casa cambie la suya.
+    await _ajustes(db_session, prototype_design_rate=Decimal(120))
+    otra = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
+    assert Decimal(otra.json()["costing"]["design_rate"]) == Decimal(95)
+
+
+@pytest.mark.asyncio
+async def test_al_emitir_se_congela_la_tarifa_efectiva_y_no_la_de_manana(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CONFIRMED_EFFECTIVE_RATE_SNAPSHOTTED y ..._IGNORES_FUTURE_SETTING_CHANGE.
+
+    Un documento emitido es un compromiso. Que cambiar una tarifa moviera el
+    total de una cotizacion ya firmada no seria una funcionalidad: seria que
+    el papel y el sistema dicen cosas distintas.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_congela2")
+    creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    confirmada = await api.post(
+        f"{COTIZADOR}/{creada.json()['id']}/confirm", headers=head(admin_csrf)
+    )
+    assert confirmada.status_code == 200, confirmada.text
+    emitida = confirmada.json()
+    total_emitido = Decimal(emitida["costing"]["commercial_gross_total"])
+    assert Decimal(emitida["costing"]["design_rate"]) == Decimal(80)
+    assert total_emitido == Decimal("531.00")
+
+    # La casa sube sus tarifas al dia siguiente.
+    await _ajustes(
+        db_session,
+        prototype_design_rate=Decimal(120),
+        prototype_artist_rate=Decimal(200),
+        prototype_fixed_cost=Decimal(500),
+    )
+
+    db_session.expire_all()
+    devuelta = await api.get(f"{COTIZADOR}/{emitida['id']}", headers=head(admin_csrf))
+    assert devuelta.status_code == 200, devuelta.text
+    costeo = devuelta.json()["costing"]
+    assert Decimal(costeo["design_rate"]) == Decimal(80)
+    assert Decimal(costeo["commercial_gross_total"]) == total_emitido
+
+    # Y el papel tampoco se mueve.
+    papel = await api.get(f"{COTIZADOR}/{emitida['id']}/pdf", headers=head(admin_csrf))
+    assert papel.status_code == 200, papel.text
+    assert contiene(_texto_pdf(papel.content), "531.00")

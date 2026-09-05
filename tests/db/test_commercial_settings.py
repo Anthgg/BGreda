@@ -5,8 +5,11 @@ from __future__ import annotations
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import text
+import pytest
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.settings import CommercialSettings
 
 COMMERCIAL = "/api/v1/settings/commercial"
 
@@ -404,3 +407,242 @@ async def test_una_politica_invalida_se_rechaza_y_no_deja_rastro(
     assert Decimal(str(fila[0])) == Decimal("3")
     assert Decimal(str(fila[1])) == Decimal("0.50")
     assert (await api.get(COMMERCIAL)).json()["version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TARIFAS DE PROTOTIPO
+#
+# Las cinco columnas existian desde 0023 pero no las exponia ningun esquema:
+# solo se podian cambiar por SQL. Eso no es un flujo: es una nota al pie que
+# alguien tiene que recordar. Y como nacen en cero —a proposito, para no
+# sembrar como precios reales los ejemplos del Excel—, un taller sin forma de
+# configurarlas cotizaria a cero sin enterarse.
+#
+# No hacen falta servicio ni endpoint nuevos: `update_commercial` deriva los
+# campos editables del propio esquema y `_commercial_out` los devuelve
+# recorriendo `model_fields`. Exponerlos ES anadirlos al esquema.
+# ---------------------------------------------------------------------------
+TARIFAS = (
+    "prototype_design_rate",
+    "prototype_artist_rate",
+    "prototype_mold_maker_price",
+    "prototype_mold_maker_days",
+    "prototype_fixed_cost",
+)
+
+
+async def test_la_lectura_devuelve_las_cinco_tarifas_de_prototipo(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """PROTOTYPE_SETTINGS_API_EXPOSED: PASS.
+
+    Y todas en cero: el taller no hereda las tarifas de nadie.
+    """
+    cuerpo = (await api.get(COMMERCIAL)).json()
+
+    for campo in TARIFAS:
+        assert campo in cuerpo, campo
+        assert Decimal(str(cuerpo[campo])) == Decimal(0), campo
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    [
+        ("prototype_design_rate", "200"),
+        ("prototype_artist_rate", "150.50"),
+        ("prototype_mold_maker_price", "100"),
+        ("prototype_mold_maker_days", "1.5"),
+        ("prototype_fixed_cost", "30"),
+    ],
+)
+async def test_cada_tarifa_de_prototipo_se_configura_y_persiste(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    campo: str,
+    valor: str,
+) -> None:
+    """PROTOTYPE_*_CONFIGURABLE: PASS, uno por parametro.
+
+    Se relee de la BASE y no solo de la respuesta: una respuesta puede
+    devolver lo que se le mando en vez de lo que se guardo.
+    """
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, **{campo: valor}),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+    assert Decimal(str(respuesta.json()[campo])) == Decimal(valor)
+
+    recargado = (await api.get(COMMERCIAL)).json()
+    assert Decimal(str(recargado[campo])) == Decimal(valor)
+
+    # Por el ORM y no con SQL compuesto: `expire_all` obliga a un SELECT nuevo
+    # igual, asi que se sigue leyendo de la base y no del identity map, y el
+    # nombre del campo no se interpola en una consulta.
+    db_session.expire_all()
+    fila = await db_session.get(CommercialSettings, 1)
+    assert fila is not None
+    assert Decimal(str(getattr(fila, campo))) == Decimal(valor)
+
+
+async def test_las_cinco_se_pueden_configurar_de_una_vez(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El caso real: alguien rellena el formulario entero y guarda una vez."""
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(
+            1,
+            prototype_design_rate="200",
+            prototype_artist_rate="150",
+            prototype_mold_maker_price="100",
+            prototype_mold_maker_days="1",
+            prototype_fixed_cost="30",
+        ),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+
+    db_session.expire_all()
+    guardada = await db_session.get(CommercialSettings, 1)
+    assert guardada is not None
+    assert [Decimal(str(getattr(guardada, campo))) for campo in TARIFAS] == [
+        Decimal(200),
+        Decimal(150),
+        Decimal(100),
+        Decimal(1),
+        Decimal(30),
+    ]
+
+
+async def test_cero_es_un_valor_legitimo_y_no_se_corrige_solo(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PROTOTYPE_SETTINGS_ZERO_ALLOWED: PASS.
+
+    Cero significa «el taller todavia no ha fijado esa tarifa». Convertirlo en
+    80, 100 o 350 —los numeros del Excel, marcados alli como EJEMPLO— pondria
+    un precio inventado en un documento que alguien firma.
+    """
+    puesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, prototype_design_rate="200"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert puesta.status_code == 200, puesta.text
+
+    vuelta = await api.put(
+        COMMERCIAL,
+        json=_payload(puesta.json()["version"], prototype_design_rate="0"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert vuelta.status_code == 200, vuelta.text
+    assert Decimal(str(vuelta.json()["prototype_design_rate"])) == Decimal(0)
+
+    db_session.expire_all()
+    almacenado = (
+        await db_session.execute(
+            text("SELECT prototype_design_rate FROM commercial_settings WHERE id = 1")
+        )
+    ).scalar_one()
+    assert Decimal(str(almacenado)) == Decimal(0)
+
+
+@pytest.mark.parametrize("campo", TARIFAS)
+async def test_una_tarifa_negativa_se_rechaza(
+    api: httpx.AsyncClient, admin_csrf: str, campo: str
+) -> None:
+    """PROTOTYPE_SETTINGS_NEGATIVE_REJECTED: PASS.
+
+    Un dia negativo no existe y una tarifa negativa le pagaria al cliente.
+    """
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, **{campo: "-1"}),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 422, respuesta.text
+
+
+async def test_un_operario_no_puede_cambiar_las_tarifas_de_prototipo(
+    api: httpx.AsyncClient, operator_csrf: str, db_session: AsyncSession
+) -> None:
+    """PROTOTYPE_SETTINGS_RBAC: PASS.
+
+    La autoridad es del backend, no de que el frontend esconda el formulario.
+    Y despues del 403 la base sigue igual: un rechazo que hubiera escrito algo
+    seria peor que no tener permisos.
+    """
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, prototype_design_rate="999"),
+        headers={"X-CSRF-Token": operator_csrf},
+    )
+    assert respuesta.status_code == 403
+
+    db_session.expire_all()
+    almacenado = (
+        await db_session.execute(
+            text("SELECT prototype_design_rate FROM commercial_settings WHERE id = 1")
+        )
+    ).scalar_one()
+    assert Decimal(str(almacenado)) == Decimal(0)
+
+
+async def test_cambiar_una_tarifa_queda_auditado(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PROTOTYPE_SETTINGS_AUDIT: PASS.
+
+    Mismo mecanismo que el resto de la configuracion comercial: quien, cuando,
+    de que a que.
+    """
+    from app.models.audit import AuditEvent
+
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, prototype_artist_rate="150"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+
+    eventos = (
+        (
+            await db_session.execute(
+                select(AuditEvent).where(AuditEvent.field == "prototype_artist_rate")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(eventos) == 1
+    evento = eventos[0]
+    assert evento.entity_type == "commercial_settings"
+    assert Decimal(str(evento.new_value)) == Decimal(150)
+    assert evento.user_id is not None
+
+
+async def test_un_update_rechazado_no_deja_auditoria_de_exito(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Delta de auditoria 0 cuando el cambio no llego a ocurrir.
+
+    Se cuenta ANTES y DESPUES en vez de mirar si la tabla esta vacia: el
+    endpoint audita otras cosas, y una tabla vacia probaria menos.
+    """
+    from app.models.audit import AuditEvent
+
+    antes = await db_session.scalar(select(func.count()).select_from(AuditEvent))
+
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, prototype_design_rate="-5"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 422, respuesta.text
+
+    db_session.expire_all()
+    despues = await db_session.scalar(select(func.count()).select_from(AuditEvent))
+    assert despues == antes
