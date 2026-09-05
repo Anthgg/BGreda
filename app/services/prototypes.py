@@ -39,6 +39,11 @@ from app.models.audit import AuditAction
 from app.models.inventory import MovementType, StockBalance, StockLocation
 from app.models.masters import Product, ProductType
 from app.models.production import ProductionOrder
+from app.models.prototype_quotations import (
+    PrototypeQuotation,
+    PrototypeQuotationPaymentStatus,
+    PrototypeQuotationStatus,
+)
 from app.models.prototypes import (
     Prototype,
     PrototypeApproval,
@@ -537,7 +542,23 @@ class PrototypeService:
         if prototype.status is not PrototypeStatus.CREATED:
             issues.append(PrototypeIssue(PrototypeReadinessCode.INVALID_STATE))
 
-        if prototype.quotation_id is None:
+        # Dos vias, y en este orden. Desde 009K.1.1 una muestra nace de su
+        # propia cotizacion (CPR); las anteriores colgaban de una cotizacion de
+        # producto (CTZ) y siguen haciendolo. Preguntar primero por la nueva y
+        # despues por la vieja deja intactas las que ya existen, que es lo que
+        # hay que preservar: endurecerlas ahora las dejaria sin poder arrancar.
+        if prototype.prototype_quotation_id is not None:
+            cotizacion = await self._session.get(
+                PrototypeQuotation, prototype.prototype_quotation_id
+            )
+            emitida_y_pagada = (
+                cotizacion is not None
+                and cotizacion.status is PrototypeQuotationStatus.CONFIRMED
+                and cotizacion.payment_status is PrototypeQuotationPaymentStatus.PAID
+            )
+            if not emitida_y_pagada:
+                issues.append(PrototypeIssue(PrototypeReadinessCode.QUOTATION_UNPAID))
+        elif prototype.quotation_id is None:
             # Sin cotizacion no hay nada que cobrar, y sin cobro no se gasta
             # material. No es que falte un dato: es que no hay pedido.
             issues.append(PrototypeIssue(PrototypeReadinessCode.NO_QUOTATION))

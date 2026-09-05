@@ -56,6 +56,10 @@ class SequenceType(StrEnum):
     #: Fase 009K. Muestras fisicas (PRT-2026-000001). Contador propio: una
     #: muestra no es una orden y agotar unas no puede mover las otras.
     PROTOTYPE = "PROTOTYPE"
+    #: Fase 009K.1.1. Cotizaciones de prototipo (CPR-2026-000001). Talonario
+    #: propio: agotar cotizaciones de producto no puede mover el de muestras,
+    #: y son documentos distintos con destinatario distinto.
+    PROTOTYPE_QUOTE = "PROTOTYPE_QUOTE"
 
 
 class ResetPolicy(StrEnum):
@@ -110,7 +114,7 @@ class DocumentSequence(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', "
-            "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE')",
+            "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE', 'PROTOTYPE_QUOTE')",
             name="type_allowed",
         ),
         CheckConstraint(
