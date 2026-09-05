@@ -501,6 +501,7 @@ class PrototypeQuotationService:
             lines=[],
         )
         await self._aplicar(fila, datos)
+        fila.created_at = fila.updated_at = datetime.now(UTC)
         self._session.add(fila)
         await self._session.flush()
         self._audit.record_action(
@@ -619,6 +620,11 @@ class PrototypeQuotationService:
         )
         fila.status = PrototypeQuotationStatus.CONFIRMED
         fila.confirmed_at = datetime.now(UTC)
+        # Se fija a mano, como en `update_draft`. Tras el flush, SQLAlchemy
+        # expira las columnas que genera el servidor, y leer `updated_at`
+        # despues dispara una recarga: una consulta escondida detras de un
+        # acceso a atributo, que en sesion asincrona revienta.
+        fila.updated_at = fila.confirmed_at
         await self._session.flush()
 
         self._audit.record_action(
@@ -643,6 +649,7 @@ class PrototypeQuotationService:
             return fila
         fila.status = PrototypeQuotationStatus.CANCELLED
         fila.cancelled_at = datetime.now(UTC)
+        fila.updated_at = fila.cancelled_at
         await self._session.flush()
         self._audit.record_action(
             entity_type=ENTITY,
@@ -683,6 +690,7 @@ class PrototypeQuotationService:
         if muestra is None:
             muestra = await self._crear_muestra(fila, user=user)
 
+        fila.updated_at = datetime.now(UTC)
         await self._session.flush()
         self._audit.record_action(
             entity_type=ENTITY,
