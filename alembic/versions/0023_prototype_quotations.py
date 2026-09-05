@@ -66,6 +66,7 @@ def upgrade() -> None:
         sa.Column("confirmed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("cancelled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("product_id", sa.Integer(), nullable=True),
+        sa.Column("product_category_id", sa.Integer(), nullable=True),
         sa.Column("description", sa.String(length=200), nullable=False),
         sa.Column("quantity", sa.Integer(), nullable=False, server_default=sa.text("1")),
         sa.Column("width_cm", sa.Numeric(18, 6), nullable=True),
@@ -84,9 +85,6 @@ def upgrade() -> None:
         sa.Column(
             "mold_maker_days", sa.Numeric(18, 6), nullable=False, server_default=sa.text("0")
         ),
-        sa.Column("kiln_id", sa.Integer(), nullable=True),
-        sa.Column("firing_type", sa.String(length=8), nullable=True),
-        sa.Column("firing_batches", sa.Integer(), nullable=False, server_default=sa.text("0")),
         sa.Column("drying_days", sa.Numeric(18, 6), nullable=False, server_default=sa.text("0")),
         sa.Column(
             "adjustment_days", sa.Numeric(18, 6), nullable=False, server_default=sa.text("0")
@@ -122,8 +120,10 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["customer_id"], ["partners.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["product_id"], ["products.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["product_category_id"], ["product_categories.id"], ondelete="RESTRICT"
+        ),
         sa.ForeignKeyConstraint(["mold_maker_partner_id"], ["partners.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["kiln_id"], ["kilns.id"], ondelete="RESTRICT"),
         sa.UniqueConstraint("code", name="uq_prototype_quotations_code"),
         sa.CheckConstraint(
             "status IN ('DRAFT', 'CONFIRMED', 'CANCELLED')", name="pq_status_allowed"
@@ -131,17 +131,12 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "payment_status IN ('UNPAID', 'PAID')", name="pq_payment_status_allowed"
         ),
-        sa.CheckConstraint(
-            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')",
-            name="pq_firing_type_allowed",
-        ),
         sa.CheckConstraint("quantity > 0", name="pq_quantity_positive"),
         sa.CheckConstraint("design_days >= 0", name="pq_design_days_non_negative"),
         sa.CheckConstraint("artist_days >= 0", name="pq_artist_days_non_negative"),
         sa.CheckConstraint("mold_maker_days >= 0", name="pq_mold_maker_days_non_negative"),
         sa.CheckConstraint("drying_days >= 0", name="pq_drying_days_non_negative"),
         sa.CheckConstraint("adjustment_days >= 0", name="pq_adjustment_days_non_negative"),
-        sa.CheckConstraint("firing_batches >= 0", name="pq_firing_batches_non_negative"),
         sa.CheckConstraint(
             "status <> 'CONFIRMED' OR code IS NOT NULL", name="pq_confirmed_has_code"
         ),

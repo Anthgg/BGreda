@@ -5,13 +5,17 @@ cotizacion de producto obliga a un `commercial_factor > 0` por restriccion de
 esa tabla, y un prototipo no lleva factor: meterlo ahi con un 1 significaria
 «factor 1 aplicado», que no es lo mismo que «sin factor». Ademas habria que
 rellenar con ceros una quincena de columnas del costeo de produccion cuyo
-nombre coincide con el del prototipo pero cuyo significado no —el `firing_cost`
-de una pieza en serie no es el de una muestra—. Compartir tabla saldria mas
-caro que compartir servicios.
+nombre coincide con el del prototipo pero cuyo significado no. Compartir tabla
+saldria mas caro que compartir servicios.
 
 Lo que SI se comparte es todo lo demas: `Partner`, `SequenceService`,
-`CommercialSettings`, `Kiln`/`KilnRate`, `Product.cost`, la auditoria, el
-renderer de documentos y las dos politicas de dinero de `app/core/pricing.py`.
+`CommercialSettings`, `Product.cost`, la auditoria, el renderer de documentos
+—el MISMO PDF que una cotizacion de producto— y las dos politicas de dinero de
+`app/core/pricing.py`.
+
+Lo que NO participa es la quema. Lo que se cotiza aqui es la muestra en barro:
+no hay horno, ni tipo de quema, ni hornadas. `Kiln` y `KilnRate` siguen siendo
+del sistema de produccion y no entran en este documento.
 
 Dos ejes independientes, igual que en las cotizaciones normales: `status` dice
 en que punto comercial esta el documento y `payment_status` si se cobro. Una
@@ -50,10 +54,8 @@ from app.core.precision import (
 )
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
-from app.models.firings import FiringType
 
 if TYPE_CHECKING:
-    from app.models.firings import Kiln
     from app.models.masters import Partner, Product
 
 
@@ -108,6 +110,12 @@ class PrototypeQuotation(Base, TimestampMixin):
     product_id: Mapped[int | None] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), index=True
     )
+    #: A que familia pertenecera el producto que nazca de un concepto nuevo.
+    #: Es lo unico que el maestro exige y que la cotizacion no puede deducir:
+    #: elegirla por el cliente meteria las piezas en una categoria inventada.
+    product_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("product_categories.id", ondelete="RESTRICT")
+    )
     description: Mapped[str] = mapped_column(String(200), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
 
@@ -142,17 +150,10 @@ class PrototypeQuotation(Base, TimestampMixin):
         Numeric(18, 6), nullable=False, server_default=text("0")
     )
 
-    kiln_id: Mapped[int | None] = mapped_column(ForeignKey("kilns.id", ondelete="RESTRICT"))
-    #: El MISMO vocabulario que las quemas —LOW/HIGH—, y no uno propio. Un
-    #: segundo juego de nombres para lo mismo obliga a traducir en cada
-    #: frontera, y basta con que alguien olvide una traduccion para que la
-    #: tarifa no se encuentre. «Baja» y «Alta» son etiquetas de pantalla.
-    #:
-    #: Sin valor por defecto: elegir una en silencio cotizaria a una tarifa que
-    #: nadie escogio.
-    firing_type: Mapped[FiringType | None] = mapped_column(StrEnumType(FiringType, 8))
-    firing_batches: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-
+    # Sin horno, sin tipo de quema y sin hornadas: lo que se cotiza aqui es la
+    # muestra en BARRO, y una muestra en barro no pasa por el horno. Guardar
+    # esas columnas vacias daria a entender que algun dia significaron algo.
+    # `Kiln` y `KilnRate` siguen intactos para produccion.
     drying_days: Mapped[Decimal] = mapped_column(
         Numeric(18, 6), nullable=False, server_default=text("0")
     )
@@ -197,22 +198,16 @@ class PrototypeQuotation(Base, TimestampMixin):
     mold_maker: Mapped[Partner | None] = relationship(
         "Partner", foreign_keys=[mold_maker_partner_id], lazy="selectin"
     )
-    kiln: Mapped[Kiln | None] = relationship("Kiln", lazy="selectin")
 
     __table_args__ = (
         CheckConstraint("status IN ('DRAFT', 'CONFIRMED', 'CANCELLED')", name="pq_status_allowed"),
         CheckConstraint("payment_status IN ('UNPAID', 'PAID')", name="pq_payment_status_allowed"),
-        CheckConstraint(
-            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')",
-            name="pq_firing_type_allowed",
-        ),
         CheckConstraint("quantity > 0", name="pq_quantity_positive"),
         CheckConstraint("design_days >= 0", name="pq_design_days_non_negative"),
         CheckConstraint("artist_days >= 0", name="pq_artist_days_non_negative"),
         CheckConstraint("mold_maker_days >= 0", name="pq_mold_maker_days_non_negative"),
         CheckConstraint("drying_days >= 0", name="pq_drying_days_non_negative"),
         CheckConstraint("adjustment_days >= 0", name="pq_adjustment_days_non_negative"),
-        CheckConstraint("firing_batches >= 0", name="pq_firing_batches_non_negative"),
         # Un documento emitido sin numero no se puede referenciar; uno anulado
         # antes de emitirse nunca llego a tenerlo.
         CheckConstraint("status <> 'CONFIRMED' OR code IS NOT NULL", name="pq_confirmed_has_code"),

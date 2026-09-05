@@ -8,8 +8,8 @@ El documento vive en tres tiempos y cada uno tiene una autoridad distinta:
   «lo acordamos asi» de «lo hereda», y al cambiar la tarifa de la casa el
   borrador dejaria de seguirla sin que nadie se enterara.
 - **Confirmada.** Se congela todo lo que hizo falta para llegar al numero:
-  tarifas efectivas, costos de material, tarifa de horno, IGV, moneda y el
-  paso de redondeo con su origen. A partir de ahi el documento no cambia
+  tarifas efectivas, costos de material, IGV, moneda y el paso de redondeo
+  con su origen. A partir de ahi el documento no cambia
   aunque cambie el mundo.
 - **Pagada.** Habilita la produccion y NO gasta un gramo. El material se
   consume al arrancar la muestra, que es cuando de verdad sale del almacen.
@@ -21,11 +21,11 @@ eso `confirm` recalcula entero en vez de creerse lo que vio la pantalla.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,8 +39,7 @@ from app.core.prototype_pricing import (
     price_prototype,
 )
 from app.models.audit import AuditAction
-from app.models.firings import FiringType, Kiln, KilnRate
-from app.models.masters import Partner, Product
+from app.models.masters import Partner, Product, ProductType
 from app.models.prototype_quotations import (
     PrototypeQuotation,
     PrototypeQuotationMaterial,
@@ -56,12 +55,14 @@ from app.models.prototypes import (
 from app.models.sequence import SequenceType
 from app.models.settings import CommercialSettings
 from app.schemas.auth import AuthenticatedUser
+from app.schemas.masters import ProductCreate
 from app.schemas.prototype_quotations import (
     PrototypeCostBreakdownOut,
     PrototypeQuotationMaterialOut,
     PrototypeQuotationOut,
 )
 from app.services.audit import AuditRecorder
+from app.services.masters import MasterDataService
 from app.services.sequences import SequenceService
 
 ZERO = Decimal(0)
@@ -71,6 +72,10 @@ ENTITY = "prototype_quotation"
 #: guarda junto al valor porque «0.50» sin su origen no explica nada dentro de
 #: dos anos, cuando la configuracion diga otra cosa.
 ROUNDING_SOURCE_SETTINGS = "COMMERCIAL_SETTINGS"
+
+#: La unidad del producto que nace de un prototipo. Una muestra se cuenta
+#: por piezas, y es la unica unidad de conteo del catalogo.
+UNIDAD_DE_CONTEO = "unit"
 
 #: El mismo mapa que el Cotizador principal. `US$` y no `$`: en Peru un `$`
 #: suelto se lee como sol tan a menudo como como dolar, y aqui la diferencia
@@ -125,15 +130,19 @@ class PrototypeQuotationIncompleteError(APIError):
     message = "Faltan datos para emitir la cotizacion de prototipo"
 
 
-class PrototypeQuotationFiringRateMissingError(APIError):
-    """Hay hornadas pero el horno no tiene tarifa vigente para ese tipo.
+class PrototypeQuotationProductCategoryRequiredError(APIError):
+    """Un concepto nuevo tiene que decir a que familia pertenecera.
 
-    Cotizar con cero seria regalar la quema; elegir otra tarifa, inventarla.
+    Se exige al EMITIR y no al cobrar: la categoria es lo unico que el maestro
+    de productos pide y que la cotizacion no puede deducir, y descubrirlo con el
+    dinero ya cobrado dejaria un documento firmado que no puede entrar a
+    produccion. Elegir una por el usuario meteria la pieza en una familia que
+    nadie escogio.
     """
 
     status_code = 422
-    code = "PROTOTYPE_QUOTATION_FIRING_RATE_MISSING"
-    message = "El horno no tiene tarifa vigente para el tipo de quema elegido"
+    code = "PROTOTYPE_QUOTATION_PRODUCT_CATEGORY_REQUIRED"
+    message = "Indique la familia del producto antes de emitir un concepto nuevo"
 
 
 class PrototypeQuotationMaterialCostMissingError(APIError):
@@ -201,35 +210,6 @@ class PrototypeQuotationService:
                 details=[{"code": "COMMERCIAL_SETTINGS_MISSING"}]
             )
         return fila
-
-    async def _firing_rate(
-        self, kiln_id: int | None, firing_type: FiringType | None, *, momento: date
-    ) -> tuple[Decimal, int]:
-        """Tarifa vigente y dias por hornada del horno elegido.
-
-        Ambos salen del maestro. Los «3 dias el chico y 4 el grande» de la
-        reunion ya viven en `Kiln.firing_days_per_batch`: repetirlos aqui como
-        constante seria una segunda verdad que se desactualiza sola.
-        """
-        if kiln_id is None or firing_type is None:
-            return ZERO, 0
-        horno = await self._session.get(Kiln, kiln_id)
-        if horno is None:
-            raise PrototypeQuotationIncompleteError(details=[{"code": "KILN_NOT_FOUND"}])
-        tarifa = await self._session.scalar(
-            select(KilnRate.rate)
-            .where(
-                KilnRate.kiln_id == kiln_id,
-                KilnRate.firing_type == firing_type,
-                KilnRate.valid_from <= momento,
-                or_(KilnRate.valid_to.is_(None), KilnRate.valid_to > momento),
-            )
-            .order_by(KilnRate.valid_from.desc(), KilnRate.id.desc())
-            .limit(1)
-        )
-        if tarifa is None:
-            raise PrototypeQuotationFiringRateMissingError()
-        return tarifa, horno.firing_days_per_batch
 
     async def _material_inputs(
         self, fila: PrototypeQuotation, *, congelado: bool
@@ -319,8 +299,6 @@ class PrototypeQuotationService:
             fixed_cost = Decimal(str(congelados["fixed_cost"]))
             tax_percent = Decimal(str(congelados["tax_percent"]))
             rounding_step = Decimal(str(congelados["rounding_step"]))
-            firing_rate = Decimal(str(congelados["firing_rate"]))
-            firing_days_per_batch = int(congelados["firing_days_per_batch"])
             # De la foto, no de la fila: la moneda forma parte del precio, y un
             # documento emitido tiene que volver a valorarse con la que uso
             # aunque alguien toque la columna despues.
@@ -354,9 +332,6 @@ class PrototypeQuotationService:
             )
             tax_percent = ajustes.tax_percent if ajustes.tax_percent is not None else ZERO
             rounding_step = ajustes.rounding_step
-            firing_rate, firing_days_per_batch = await self._firing_rate(
-                fila.kiln_id, fila.firing_type, momento=momento
-            )
             # `_aplicar` ya escribio la eleccion. El respaldo cubre una fila que
             # nunca paso por el, no una moneda que nadie escogio.
             moneda, tasa_cambio = self._resolver_moneda(
@@ -372,9 +347,6 @@ class PrototypeQuotationService:
             mold_maker_price=mold_price,
             mold_maker_days=fila.mold_maker_days,
             materials=await self._material_inputs(fila, congelado=congelado),
-            firing_rate=firing_rate,
-            firing_batches=fila.firing_batches,
-            firing_days_per_batch=firing_days_per_batch,
             drying_days=fila.drying_days,
             adjustment_days=fila.adjustment_days,
             fixed_cost=fixed_cost,
@@ -421,6 +393,14 @@ class PrototypeQuotationService:
             else None
         )
         por_producto = {linea.product_id: linea for linea in fila.lines}
+        # La identidad del producto sale del maestro, no de la cotizacion: si
+        # todavia no existe, la pantalla tiene que poder decir «pendiente» en
+        # vez de inventar un codigo.
+        producto = (
+            await self._session.get(Product, fila.product_id)
+            if fila.product_id is not None
+            else None
+        )
 
         return PrototypeQuotationOut(
             id=fila.id,
@@ -433,6 +413,9 @@ class PrototypeQuotationService:
             customer_id=fila.customer_id,
             customer_name=fila.customer_name_snapshot,
             product_id=fila.product_id,
+            product_category_id=fila.product_category_id,
+            product_code=producto.internal_reference if producto else None,
+            product_name=producto.name if producto else None,
             description=fila.description,
             quantity=fila.quantity,
             width_cm=fila.width_cm,
@@ -448,9 +431,6 @@ class PrototypeQuotationService:
             mold_maker_partner_id=fila.mold_maker_partner_id,
             mold_maker_price_override=fila.mold_maker_price_override,
             mold_maker_days=fila.mold_maker_days,
-            kiln_id=fila.kiln_id,
-            firing_type=fila.firing_type,
-            firing_batches=fila.firing_batches,
             drying_days=fila.drying_days,
             adjustment_days=fila.adjustment_days,
             fixed_cost_override=fila.fixed_cost_override,
@@ -467,7 +447,6 @@ class PrototypeQuotationService:
                 artist_cost=costeo.artist_cost,
                 mold_maker_cost=costeo.mold_maker_cost,
                 materials_cost=costeo.materials_cost,
-                firing_cost=costeo.firing_cost,
                 fixed_cost=costeo.fixed_cost,
                 base_cost=costeo.base_cost,
                 raw_net_total=costeo.raw_net_total,
@@ -487,13 +466,10 @@ class PrototypeQuotationService:
                 design_rate=entrada.design_rate,
                 artist_rate=entrada.artist_rate,
                 mold_maker_price=entrada.mold_maker_price,
-                firing_rate=entrada.firing_rate,
-                firing_days_per_batch=entrada.firing_days_per_batch,
                 design_days=costeo.design_days,
                 artist_days=costeo.artist_days,
                 mold_maker_days=costeo.mold_maker_days,
                 drying_days=costeo.drying_days,
-                firing_days=costeo.firing_days,
                 adjustment_days=costeo.adjustment_days,
                 estimated_days=costeo.estimated_days,
                 target_date=costeo.target_date,
@@ -661,6 +637,11 @@ class PrototypeQuotationService:
             raise PrototypeQuotationIncompleteError(details=[{"code": "CUSTOMER_REQUIRED"}])
         if not fila.description.strip():
             raise PrototypeQuotationIncompleteError(details=[{"code": "DESCRIPTION_REQUIRED"}])
+        # Un concepto nuevo se convertira en producto maestro al cobrar, y el
+        # maestro exige familia. Pedirla aqui evita emitir un documento que no
+        # podria entrar a produccion.
+        if fila.product_id is None and fila.product_category_id is None:
+            raise PrototypeQuotationProductCategoryRequiredError()
 
         ajustes = await self._settings()
         momento = (fila.created_at or datetime.now(UTC)).date()
@@ -765,6 +746,13 @@ class PrototypeQuotationService:
             fila.payment_status = PrototypeQuotationPaymentStatus.PAID
             fila.paid_at = datetime.now(UTC)
 
+        # Un concepto nuevo se convierte en producto AQUI y no antes. Una
+        # cotizacion que nadie acepto ni pago no puede ensuciar el maestro con
+        # piezas que quiza no se fabriquen nunca.
+        if fila.product_id is None:
+            producto = await self._materializar_producto(fila, user=user)
+            fila.product_id = producto.id
+
         if muestra is None:
             muestra = await self._crear_muestra(fila, user=user)
 
@@ -779,6 +767,58 @@ class PrototypeQuotationService:
             metadata={"event": "PAID", "prototype_id": muestra.id},
         )
         return fila, muestra
+
+    async def _materializar_producto(
+        self, fila: PrototypeQuotation, *, user: AuthenticatedUser
+    ) -> Product:
+        """Da de alta el producto terminado que nace de un concepto pagado.
+
+        El codigo NO se inventa aqui: se pide a `MasterDataService.create_product`,
+        que es la misma puerta por la que entra un alta manual. De ahi salen la
+        secuencia (`PRODUCT_50` -> `LAB50xxx` para producto terminado), la
+        unicidad, la concurrencia y el registro de auditoria. Un segundo
+        generador daria dos series que algun dia se cruzan.
+
+        Del documento solo viaja lo que es del maestro: como se llama la pieza,
+        a que familia pertenece y cuanto mide. Nada del dinero —ni tarifas, ni
+        IGV, ni tasa de cambio, ni totales, ni el cliente— porque eso describe
+        UNA venta y no el producto.
+        """
+        if fila.product_category_id is None:
+            raise PrototypeQuotationProductCategoryRequiredError()
+
+        maestros = MasterDataService(self._session, self._audit, self._sequences)
+        producto = await maestros.create_product(
+            ProductCreate(
+                name=fila.description,
+                product_type=ProductType.FINISHED_PRODUCT,
+                product_category_id=fila.product_category_id,
+                # Una muestra se cuenta por piezas. Es la unica unidad de
+                # conteo del catalogo, y sin unidad el maestro rechaza el alta.
+                base_uom_code=UNIDAD_DE_CONTEO,
+                # Las medidas acordadas sirven de punto de partida del maestro.
+                # El costo NO: el del prototipo incluye dias de diseno que no
+                # se repiten en la segunda pieza.
+                width=fila.width_cm,
+                height=fila.height_cm,
+                length=fila.length_cm,
+                depth=fila.depth_cm,
+            ),
+            user,
+        )
+        self._audit.record_action(
+            entity_type=ENTITY,
+            entity_id=str(fila.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "event": "PRODUCT_MATERIALIZED",
+                "product_id": producto.id,
+                "internal_reference": producto.internal_reference,
+            },
+        )
+        return producto
 
     async def _crear_muestra(
         self, fila: PrototypeQuotation, *, user: AuthenticatedUser
@@ -841,8 +881,6 @@ def _snapshot(entrada: PrototypeCostingInput, costeo: PrototypeCosting) -> dict[
             "fixed_cost": str(entrada.fixed_cost),
             "tax_percent": str(entrada.tax_percent),
             "rounding_step": str(entrada.rounding_step),
-            "firing_rate": str(entrada.firing_rate),
-            "firing_days_per_batch": entrada.firing_days_per_batch,
             "currency": entrada.currency,
             "exchange_rate": (
                 str(entrada.exchange_rate) if entrada.exchange_rate is not None else None
@@ -853,7 +891,6 @@ def _snapshot(entrada: PrototypeCostingInput, costeo: PrototypeCosting) -> dict[
             "artist_cost": str(costeo.artist_cost),
             "mold_maker_cost": str(costeo.mold_maker_cost),
             "materials_cost": str(costeo.materials_cost),
-            "firing_cost": str(costeo.firing_cost),
             "fixed_cost": str(costeo.fixed_cost),
             "base_cost": str(costeo.base_cost),
             "raw_net_total": str(costeo.raw_net_total),
@@ -864,7 +901,6 @@ def _snapshot(entrada: PrototypeCostingInput, costeo: PrototypeCosting) -> dict[
             "artist": str(costeo.artist_days),
             "mold_maker": str(costeo.mold_maker_days),
             "drying": str(costeo.drying_days),
-            "firing": costeo.firing_days,
             "adjustment": str(costeo.adjustment_days),
             "total": str(costeo.estimated_days),
         },

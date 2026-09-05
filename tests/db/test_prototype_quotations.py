@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,7 +23,9 @@ from pypdf import PdfReader
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.services.prototype_quotation_pdf
 from app.models.inventory import StockMovement
+from app.models.masters import Product
 from app.models.prototype_quotations import (
     PrototypeQuotation,
     PrototypeQuotationMaterial,
@@ -33,7 +36,12 @@ from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_quotation_builder_api import head
 
 COTIZADOR = "/api/v1/prototype-quotations"
-KILNS = "/api/v1/kilns"
+
+#: Se miran al importar, no dentro de una prueba asincrona: tocar el disco
+#: desde una corrutina bloquearia el bucle de eventos.
+_PLANTILLAS = Path(app.services.prototype_quotation_pdf.__file__).resolve().parents[1]
+_EXISTE_PLANTILLA_PROPIA = (_PLANTILLAS / "templates" / "prototype_quotations").exists()
+_EXISTE_DOCUMENTO_PROPIO = (_PLANTILLAS / "documents" / "prototype_quotation.py").exists()
 PARTNERS = "/api/v1/partners"
 
 
@@ -73,34 +81,6 @@ async def _pasta(
     return dict(respuesta.json())
 
 
-async def _horno(
-    api: httpx.AsyncClient, csrf: str, sufijo: str, *, baja: str = "350", dias: int = 3
-) -> dict[str, Any]:
-    respuesta = await api.post(
-        KILNS,
-        json={"name": f"Horno prototipo{sufijo}", "capacity_volume_cm3": "1000000"},
-        headers=head(csrf),
-    )
-    assert respuesta.status_code == 201, respuesta.text
-    horno = respuesta.json()
-    for tipo, importe in (("LOW", baja), ("HIGH", "600")):
-        creada = await api.post(
-            f"{KILNS}/{horno['id']}/rates",
-            json={"firing_type": tipo, "rate": importe, "valid_from": "2026-01-01"},
-            headers=head(csrf),
-        )
-        assert creada.status_code == 201, creada.text
-    if dias != horno.get("firing_days_per_batch"):
-        editado = await api.put(
-            f"{KILNS}/{horno['id']}",
-            json={"firing_days_per_batch": dias},
-            headers=head(csrf),
-        )
-        if editado.status_code == 200:
-            horno = editado.json()
-    return dict(horno)
-
-
 async def _ajustes(db_session: AsyncSession, **valores: Any) -> None:
     """Escribe la configuracion comercial de la casa."""
     fila = await db_session.scalar(select(CommercialSettings).limit(1))
@@ -110,13 +90,18 @@ async def _ajustes(db_session: AsyncSession, **valores: Any) -> None:
     await db_session.commit()
 
 
-async def _caso_excel(
+async def _caso_referencia(
     api: httpx.AsyncClient, csrf: str, db_session: AsyncSession, sufijo: str
 ) -> dict[str, Any]:
-    """El caso canonico del Excel v2, montado con maestros reales.
+    """El caso de referencia, montado con maestros reales.
 
-    3 dias de diseno a 80, 2 de artista a 100, 1.25 kg de pasta a 8/kg, una
-    hornada baja a 350 y un dia de secado. Debe dar 800 / 144 / 944 / 9.
+    3 dias de diseno a 80, 2 de artista a 100, 1.25 kg de pasta a 8/kg y un dia
+    de secado. Debe dar 450 / 81 / 531 / 6.
+
+    El ejemplo del Excel v2 daba 800 / 144 / 944 / 9 porque incluia una hornada
+    de 350 y 3 dias de quema. Una regla de negocio posterior saco la quema del
+    Cotizador de Prototipos —lo que se cotiza es la muestra en BARRO—, asi que
+    ese fixture dejo de describir el contrato.
     """
     await _ajustes(
         db_session,
@@ -130,9 +115,10 @@ async def _caso_excel(
     )
     cliente = await _cliente(api, csrf, sufijo)
     pasta = await _pasta(api, csrf, sufijo)
-    horno = await _horno(api, csrf, sufijo)
+    familia = await create_category(api, csrf, f"Piezas{sufijo}")
     return {
         "customer_id": cliente["id"],
+        "product_category_id": familia["id"],
         "description": "Taza personalizada",
         "quantity": 1,
         "width_cm": "15",
@@ -140,9 +126,6 @@ async def _caso_excel(
         "height_cm": "20",
         "design_days": "3",
         "artist_days": "2",
-        "kiln_id": horno["id"],
-        "firing_type": "LOW",
-        "firing_batches": 1,
         "drying_days": "1",
         "materials": [
             {
@@ -152,7 +135,7 @@ async def _caso_excel(
             }
         ],
         "_pasta": pasta,
-        "_horno": horno,
+        "_familia": familia,
     }
 
 
@@ -223,7 +206,6 @@ async def test_el_esquema_tiene_las_tablas_columnas_y_restricciones(
     for esperada in (
         "pq_status_allowed",
         "pq_payment_status_allowed",
-        "pq_firing_type_allowed",
         "pq_quantity_positive",
         "pq_confirmed_has_code",
     ):
@@ -295,11 +277,11 @@ async def test_la_muestra_gano_el_vinculo_sin_perder_el_viejo(
 # El caso del Excel, extremo a extremo
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_el_caso_del_excel_da_800_144_944_y_9_dias_por_la_api(
+async def test_el_caso_de_referencia_da_450_81_531_y_6_dias_por_la_api(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """EXCEL_FIXTURE por el servicio completo, no solo por el motor puro."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_excel")
+    """PROTOTYPE_REFERENCE por el servicio completo, no solo por el motor puro."""
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_referencia")
     respuesta = await api.post(
         f"{COTIZADOR}/preview", json=_payload(caso), headers=head(admin_csrf)
     )
@@ -309,12 +291,14 @@ async def test_el_caso_del_excel_da_800_144_944_y_9_dias_por_la_api(
     assert Decimal(costeo["design_cost"]) == Decimal("240.00")
     assert Decimal(costeo["artist_cost"]) == Decimal("200.00")
     assert Decimal(costeo["materials_cost"]) == Decimal("10.00")
-    assert Decimal(costeo["firing_cost"]) == Decimal("350.00")
-    assert Decimal(costeo["base_cost"]) == Decimal("800.00")
-    assert Decimal(costeo["commercial_net_total"]) == Decimal("800.00")
-    assert Decimal(costeo["commercial_tax_total"]) == Decimal("144.00")
-    assert Decimal(costeo["commercial_gross_total"]) == Decimal("944.00")
-    assert Decimal(costeo["estimated_days"]) == Decimal(9)
+    assert Decimal(costeo["base_cost"]) == Decimal("450.00")
+    assert Decimal(costeo["commercial_net_total"]) == Decimal("450.00")
+    assert Decimal(costeo["commercial_tax_total"]) == Decimal("81.00")
+    assert Decimal(costeo["commercial_gross_total"]) == Decimal("531.00")
+    assert Decimal(costeo["estimated_days"]) == Decimal(6)
+    # PROTOTYPE_QUOTATION_FIRING_COST / _FIRING_DAYS: ni siquiera hay campo.
+    assert "firing_cost" not in costeo
+    assert "firing_days" not in costeo
 
 
 @pytest.mark.asyncio
@@ -322,7 +306,7 @@ async def test_la_previsualizacion_no_deja_rastro(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """Mirar un precio no puede gastar un correlativo ni dejar borradores."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_prev")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_prev")
     antes = await db_session.scalar(select(func.count()).select_from(PrototypeQuotation))
 
     for _ in range(3):
@@ -347,7 +331,7 @@ async def test_un_borrador_sin_tarifa_pactada_sigue_a_la_configuracion(
     Copiar el valor por defecto dentro del borrador lo habria dejado anclado a
     la tarifa del dia que se creo, sin que nadie lo notara.
     """
-    caso = await _caso_excel(api, admin_csrf, db_session, "_vivo")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_vivo")
     creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text
     identificador = creada.json()["id"]
@@ -365,7 +349,7 @@ async def test_un_borrador_sin_tarifa_pactada_sigue_a_la_configuracion(
 async def test_una_tarifa_pactada_gana_a_la_de_la_casa(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    caso = await _caso_excel(api, admin_csrf, db_session, "_pactada")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_pactada")
     payload = _payload(caso) | {"design_rate_override": "90"}
     creada = await api.post(COTIZADOR, json=payload, headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text
@@ -386,7 +370,7 @@ async def test_la_unidad_la_manda_el_catalogo_y_no_el_navegador(
     El esquema ni siquiera acepta una unidad de entrada. Si la aceptara, se
     podrian cotizar kilos de algo que se lleva en gramos.
     """
-    caso = await _caso_excel(api, admin_csrf, db_session, "_uom")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_uom")
     payload = _payload(caso)
     payload["materials"][0]["uom_code"] = "g"
 
@@ -400,7 +384,7 @@ async def test_la_unidad_la_manda_el_catalogo_y_no_el_navegador(
 async def _confirmada(
     api: httpx.AsyncClient, csrf: str, db_session: AsyncSession, sufijo: str
 ) -> dict[str, Any]:
-    caso = await _caso_excel(api, csrf, db_session, sufijo)
+    caso = await _caso_referencia(api, csrf, db_session, sufijo)
     creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(csrf))
     assert creada.status_code == 201, creada.text
     confirmada = await api.post(f"{COTIZADOR}/{creada.json()['id']}/confirm", headers=head(csrf))
@@ -427,7 +411,7 @@ async def test_al_emitir_se_congela_todo_lo_que_hizo_falta_para_el_numero(
     assert Decimal(congelado["design_rate"]) == Decimal(80)
     assert Decimal(congelado["rounding_step"]) == Decimal("0.50")
     assert fila.rounding_source_snapshot == "COMMERCIAL_SETTINGS"
-    assert fila.commercial_gross_total == Decimal("944.00")
+    assert fila.commercial_gross_total == Decimal("531.00")
 
     # El costo del material queda escrito EN SU LINEA.
     lineas = list(
@@ -446,7 +430,7 @@ async def test_al_emitir_se_congela_todo_lo_que_hizo_falta_para_el_numero(
 async def test_un_borrador_no_tiene_todavia_el_costo_del_material_congelado(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    caso = await _caso_excel(api, admin_csrf, db_session, "_nofreeze")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_nofreeze")
     creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
     db_session.expire_all()
     lineas = list(
@@ -491,7 +475,6 @@ async def test_lo_emitido_no_cambia_aunque_cambie_el_mundo(
         "design_cost",
         "artist_cost",
         "materials_cost",
-        "firing_cost",
         "base_cost",
         "commercial_net_total",
         "commercial_tax_total",
@@ -528,7 +511,7 @@ async def test_veinte_emisiones_simultaneas_dan_veinte_codigos_distintos(
     Se prueba el mecanismo real: veinte confirmaciones a la vez contra el
     mismo talonario. Serializarlas desde la prueba no demostraria nada.
     """
-    caso = await _caso_excel(api, admin_csrf, db_session, "_conc")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_conc")
     borradores = []
     for _ in range(20):
         creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
@@ -621,7 +604,7 @@ async def test_una_pagada_no_se_anula(
 async def test_un_borrador_no_se_descarga(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    caso = await _caso_excel(api, admin_csrf, db_session, "_pdfdraft")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_pdfdraft")
     creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
     respuesta = await api.get(f"{COTIZADOR}/{creada.json()['id']}/pdf", headers=head(admin_csrf))
     assert respuesta.status_code == 409, respuesta.text
@@ -655,12 +638,16 @@ async def test_el_pdf_ensena_el_precio_y_no_como_se_compone(
     assert documento["code"] in texto
     assert "Desarrollo de prototipo" in texto
     # Los totales del papel son los del documento.
-    assert "944.00" in texto
-    assert "800.00" in texto
+    assert "531.00" in texto
+    assert "450.00" in texto
 
     # Y nada de la cocina interna.
-    for interno in ("80.00", "Tarifa", "KilnRate", "cost_snapshot", "design_rate", "350.00"):
+    for interno in ("80.00", "Tarifa", "cost_snapshot", "design_rate", "240.00", "200.00"):
         assert interno not in texto, interno
+
+    # Ni la quema, que ya no participa en este documento.
+    for quema in ("Horno", "Quema", "Hornada", "hornada"):
+        assert quema not in texto, quema
 
 
 @pytest.mark.asyncio
@@ -684,7 +671,7 @@ async def test_el_pdf_de_una_emitida_no_cambia_aunque_cambie_la_configuracion(
     texto_despues = "\n".join(
         p.extract_text() or "" for p in PdfReader(io.BytesIO(segundo.content)).pages
     )
-    assert "944.00" in texto_despues
+    assert "531.00" in texto_despues
     assert texto_antes == texto_despues
 
 
@@ -713,7 +700,7 @@ async def test_el_taller_no_cotiza_prototipos(
     """Poner un precio es administracion, igual que en el Cotizador de producto."""
     from tests.db.test_prototypes import _como_operario
 
-    caso = await _caso_excel(api, admin_csrf, db_session, "_rbac")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_rbac")
     operario = await _como_operario(api)
     respuesta = await api.post(COTIZADOR, json=_payload(caso), headers=head(operario))
     assert respuesta.status_code == 403, respuesta.text
@@ -810,7 +797,7 @@ async def test_por_omision_la_cotizacion_de_prototipo_sale_en_la_moneda_de_la_ca
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """CURRENCY_DEFAULT: no mandar moneda sigue tomando la de Configuracion."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_defecto")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_defecto")
 
     vista = await api.post(f"{COTIZADOR}/preview", json=_payload(caso), headers=head(admin_csrf))
     assert vista.status_code == 200, vista.text
@@ -818,8 +805,8 @@ async def test_por_omision_la_cotizacion_de_prototipo_sale_en_la_moneda_de_la_ca
 
     assert cuerpo["currency_code"] == "PEN"
     assert cuerpo["exchange_rate"] is None
-    assert Decimal(cuerpo["costing"]["raw_net_total"]) == Decimal(800)
-    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(944)
+    assert Decimal(cuerpo["costing"]["raw_net_total"]) == Decimal(450)
+    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(531)
 
 
 @pytest.mark.asyncio
@@ -828,11 +815,11 @@ async def test_se_puede_cotizar_un_prototipo_en_dolares(
 ) -> None:
     """CURRENCY_PARITY: la misma capacidad comercial que el Cotizador principal.
 
-    800 soles a 4.00 son 200 dolares; IGV 36; total 236. El costo sigue en
+    450 soles a 4.50 son 100 dolares; IGV 18; total 118. El costo sigue en
     soles porque en soles se paga al artista.
     """
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_usd")
-    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_usd")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4.5"}
 
     vista = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
     assert vista.status_code == 200, vista.text
@@ -840,10 +827,10 @@ async def test_se_puede_cotizar_un_prototipo_en_dolares(
 
     assert cuerpo["currency_code"] == "USD"
     assert cuerpo["currency_symbol"] == "US$"
-    assert Decimal(cuerpo["exchange_rate"]) == Decimal(4)
-    assert Decimal(cuerpo["costing"]["base_cost"]) == Decimal(800)
-    assert Decimal(cuerpo["costing"]["raw_net_total"]) == Decimal(200)
-    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(236)
+    assert Decimal(cuerpo["exchange_rate"]) == Decimal("4.5")
+    assert Decimal(cuerpo["costing"]["base_cost"]) == Decimal(450)
+    assert Decimal(cuerpo["costing"]["raw_net_total"]) == Decimal(100)
+    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(118)
 
 
 @pytest.mark.asyncio
@@ -851,7 +838,7 @@ async def test_en_dolares_sin_tipo_de_cambio_no_se_cotiza(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """CURRENCY_GUARD: el mismo 422 y el mismo motivo que el Cotizador principal."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_sin_tasa")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_sin_tasa")
     datos = _payload(caso) | {"currency_code": "USD"}
 
     vista = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
@@ -865,7 +852,7 @@ async def test_en_soles_con_tipo_de_cambio_no_se_cotiza(
 ) -> None:
     """Una tasa guardada en un documento en soles describiria una conversion
     que nunca ocurrio."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_tasa_sobrante")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_tasa_sobrante")
     datos = _payload(caso) | {"currency_code": "PEN", "exchange_rate": "4"}
 
     vista = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
@@ -877,7 +864,7 @@ async def test_la_moneda_del_borrador_se_guarda_y_se_relee(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """La eleccion sobrevive al viaje a la base, no solo a la respuesta."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_persiste")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_persiste")
     datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "3.75"}
 
     creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
@@ -901,8 +888,8 @@ async def test_volver_a_soles_borra_la_tasa_del_borrador(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """Dejarla puesta describiria una conversion que ya no ocurre."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_vuelta")
-    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_vuelta")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4.5"}
     creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text
     identificador = creada.json()["id"]
@@ -930,8 +917,8 @@ async def test_al_emitir_se_congela_la_moneda_del_borrador_y_no_la_de_configurac
     Sobrescribir aqui con la moneda de la casa emitiria en soles un documento
     que se pacto en dolares: el numero no cambiaria y la etiqueta mentiria.
     """
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_congela")
-    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_congela")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4.5"}
     creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
     identificador = creada.json()["id"]
 
@@ -944,10 +931,10 @@ async def test_al_emitir_se_congela_la_moneda_del_borrador_y_no_la_de_configurac
     assert fila is not None
     await db_session.refresh(fila)
     assert fila.currency_code_snapshot == "USD"
-    assert fila.exchange_rate_snapshot == Decimal(4)
-    assert fila.commercial_gross_total == Decimal(236)
+    assert fila.exchange_rate_snapshot == Decimal("4.5")
+    assert fila.commercial_gross_total == Decimal(118)
     assert fila.cost_snapshot["effective"]["currency"] == "USD"
-    assert Decimal(fila.cost_snapshot["effective"]["exchange_rate"]) == Decimal(4)
+    assert Decimal(fila.cost_snapshot["effective"]["exchange_rate"]) == Decimal("4.5")
 
 
 @pytest.mark.asyncio
@@ -955,8 +942,8 @@ async def test_una_emitida_en_dolares_no_se_revalora_si_cambia_la_tasa_de_la_cas
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """El documento firmado no cambia de precio porque cambie el dolar."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_inmutable")
-    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_inmutable")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4.5"}
     creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
     identificador = creada.json()["id"]
     await api.post(f"{COTIZADOR}/{identificador}/confirm", json={}, headers=head(admin_csrf))
@@ -966,8 +953,8 @@ async def test_una_emitida_en_dolares_no_se_revalora_si_cambia_la_tasa_de_la_cas
     leida = await api.get(f"{COTIZADOR}/{identificador}", headers=head(admin_csrf))
     cuerpo = leida.json()
     assert cuerpo["currency_code"] == "USD"
-    assert Decimal(cuerpo["exchange_rate"]) == Decimal(4)
-    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(236)
+    assert Decimal(cuerpo["exchange_rate"]) == Decimal("4.5")
+    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(118)
 
 
 @pytest.mark.asyncio
@@ -975,8 +962,8 @@ async def test_el_listado_dice_en_que_moneda_esta_cada_total(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     """Sin esto el listado pondria `S/` delante de un importe en dolares."""
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_listado")
-    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_listado")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4.5"}
     creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
     identificador = creada.json()["id"]
     await api.post(f"{COTIZADOR}/{identificador}/confirm", json={}, headers=head(admin_csrf))
@@ -986,7 +973,7 @@ async def test_el_listado_dice_en_que_moneda_esta_cada_total(
     fila = next(item for item in listado.json()["items"] if item["id"] == identificador)
     assert fila["currency_code"] == "USD"
     assert fila["currency_symbol"] == "US$"
-    assert Decimal(fila["commercial_gross_total"]) == Decimal(236)
+    assert Decimal(fila["commercial_gross_total"]) == Decimal(118)
 
 
 @pytest.mark.asyncio
@@ -999,7 +986,7 @@ async def test_el_pdf_en_dolares_lleva_el_tipo_de_cambio_y_el_simbolo_correcto(
     numero se convirtio lo que esta firmando; y un `S/` delante de dolares es
     exactamente el error que nadie detecta hasta que ya esta firmado.
     """
-    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_pdf")
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_moneda_pdf")
     datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "3.75"}
     creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
     identificador = creada.json()["id"]
@@ -1013,4 +1000,468 @@ async def test_el_pdf_en_dolares_lleva_el_tipo_de_cambio_y_el_simbolo_correcto(
 
     assert "1 USD = S/ 3.75" in texto
     assert "US$" in texto
-    assert "S/ 236" not in texto
+    # 450 / 3.75 = 120 netos; con IGV 141.60, que sube al escalon 142.00.
+    assert "142.00" in texto
+    assert "S/ 142" not in texto
+
+
+# ---------------------------------------------------------------------------
+# El producto interno nace al COBRAR, no antes
+#
+# Una cotizacion que nadie acepto ni pago no puede ensuciar el maestro con
+# piezas que quiza no se fabriquen nunca. Y cuando por fin se cobra, el codigo
+# no se inventa aqui: sale de la misma puerta por la que entra un alta manual.
+# ---------------------------------------------------------------------------
+async def _contar_productos(db_session: AsyncSession) -> int:
+    return int(await db_session.scalar(select(func.count()).select_from(Product)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_un_borrador_de_concepto_nuevo_no_crea_producto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NEW_CONCEPT_PRODUCT_CREATED_AT_DRAFT: NO."""
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_prod_draft")
+    antes = await _contar_productos(db_session)
+
+    creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    assert creada.json()["product_id"] is None
+    assert creada.json()["product_code"] is None
+
+    db_session.expire_all()
+    assert await _contar_productos(db_session) == antes
+
+
+@pytest.mark.asyncio
+async def test_emitir_un_concepto_nuevo_tampoco_crea_producto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NEW_CONCEPT_PRODUCT_CREATED_AT_CONFIRM: NO.
+
+    Emitir congela el precio. Que el cliente reciba el papel no significa que
+    lo vaya a aceptar.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_prod_confirm")
+    creada = await api.post(COTIZADOR, json=_payload(caso), headers=head(admin_csrf))
+    antes = await _contar_productos(db_session)
+
+    emitida = await api.post(
+        f"{COTIZADOR}/{creada.json()['id']}/confirm", json={}, headers=head(admin_csrf)
+    )
+    assert emitida.status_code == 200, emitida.text
+    assert emitida.json()["product_id"] is None
+
+    db_session.expire_all()
+    assert await _contar_productos(db_session) == antes
+
+
+@pytest.mark.asyncio
+async def test_un_concepto_nuevo_sin_familia_no_se_puede_emitir(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """La categoria es lo unico que el maestro pide y la cotizacion no deduce.
+
+    Se exige al emitir y no al cobrar: descubrirlo con el dinero ya cobrado
+    dejaria un documento firmado que no puede entrar a produccion.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_prod_sinfam")
+    datos = _payload(caso)
+    datos.pop("product_category_id")
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+
+    emitida = await api.post(
+        f"{COTIZADOR}/{creada.json()['id']}/confirm", json={}, headers=head(admin_csrf)
+    )
+    assert emitida.status_code == 422, emitida.text
+    assert "PRODUCT_CATEGORY_REQUIRED" in emitida.text
+
+
+@pytest.mark.asyncio
+async def test_cobrar_un_concepto_nuevo_crea_el_producto_con_el_codigo_de_la_casa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NEW_CONCEPT_PRODUCT_MATERIALIZED_FOR_PRODUCTION: PASS.
+
+    Y el codigo lo emite la MISMA autoridad que un alta manual: la secuencia
+    PRODUCT_50 con prefijo LAB50. Un segundo generador daria dos series que
+    algun dia se cruzan.
+    """
+    documento = await _confirmada(api, admin_csrf, db_session, "_prod_paid")
+    antes = await _contar_productos(db_session)
+
+    cobrada = await api.post(
+        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
+    )
+    assert cobrada.status_code == 200, cobrada.text
+    cuerpo = cobrada.json()
+
+    db_session.expire_all()
+    assert await _contar_productos(db_session) == antes + 1
+
+    assert cuerpo["product_id"] is not None
+    assert cuerpo["product_code"] is not None
+    assert cuerpo["product_code"].startswith("LAB50")
+    # El nombre comercial del documento es el nombre inicial del producto.
+    assert cuerpo["product_name"] == "Taza personalizada"
+
+    producto = await db_session.get(Product, cuerpo["product_id"])
+    assert producto is not None
+    assert producto.product_type.value == "FINISHED_PRODUCT"
+    # Las medidas acordadas sirven de punto de partida del maestro...
+    assert producto.width == Decimal("15.000000")
+    assert producto.height == Decimal("20.000000")
+    # ...pero el dinero del prototipo no: incluye dias de diseno que no se
+    # repiten en la segunda pieza.
+    assert producto.cost is None
+    assert producto.sale_price is None
+
+    # PROTOTYPE_QUOTATION_PRODUCT_LINK / PHYSICAL_PROTOTYPE_PRODUCT_LINK:
+    # una sola identidad de producto.
+    muestra = await db_session.scalar(
+        select(Prototype).where(Prototype.prototype_quotation_id == documento["id"]).limit(1)
+    )
+    assert muestra is not None
+    assert muestra.product_id == cuerpo["product_id"]
+
+
+@pytest.mark.asyncio
+async def test_cobrar_dos_veces_no_crea_un_segundo_producto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PRODUCT_CREATION_ON_PAYMENT_IDEMPOTENT: PASS."""
+    documento = await _confirmada(api, admin_csrf, db_session, "_prod_retry")
+    primera = await api.post(
+        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
+    )
+    assert primera.status_code == 200, primera.text
+    db_session.expire_all()
+    antes = await _contar_productos(db_session)
+
+    segunda = await api.post(
+        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
+    )
+    assert segunda.status_code == 200, segunda.text
+
+    db_session.expire_all()
+    assert await _contar_productos(db_session) == antes
+    assert segunda.json()["product_id"] == primera.json()["product_id"]
+    assert segunda.json()["product_code"] == primera.json()["product_code"]
+    assert segunda.json()["prototype_id"] == primera.json()["prototype_id"]
+
+    muestras = await db_session.scalar(
+        select(func.count())
+        .select_from(Prototype)
+        .where(Prototype.prototype_quotation_id == documento["id"])
+    )
+    assert muestras == 1
+
+
+@pytest.mark.asyncio
+async def test_cobrar_un_prototipo_de_un_producto_existente_no_duplica_el_maestro(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """EXISTING_PRODUCT_DUPLICATED_ON_PAYMENT: NO.
+
+    Si la muestra reproduce una pieza que ya esta en el catalogo, pagar el
+    prototipo no puede darle un segundo codigo ni tocar el que tiene.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_prod_exist")
+    pieza = await create_product(
+        api,
+        admin_csrf,
+        product_category_id=caso["_familia"]["id"],
+        product_type="FINISHED_PRODUCT",
+        name="Taza de catalogo",
+        base_uom_code="unit",
+    )
+    assert pieza.status_code == 201, pieza.text
+    maestro = pieza.json()
+
+    creada = await api.post(
+        COTIZADOR,
+        json=_payload(caso) | {"product_id": maestro["id"]},
+        headers=head(admin_csrf),
+    )
+    assert creada.status_code == 201, creada.text
+    await api.post(f"{COTIZADOR}/{creada.json()['id']}/confirm", json={}, headers=head(admin_csrf))
+
+    db_session.expire_all()
+    antes = await _contar_productos(db_session)
+    cobrada = await api.post(
+        f"{COTIZADOR}/{creada.json()['id']}/mark-paid", json={}, headers=head(admin_csrf)
+    )
+    assert cobrada.status_code == 200, cobrada.text
+
+    db_session.expire_all()
+    assert await _contar_productos(db_session) == antes
+    assert cobrada.json()["product_id"] == maestro["id"]
+    assert cobrada.json()["product_code"] == maestro["internal_reference"]
+
+    # Y el maestro no cambia de nombre por haberse prototipado.
+    producto = await db_session.get(Product, maestro["id"])
+    assert producto is not None
+    assert producto.name == "Taza de catalogo"
+
+
+@pytest.mark.asyncio
+async def test_veinte_cobros_simultaneos_dan_un_producto_y_una_muestra(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PAYMENT_CONCURRENCY_DUPLICATE_PRODUCT: 0.
+
+    El `SELECT ... FOR UPDATE` de `get` serializa los cobros sobre la misma
+    fila. Sin el, veinte reintentos darian veinte codigos internos.
+    """
+    documento = await _confirmada(api, admin_csrf, db_session, "_prod_conc")
+    db_session.expire_all()
+    antes = await _contar_productos(db_session)
+
+    respuestas = await asyncio.gather(
+        *(
+            api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf))
+            for _ in range(20)
+        ),
+        return_exceptions=True,
+    )
+    correctas = [r for r in respuestas if isinstance(r, httpx.Response) and r.status_code == 200]
+    assert correctas, [str(r) for r in respuestas][:3]
+    # Ningun 500: un choque de concurrencia no puede salir como error interno.
+    assert not [r for r in respuestas if isinstance(r, httpx.Response) and r.status_code >= 500]
+
+    db_session.expire_all()
+    assert await _contar_productos(db_session) == antes + 1
+
+    identificadores = {r.json()["product_id"] for r in correctas}
+    assert len(identificadores) == 1
+
+    muestras = await db_session.scalar(
+        select(func.count())
+        .select_from(Prototype)
+        .where(Prototype.prototype_quotation_id == documento["id"])
+    )
+    assert muestras == 1
+
+
+@pytest.mark.asyncio
+async def test_materializar_el_producto_no_mueve_inventario(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PRODUCT_CREATION_STOCK_DELTA: 0.
+
+    Generar el producto, cobrar y crear la muestra no sacan un gramo del
+    almacen. El consumo es al ARRANCAR, y eso no ha pasado todavia.
+    """
+    documento = await _confirmada(api, admin_csrf, db_session, "_prod_stock")
+    antes = await db_session.scalar(select(func.count()).select_from(StockMovement))
+
+    cobrada = await api.post(
+        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
+    )
+    assert cobrada.status_code == 200, cobrada.text
+    assert cobrada.json()["product_id"] is not None
+
+    db_session.expire_all()
+    assert await db_session.scalar(select(func.count()).select_from(StockMovement)) == antes
+
+
+# ---------------------------------------------------------------------------
+# El documento es el MISMO que el de una cotizacion de producto
+#
+# Hubo una plantilla propia para el CPR. Extendia `base_document.html`, si, pero
+# redeclaraba el grid del cliente, la caja de totales y las tarjetas de
+# condiciones con clases propias: mismo membrete, otro sistema visual. Un CPR
+# tiene que ser hermano directo de un CTZ.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_el_pdf_del_prototipo_usa_la_plantilla_global_de_cotizaciones(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PROTOTYPE_PDF_USES_GLOBAL_QUOTATION_LAYOUT: PASS.
+
+    No se comprueba mirando: se comprueba que el render pasa por el MISMO
+    `QuotationPdfService.render_html` que dibuja un CTZ, y que en el papel
+    aparecen los rotulos que pone esa plantilla y no otra.
+    """
+    import inspect
+
+    import app.services.prototype_quotation_pdf as modulo
+
+    fuente = inspect.getsource(modulo)
+    # PROTOTYPE_PDF_SEPARATE_LAYOUT_CREATED: NO.
+    assert "get_template" not in fuente
+    assert "Environment(" not in fuente
+    assert "self._base.render_html(" in fuente
+
+    # PROTOTYPE_PDF_DUPLICATED_BASE_TEMPLATE: NO. La plantilla propia ya no existe.
+    assert not _EXISTE_PLANTILLA_PROPIA
+    assert not _EXISTE_DOCUMENTO_PROPIO
+
+    documento = await _confirmada(api, admin_csrf, db_session, "_pdfglobal")
+    respuesta = await api.get(f"{COTIZADOR}/{documento['id']}/pdf", headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    paginas = PdfReader(io.BytesIO(respuesta.content)).pages
+    texto = "\n".join(p.extract_text() or "" for p in paginas)
+
+    # Los rotulos son los de `quotations/quotation.html`, literalmente. Se
+    # comparan sin distinguir mayusculas porque el sistema documental las
+    # transforma al dibujar: lo que se afirma es el rotulo, no su caja.
+    plano = texto.lower()
+    for rotulo in (
+        "datos del cliente",
+        "descripción del producto",
+        "p. unitario",
+        "subtotal",
+        "total",
+        "página 1 de 1",
+    ):
+        assert rotulo in plano, rotulo
+
+    # Lo unico que cambia es el tipo de documento y el correlativo.
+    assert "COTIZACIÓN DE PROTOTIPO" in texto
+    assert documento["code"].startswith("CPR-")
+
+
+@pytest.mark.asyncio
+async def test_el_plazo_y_lo_acordado_salen_en_las_condiciones_del_documento_global(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Sin bloques inventados: van en la tarjeta de Condiciones Comerciales.
+
+    Son compromisos, no atributos de un producto de catalogo: en la tabla no
+    tendrian columna.
+    """
+    caso = await _caso_referencia(api, admin_csrf, db_session, "_pdfcond")
+    datos = _payload(caso) | {
+        "technical_specifications": {"finish": "Mate", "color": "Crema", "technique": "Torno"}
+    }
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    await api.post(f"{COTIZADOR}/{creada.json()['id']}/confirm", json={}, headers=head(admin_csrf))
+
+    respuesta = await api.get(f"{COTIZADOR}/{creada.json()['id']}/pdf", headers=head(admin_csrf))
+    assert respuesta.status_code == 200, respuesta.text
+    paginas = PdfReader(io.BytesIO(respuesta.content)).pages
+    texto = "\n".join(p.extract_text() or "" for p in paginas)
+
+    assert "Plazo estimado de desarrollo: 6 días" in texto
+    assert "Acabado: Mate" in texto
+    assert "Color: Crema" in texto
+    assert "Técnica: Torno" in texto
+
+
+# ---------------------------------------------------------------------------
+# Regresion documental: un CTZ y un CPR salen del mismo sistema de documentos
+#
+# La comprobacion que faltaba era mirar los dos papeles uno al lado del otro.
+# Hacerlo a mano exigia un CTZ valido, y un CTZ valido exige horno con factores
+# de ocupacion, receta activa y gramos por pieza: por eso no salia en un
+# navegador local. Pero la suite ya sabe sembrar todo eso, asi que la
+# comparacion deja de ser una captura de una tarde y pasa a ser una prueba.
+#
+# Ningun dato productivo participa: se siembra en el esquema de pruebas.
+# ---------------------------------------------------------------------------
+
+#: Los rotulos que imprime `base_document.html` con sus componentes. No son
+#: adornos: son las secciones del documento comercial de la casa. Si el CPR
+#: perdiera una, o el CTZ tuviera una que el CPR no tiene, serian dos sistemas
+#: visuales distintos con el mismo membrete —que es exactamente el defecto que
+#: esta correccion vino a arreglar.
+ESQUELETO_DOCUMENTAL = (
+    "Datos del Cliente",
+    "Descripción del Producto",
+    "Cant.",
+    "P. Unitario",
+    "Subtotal",
+    "IGV",
+    "TOTAL",
+    "Condiciones Comerciales",
+    "Página 1 de 1",
+)
+
+
+def _texto_pdf(contenido: bytes) -> str:
+    return "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(contenido)).pages)
+
+
+def _secciones(texto: str) -> set[str]:
+    """Que secciones del sistema documental aparecen en este papel.
+
+    Se compara en minusculas porque el sistema documental pone los titulos en
+    mayusculas por CSS: el rotulo se dibuja «DATOS DEL CLIENTE» aunque en la
+    plantilla diga «Datos del Cliente».
+    """
+    plano = texto.lower()
+    return {rotulo for rotulo in ESQUELETO_DOCUMENTAL if rotulo.lower() in plano}
+
+
+@pytest.mark.asyncio
+async def test_el_cpr_y_el_ctz_son_el_mismo_documento(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    """GLOBAL_PDF_BASE_REUSED: PASS. La regresion visual, comparada de verdad.
+
+    No se afirma que cada documento «contiene» los rotulos por separado, que
+    pasaria aunque a los dos les faltara la misma seccion. Se afirma que el
+    conjunto de secciones es EL MISMO conjunto, y que ese conjunto es el
+    completo.
+    """
+    from tests.db.test_quotation_pdf_api import _setup_confirmed_quotation
+
+    ctz = await _setup_confirmed_quotation(api, admin_csrf, db_session)
+    papel_ctz = await api.get(f"/api/v1/quotations/{ctz['id']}/pdf", headers=head(admin_csrf))
+    assert papel_ctz.status_code == 200, papel_ctz.text
+
+    cpr = await _confirmada(api, admin_csrf, db_session, "_regresion")
+    papel_cpr = await api.get(f"{COTIZADOR}/{cpr['id']}/pdf", headers=head(admin_csrf))
+    assert papel_cpr.status_code == 200, papel_cpr.text
+
+    # Quedan en disco para poder mirarlos, que era la peticion original.
+    (tmp_path / "CTZ.pdf").write_bytes(papel_ctz.content)
+    (tmp_path / "CPR.pdf").write_bytes(papel_cpr.content)
+
+    texto_ctz = _texto_pdf(papel_ctz.content)
+    texto_cpr = _texto_pdf(papel_cpr.content)
+
+    secciones_ctz = _secciones(texto_ctz)
+    assert secciones_ctz == set(ESQUELETO_DOCUMENTAL), sorted(
+        set(ESQUELETO_DOCUMENTAL) - secciones_ctz
+    )
+    # PROTOTYPE_PDF_SEPARATE_LAYOUT: NO.
+    assert _secciones(texto_cpr) == secciones_ctz
+
+    # Lo unico que cambia es de que documento se trata y su correlativo.
+    assert "COTIZACIÓN DE PROTOTIPO" in texto_cpr
+    assert "COTIZACIÓN DE PROTOTIPO" not in texto_ctz
+    assert cpr["code"].startswith("CPR-")
+    assert ctz["code"].startswith("CTZ-")
+
+
+@pytest.mark.asyncio
+async def test_el_cpr_no_ensena_al_cliente_lo_que_le_cuesta_al_taller(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """PROTOTYPE_INTERNAL_COST_LEAK: 0.
+
+    Un CTZ no le dice al cliente cuanto cuesta el barro; un CPR tampoco puede
+    decirle cuanto se le paga al artista. Lo que se vende es el desarrollo, y
+    su precio es uno solo.
+    """
+    documento = await _confirmada(api, admin_csrf, db_session, "_sinfugas")
+    papel = await api.get(f"{COTIZADOR}/{documento['id']}/pdf", headers=head(admin_csrf))
+    assert papel.status_code == 200, papel.text
+    texto = _texto_pdf(papel.content)
+
+    # Las tarifas del caso de referencia: 200 diseño, 150 artista, 100
+    # matricero, 30 fijos. Ninguna cifra intermedia sale en el papel.
+    for interno in ("200.00", "150.00", "100.00", "30.00"):
+        assert interno not in texto, interno
+    for rotulo in ("Diseño", "Artista", "Matricero", "Tarifa", "Costo", "Horno", "Quema"):
+        assert rotulo.lower() not in texto.lower(), rotulo
+
+    # Lo que si sale: el total acordado.
+    assert "531.00" in texto

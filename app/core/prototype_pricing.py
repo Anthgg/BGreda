@@ -20,6 +20,11 @@ De ahi salen tres reglas que no se pueden heredar de `price_line`:
 - **El matricero cuesta un precio FIJO.** Sus dias cuentan para el plazo, no
   multiplican su importe: `D13 = C13` en la hoja «Cotizador Prototipo». Es el
   error facil de este modelo, porque los otros dos conceptos si multiplican.
+- **La quema NO participa.** Lo que se cotiza aqui es la muestra en BARRO, y
+  una muestra en barro no pasa por el horno. La hoja del Excel si traia una
+  hornada, pero es una regla de negocio posterior la que manda: no hay tarifa
+  de horno, ni hornadas, ni dias de quema en el costo ni en el plazo. El
+  sistema de quemas sigue intacto para produccion; simplemente no entra aqui.
 - **La moneda de emision tampoco se reimplementa.** El costo se calcula siempre
   en soles —los materiales, las tarifas y el costo fijo estan en soles— y solo
   el NETO se lleva a la moneda del documento, con la misma
@@ -100,10 +105,6 @@ class PrototypeCostingInput:
 
     materials: tuple[PrototypeMaterialInput, ...]
 
-    firing_rate: Decimal
-    firing_batches: int
-    firing_days_per_batch: int
-
     drying_days: Decimal
     adjustment_days: Decimal
 
@@ -143,7 +144,6 @@ class PrototypeCosting:
     artist_cost: Decimal
     mold_maker_cost: Decimal
     materials_cost: Decimal
-    firing_cost: Decimal
     fixed_cost: Decimal
     #: La suma de los conceptos, SIEMPRE en soles. Es el costo, no el precio.
     base_cost: Decimal
@@ -173,7 +173,6 @@ class PrototypeCosting:
     artist_days: Decimal
     mold_maker_days: Decimal
     drying_days: Decimal
-    firing_days: int
     adjustment_days: Decimal
     estimated_days: Decimal
     target_date: date | None
@@ -198,14 +197,9 @@ def _validar(entrada: PrototypeCostingInput) -> None:
         ("tarifa de artista", entrada.artist_rate),
         ("precio del matricero", entrada.mold_maker_price),
         ("costo fijo", entrada.fixed_cost),
-        ("tarifa de quema", entrada.firing_rate),
     ):
         if valor < ZERO:
             raise PrototypePricingError(f"La {nombre} no puede ser negativa")
-    if entrada.firing_batches < 0:
-        raise PrototypePricingError("El numero de hornadas no puede ser negativo")
-    if entrada.firing_days_per_batch < 0:
-        raise PrototypePricingError("Los dias por hornada no pueden ser negativos")
     if entrada.tax_percent < ZERO:
         raise PrototypePricingError("El impuesto no puede ser negativo")
 
@@ -247,12 +241,10 @@ def price_prototype(entrada: PrototypeCostingInput) -> PrototypeCosting:
             )
         )
 
-    firing_cost = _money(entrada.firing_rate * entrada.firing_batches)
     fixed_cost = _money(entrada.fixed_cost)
 
-    base_cost = (
-        design_cost + artist_cost + mold_maker_cost + materials_cost + firing_cost + fixed_cost
-    )
+    # Sin quema: la muestra es de barro y no pasa por el horno.
+    base_cost = design_cost + artist_cost + mold_maker_cost + materials_cost + fixed_cost
 
     # Sin factor y sin margen: el neto de partida ES el costo base. Lo que si
     # se aplica es el escalon comercial, y una sola vez, sobre el bruto.
@@ -274,13 +266,11 @@ def price_prototype(entrada: PrototypeCostingInput) -> PrototypeCosting:
     )
     total_per_prototype = _money(commercial_gross_total / entrada.quantity)
 
-    firing_days = entrada.firing_days_per_batch * entrada.firing_batches
     estimated_days = (
         entrada.design_days
         + entrada.artist_days
         + entrada.mold_maker_days
         + entrada.drying_days
-        + Decimal(firing_days)
         + entrada.adjustment_days
     )
     target_date = (
@@ -294,7 +284,6 @@ def price_prototype(entrada: PrototypeCostingInput) -> PrototypeCosting:
         artist_cost=artist_cost,
         mold_maker_cost=mold_maker_cost,
         materials_cost=materials_cost,
-        firing_cost=firing_cost,
         fixed_cost=fixed_cost,
         base_cost=base_cost,
         raw_net_total=raw_net_total,
@@ -312,7 +301,6 @@ def price_prototype(entrada: PrototypeCostingInput) -> PrototypeCosting:
         artist_days=entrada.artist_days,
         mold_maker_days=entrada.mold_maker_days,
         drying_days=entrada.drying_days,
-        firing_days=firing_days,
         adjustment_days=entrada.adjustment_days,
         estimated_days=estimated_days,
         target_date=target_date,

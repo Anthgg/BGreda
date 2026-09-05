@@ -22,7 +22,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.firings import FiringType
 from app.models.prototype_quotations import (
     PrototypeQuotationPaymentStatus,
     PrototypeQuotationStatus,
@@ -49,6 +48,10 @@ class PrototypeQuotationDraftIn(_Strict):
 
     customer_id: int | None = Field(default=None, gt=0)
     product_id: int | None = Field(default=None, gt=0)
+    #: Solo para conceptos nuevos: a que familia ira el producto que nazca al
+    #: cobrar. No se puede deducir, y elegirla por el usuario meteria las
+    #: piezas en una categoria que nadie escogio.
+    product_category_id: int | None = Field(default=None, gt=0)
     description: str = Field(min_length=1, max_length=200)
     quantity: int = Field(default=1, gt=0)
 
@@ -78,12 +81,8 @@ class PrototypeQuotationDraftIn(_Strict):
     )
     mold_maker_days: Decimal = Field(default=Decimal(0), ge=0, max_digits=18, decimal_places=6)
 
-    kiln_id: int | None = Field(default=None, gt=0)
-    #: Sin valor por defecto a proposito: elegir BAJA en silencio cotizaria a
-    #: una tarifa que nadie escogio.
-    firing_type: FiringType | None = None
-    firing_batches: int = Field(default=0, ge=0)
-
+    # Sin horno, sin tipo de quema y sin hornadas: la muestra es de barro y no
+    # pasa por el horno. Admitirlos «por si acaso» invitaria a rellenarlos.
     drying_days: Decimal = Field(default=Decimal(0), ge=0, max_digits=18, decimal_places=6)
     adjustment_days: Decimal = Field(default=Decimal(0), ge=0, max_digits=18, decimal_places=6)
     fixed_cost_override: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=6)
@@ -145,7 +144,6 @@ class PrototypeCostBreakdownOut(BaseModel):
     artist_cost: Decimal
     mold_maker_cost: Decimal
     materials_cost: Decimal
-    firing_cost: Decimal
     fixed_cost: Decimal
     #: La suma de los conceptos, SIEMPRE en soles: es el costo, no el precio.
     base_cost: Decimal
@@ -179,14 +177,11 @@ class PrototypeCostBreakdownOut(BaseModel):
     design_rate: Decimal
     artist_rate: Decimal
     mold_maker_price: Decimal
-    firing_rate: Decimal
-    firing_days_per_batch: int
 
     design_days: Decimal
     artist_days: Decimal
     mold_maker_days: Decimal
     drying_days: Decimal
-    firing_days: int
     adjustment_days: Decimal
     estimated_days: Decimal
     target_date: date | None = None
@@ -208,6 +203,12 @@ class PrototypeQuotationOut(BaseModel):
     customer_id: int | None = None
     customer_name: str | None = None
     product_id: int | None = None
+    product_category_id: int | None = None
+    #: El producto maestro, cuando existe. En un concepto nuevo sin cobrar es
+    #: `None` a proposito: todavia no hay codigo, y la pantalla debe decirlo en
+    #: vez de inventarlo.
+    product_code: str | None = None
+    product_name: str | None = None
     description: str
     quantity: int
 
@@ -225,9 +226,6 @@ class PrototypeQuotationOut(BaseModel):
     mold_maker_partner_id: int | None = None
     mold_maker_price_override: Decimal | None = None
     mold_maker_days: Decimal
-    kiln_id: int | None = None
-    firing_type: FiringType | None = None
-    firing_batches: int
     drying_days: Decimal
     adjustment_days: Decimal
     fixed_cost_override: Decimal | None = None
