@@ -421,8 +421,11 @@ async def test_al_emitir_se_congela_todo_lo_que_hizo_falta_para_el_numero(
     assert fila is not None
     assert fila.cost_snapshot is not None
     congelado = fila.cost_snapshot["effective"]
-    assert congelado["design_rate"] == "80"
-    assert congelado["rounding_step"] == "0.50"
+    # Se comparan como Decimal, no como cadena: lo guardado conserva la escala
+    # de la columna —«80.000000000000»— y afirmar el texto exacto ataria la
+    # prueba a la precision de PostgreSQL en vez de al importe.
+    assert Decimal(congelado["design_rate"]) == Decimal(80)
+    assert Decimal(congelado["rounding_step"]) == Decimal("0.50")
     assert fila.rounding_source_snapshot == "COMMERCIAL_SETTINGS"
     assert fila.commercial_gross_total == Decimal("944.00")
 
