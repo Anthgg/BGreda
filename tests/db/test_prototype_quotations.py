@@ -164,12 +164,19 @@ def _payload(caso: dict[str, Any]) -> dict[str, Any]:
 # PARTE C — la migracion dejo el esquema que dice
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_la_migracion_dejo_las_tablas_columnas_y_restricciones(
+async def test_el_esquema_tiene_las_tablas_columnas_y_restricciones(
     db_session: AsyncSession,
 ) -> None:
-    """MIGRATION_0023 verificado contra el catalogo de PostgreSQL.
+    """El esquema que producen los modelos, leido del catalogo de PostgreSQL.
 
-    No basta con que el upgrade termine sin error: hay que mirar que quedo.
+    Ojo con lo que esto prueba y lo que no. La base de pruebas se crea desde
+    los modelos con `create_all`: aqui NO corre ninguna migracion. Que la 0023
+    deje este mismo esquema lo demuestran su ejecucion real en el CI —la linea
+    «Running upgrade 0022 -> 0023»— y sus siete auto-guardas.
+
+    Lo que si se comprueba aqui es que los modelos declaran de verdad la
+    nulabilidad, los tipos y las restricciones que el dominio necesita: sin
+    esto, la migracion podria ser perfecta y el modelo mentir.
     """
     tablas = set(
         (
@@ -211,20 +218,29 @@ async def test_la_migracion_dejo_las_tablas_columnas_y_restricciones(
             )
         ).scalars()
     )
+    # La convencion de nombres del proyecto antepone `ck_<tabla>_`, asi que se
+    # busca por sufijo en vez de fijar el nombre completo a mano.
     for esperada in (
         "pq_status_allowed",
         "pq_payment_status_allowed",
         "pq_firing_type_allowed",
         "pq_quantity_positive",
         "pq_confirmed_has_code",
-        "uq_prototype_quotations_code",
     ):
-        assert esperada in restricciones, esperada
+        assert any(nombre.endswith(esperada) for nombre in restricciones), (
+            esperada,
+            sorted(restricciones),
+        )
+    assert any("code" in nombre and nombre.startswith("uq_") for nombre in restricciones)
 
 
 @pytest.mark.asyncio
 async def test_las_tarifas_de_prototipo_nacen_en_cero(db_session: AsyncSession) -> None:
-    """Los numeros del Excel son EJEMPLOS; sembrarlos seria fijar precios."""
+    """Los numeros del Excel son EJEMPLOS; sembrarlos seria fijar precios.
+
+    Se lee el valor por defecto de la columna, que es el que recibe una casa
+    que todavia no ha configurado nada.
+    """
     defectos = dict(
         (
             await db_session.execute(
@@ -243,6 +259,7 @@ async def test_las_tarifas_de_prototipo_nacen_en_cero(db_session: AsyncSession) 
 
 @pytest.mark.asyncio
 async def test_el_talonario_cpr_existe_y_es_suyo(db_session: AsyncSession) -> None:
+    """Contador propio: agotar cotizaciones de producto no mueve el de muestras."""
     fila = (
         await db_session.execute(
             text(
@@ -251,7 +268,7 @@ async def test_el_talonario_cpr_existe_y_es_suyo(db_session: AsyncSession) -> No
             )
         )
     ).one_or_none()
-    assert fila is not None, "0023 no sembro el talonario CPR"
+    assert fila is not None, "falta el talonario CPR"
     assert fila[0] == "CPR"
 
 

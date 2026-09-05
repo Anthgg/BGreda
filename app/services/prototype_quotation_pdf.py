@@ -68,11 +68,13 @@ class PrototypeQuotationPdfService:
         if fila.status is PrototypeQuotationStatus.DRAFT:
             raise PrototypeQuotationPdfDraftBlockedError()
 
+        cliente = await self._session.get(Partner, fila.customer_id) if fila.customer_id else None
+
         empresa = await self._base._get_company_settings()
         comercial = await self._base._get_commercial_settings()
         logo = await self._base._resolve_logo_data_uri(empresa)
 
-        documento = self._build_document(fila, empresa, comercial, logo)
+        documento = self._build_document(fila, cliente, empresa, comercial, logo)
         html = self._template.render(doc=documento)
         pdf = await asyncio.to_thread(self._base.render_pdf_from_html, html)
         return pdf, sanitize_pdf_filename(fila.code or "PROTOTIPO", fila.customer_name_snapshot)
@@ -80,6 +82,7 @@ class PrototypeQuotationPdfService:
     def _build_document(
         self,
         fila: PrototypeQuotation,
+        cliente: Partner | None,
         empresa: object,
         comercial: object,
         logo: str | None,
@@ -94,7 +97,6 @@ class PrototypeQuotationPdfService:
         impuesto = fila.commercial_tax_total or ZERO
         total = fila.commercial_gross_total or ZERO
 
-        cliente = fila.customer
         return PrototypeQuotationPdfDocument(
             company=build_company_doc_info(empresa, logo),  # type: ignore[arg-type]
             customer=_cliente_doc(cliente, fila.customer_name_snapshot),

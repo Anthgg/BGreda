@@ -241,7 +241,11 @@ class PrototypeQuotationService:
                 costo = linea.unit_cost_snapshot
                 nombre = linea.product_name_snapshot or ""
             else:
-                producto = linea.product or await self._session.get(Product, linea.product_id)
+                # Se pide SIEMPRE a la sesion, sin mirar `linea.product`: en una
+                # fila recien creada esa relacion esta sin cargar, y leerla deja
+                # de ser un acceso en memoria para convertirse en una consulta
+                # que revienta con `MissingGreenlet`.
+                producto = await self._session.get(Product, linea.product_id)
                 if producto is None or producto.cost is None:
                     raise PrototypeQuotationMaterialCostMissingError(
                         details=[{"product_id": linea.product_id}]
@@ -349,8 +353,14 @@ class PrototypeQuotationService:
         entrada = await self._costing_input(fila, congelado=congelado)
         costeo = price_prototype(entrada)
 
-        muestra = await self._session.scalar(
-            select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
+        # Una fila de previsualizacion no existe en la base todavia: buscarle
+        # muestra asociada seria una consulta por un id que no es de nadie.
+        muestra = (
+            await self._session.scalar(
+                select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
+            )
+            if fila.id
+            else None
         )
         por_producto = {linea.product_id: linea for linea in fila.lines}
 
@@ -709,7 +719,7 @@ class PrototypeQuotationService:
             lines=[],
         )
         for linea in fila.lines:
-            producto = linea.product or await self._session.get(Product, linea.product_id)
+            producto = await self._session.get(Product, linea.product_id)
             muestra.lines.append(
                 PrototypeMaterialLine(
                     product_id=linea.product_id,
