@@ -252,6 +252,9 @@ class PrototypeOut(PrototypeSummaryOut):
     #: Fase 009K.1. Nula en las muestras anteriores a 0022, y esa nulidad es la
     #: que impide precargar sus medidas: no se parsea `notes` para fingirla.
     technical_specifications: dict[str, Any] | None = None
+    #: Fase 009K.1.1. La cotizacion de prototipo que autorizo esta muestra.
+    #: Nula en las anteriores, que colgaban de una cotizacion de producto.
+    prototype_quotation_id: int | None = None
     #: De que cotizaciones fue origen esta muestra, si de alguna. La activa
     #: —el borrador— es como mucho una; las demas son historia.
     origin_quotation_ids: list[int] = Field(default_factory=list)

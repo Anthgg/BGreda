@@ -151,6 +151,14 @@ class Prototype(Base, TimestampMixin):
     #: Nulo cuando la pieza todavia no existe en el catalogo. El negocio lo
     #: admite explicitamente: se prototipa para decidir si merece la pena
     #: crearla.
+    #: Fase 009K.1.1. La cotizacion de prototipo que autoriza esta muestra.
+    #: Convive con `quotation_id`, que sigue siendo el vinculo de 009K con una
+    #: cotizacion de producto: renombrarlo o reemplazarlo dejaria sin explicar
+    #: las muestras que ya existen.
+    prototype_quotation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prototype_quotations.id", ondelete="RESTRICT"), index=True
+    )
+
     product_id: Mapped[int | None] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), index=True
     )

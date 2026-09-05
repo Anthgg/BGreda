@@ -1,0 +1,225 @@
+{#
+  Documento comercial de cotizacion de PROTOTIPO.
+
+  La identidad visual —hoja A4, tipografia, paleta, cabecera, pie y
+  paginacion— la pone `base_document.html`, igual que en el resto de
+  documentos. Aqui queda solo lo propio de una muestra.
+
+  Y lo propio es poco a proposito. Una cotizacion de producto lista piezas con
+  gramaje, receta y unidad; una de prototipo describe UNA pieza, sus medidas y
+  cuanto se tardara. Copiar la tabla de la otra habria obligado a rellenar
+  columnas que aqui no significan nada.
+
+  NADA de lo que se imprime aqui se recalcula: los importes llegan ya
+  resueltos en el ViewModel. Si esta plantilla volviera a multiplicar o a
+  redondear, el papel podria decir un total distinto del que se guardo.
+
+  El desglose interno NO sale de aqui: ni tarifa de diseno, ni de artista, ni
+  costo de barro, ni tarifa de horno. El cliente ve un concepto y un precio;
+  imprimir como se compone entregaria el margen en la misma hoja.
+#}
+{% extends "base_document.html" %}
+{% from "components/header.html" import document_header %}
+{% from "components/footer.html" import document_footer %}
+
+{% block html_title %}{{ doc.document.title }} {{ doc.document.code }}{% endblock %}
+{% block footer_left %}{{ doc.company.display_name }} — {{ doc.document.title }} {{ doc.document.code }}{% endblock %}
+
+{% block document_styles %}
+    /* -------------------------------------------------------------------
+       Solo lo de esta cotizacion. Nada de aqui puede afectar a otro
+       documento: cambiar el aspecto de una muestra no puede mover una hoja
+       de taller ni una guia.
+       ------------------------------------------------------------------- */
+    .pq-customer-grid { display: table; width: 100%; }
+    .pq-customer-col { display: table-cell; width: 50%; vertical-align: top; }
+    .pq-customer-name { font-weight: 600; font-size: 9.5pt; color: var(--doc-ink); }
+    .pq-customer-detail { font-size: 8.5pt; color: var(--doc-muted); margin-top: 2px; }
+    .pq-customer-detail-label { color: var(--doc-ink); font-weight: 600; }
+
+    /* Ficha de la pieza: lo acordado, no lo que cuesta. */
+    .pq-specs { display: table; width: 100%; margin-top: 4px; }
+    .pq-spec { display: table-cell; padding-right: 14px; font-size: 8.5pt; }
+    .pq-spec-label { display: block; color: var(--doc-muted); font-size: 7.5pt; }
+    .pq-spec-value { color: var(--doc-ink); font-weight: 600; }
+
+    .pq-deadline {
+      margin-top: 6px;
+      padding: 6px 10px;
+      background: var(--doc-soft, #f6f6f4);
+      font-size: 8.5pt;
+      color: var(--doc-ink);
+    }
+    .pq-deadline strong { font-weight: 600; }
+
+    .pq-summary { display: table; width: 100%; margin-top: 10px; }
+    .pq-summary-right { display: table-cell; width: 45%; vertical-align: top; }
+    .pq-summary-left { display: table-cell; width: 55%; vertical-align: top; padding-right: 12px; }
+
+    .pq-totals { width: 100%; border-collapse: collapse; }
+    .pq-totals td { padding: 5px 10px; font-size: 8.5pt; }
+    .pq-totals .label { color: var(--doc-muted); text-align: left; }
+    .pq-totals .amount { text-align: right; font-weight: 600; color: var(--doc-ink); }
+    .pq-totals tr.total-row td {
+      background: var(--doc-ink);
+      font-size: 9.5pt;
+      font-weight: 700;
+    }
+    .pq-totals tr.total-row .label,
+    .pq-totals tr.total-row .amount { color: var(--doc-paper); }
+{% endblock %}
+
+{% block content %}
+{% set meta = [] %}
+{% set _ = meta.append({'label': 'Fecha de emisión', 'value': doc.document.emission_date}) %}
+{% if doc.document.validity_date %}
+{% set _ = meta.append({'label': 'Vigencia', 'value': doc.document.validity_date}) %}
+{% endif %}
+{% set _ = meta.append({
+     'label': 'Moneda',
+     'value': (doc.document.currency_code or 'PEN') ~ ' (' ~ doc.document.currency_symbol ~ ')'
+   }) %}
+{% if doc.document.exchange_rate_text %}
+{% set _ = meta.append({'label': 'Tipo de cambio', 'value': doc.document.exchange_rate_text}) %}
+{% endif %}
+
+{{ document_header(
+     doc.company,
+     doc.document.title,
+     doc.document.code,
+     badge={'label': 'COTIZACIÓN ANULADA', 'tone': 'void'} if doc.document.is_cancelled else none,
+     meta=meta
+   ) }}
+
+<div class="doc-section">
+  <div class="doc-section-title">Datos del Cliente</div>
+  <div class="pq-customer-grid">
+    <div class="pq-customer-col">
+      <div class="pq-customer-name">{{ doc.customer.display_name }}</div>
+      {% if doc.customer.document_label %}
+      <div class="pq-customer-detail">
+        <span class="pq-customer-detail-label">Doc:</span> {{ doc.customer.document_label }}
+      </div>
+      {% endif %}
+      {% if doc.customer.address %}
+      <div class="pq-customer-detail">
+        <span class="pq-customer-detail-label">Dirección:</span> {{ doc.customer.address }}
+      </div>
+      {% endif %}
+    </div>
+    <div class="pq-customer-col" style="padding-left: 12px;">
+      {% if doc.customer.email %}
+      <div class="pq-customer-detail">
+        <span class="pq-customer-detail-label">Email:</span> {{ doc.customer.email }}
+      </div>
+      {% endif %}
+      {% if doc.customer.phone %}
+      <div class="pq-customer-detail">
+        <span class="pq-customer-detail-label">Teléfono:</span> {{ doc.customer.phone }}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# Lo acordado sobre la pieza. Solo se dibuja lo que de verdad se declaro:
+   rellenar una medida ausente con un cero diria que la pieza mide cero. #}
+{% if doc.specs.dimensions or doc.specs.finish or doc.specs.color or doc.specs.technique %}
+<div class="doc-section">
+  <div class="doc-section-title">Especificaciones acordadas</div>
+  <div class="pq-specs">
+    {% if doc.specs.dimensions %}
+    <div class="pq-spec">
+      <span class="pq-spec-label">Medidas</span>
+      <span class="pq-spec-value">{{ doc.specs.dimensions }}</span>
+    </div>
+    {% endif %}
+    {% if doc.specs.technique %}
+    <div class="pq-spec">
+      <span class="pq-spec-label">Técnica</span>
+      <span class="pq-spec-value">{{ doc.specs.technique }}</span>
+    </div>
+    {% endif %}
+    {% if doc.specs.finish %}
+    <div class="pq-spec">
+      <span class="pq-spec-label">Acabado</span>
+      <span class="pq-spec-value">{{ doc.specs.finish }}</span>
+    </div>
+    {% endif %}
+    {% if doc.specs.color %}
+    <div class="pq-spec">
+      <span class="pq-spec-label">Color</span>
+      <span class="pq-spec-value">{{ doc.specs.color }}</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<table class="doc-table">
+  <thead>
+    <tr>
+      <th class="col-desc">Concepto</th>
+      <th class="col-qty">Muestras</th>
+      <th class="col-price">P. Unitario</th>
+      <th class="col-subtotal">Subtotal</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in doc.lines %}
+    <tr>
+      <td class="col-desc"><div class="doc-cell-title">{{ line.description }}</div></td>
+      <td class="col-qty">{{ line.quantity_formatted }}</td>
+      <td class="col-price">{{ line.unit_price_formatted }}</td>
+      <td class="col-subtotal">{{ line.subtotal_formatted }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{# El plazo, en dias. Sin abrir en cuantos son de diseno y cuantos de horno:
+   eso es informacion de produccion, y al cliente le importa cuando lo tiene. #}
+{% if doc.deadline %}
+<div class="pq-deadline">
+  Plazo estimado: <strong>{{ doc.deadline.estimated_days }} días</strong>
+  {% if doc.deadline.target_date %} — fecha objetivo: <strong>{{ doc.deadline.target_date }}</strong>{% endif %}
+</div>
+{% endif %}
+
+<div class="pq-summary">
+  <div class="pq-summary-left">
+    {% if doc.conditions.general_conditions %}
+    <div class="doc-section-title">Condiciones</div>
+    <div class="pq-customer-detail">{{ doc.conditions.general_conditions }}</div>
+    {% endif %}
+    {% if doc.bank_accounts %}
+    <div class="doc-section-title" style="margin-top: 8px;">Cuentas bancarias</div>
+    {% for account in doc.bank_accounts %}
+    <div class="pq-customer-detail">
+      <span class="pq-customer-detail-label">{{ account.bank_name }}</span>
+      {{ account.account_number }}{% if account.cci %} — CCI {{ account.cci }}{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+
+  <div class="pq-summary-right">
+    <table class="pq-totals">
+      <tr>
+        <td class="label">Subtotal</td>
+        <td class="amount">{{ doc.totals.subtotal_formatted }}</td>
+      </tr>
+      <tr>
+        <td class="label">{{ doc.totals.tax_label }}</td>
+        <td class="amount">{{ doc.totals.tax_formatted }}</td>
+      </tr>
+      <tr class="total-row">
+        <td class="label">TOTAL</td>
+        <td class="amount">{{ doc.totals.total_formatted }}</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+{{ document_footer(doc.conditions.document_footer) }}
+{% endblock %}

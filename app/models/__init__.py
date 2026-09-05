@@ -47,6 +47,12 @@ from app.models.production import (
     ProductionOrderStatus,
 )
 from app.models.profile import Profile, UserRole
+from app.models.prototype_quotations import (
+    PrototypeQuotation,
+    PrototypeQuotationMaterial,
+    PrototypeQuotationPaymentStatus,
+    PrototypeQuotationStatus,
+)
 from app.models.prototypes import (
     Prototype,
     PrototypeApproval,
@@ -137,6 +143,10 @@ __all__ = [
     "PrototypeApproval",
     "PrototypeMaterialLine",
     "PrototypeMaterialRole",
+    "PrototypeQuotation",
+    "PrototypeQuotationMaterial",
+    "PrototypeQuotationPaymentStatus",
+    "PrototypeQuotationStatus",
     "PrototypeStatus",
     "ProviderName",
     "Quotation",

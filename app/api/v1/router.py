@@ -12,6 +12,7 @@ from app.api.v1 import (
     inventory,
     masters,
     production,
+    prototype_quotations,
     prototypes,
     quotation_builder,
     quotations,
@@ -37,4 +38,5 @@ api_v1_router.include_router(production.router)
 api_v1_router.include_router(tracking.router)
 #: Fase 009K. Prototipos: dominio propio, no una variante de produccion.
 api_v1_router.include_router(prototypes.router)
+api_v1_router.include_router(prototype_quotations.router)
 api_v1_router.include_router(identity.router)
