@@ -1307,16 +1307,15 @@ async def test_el_pdf_del_prototipo_usa_la_plantilla_global_de_cotizaciones(
     # Los rotulos son los de `quotations/quotation.html`, literalmente. Se
     # comparan sin distinguir mayusculas porque el sistema documental las
     # transforma al dibujar: lo que se afirma es el rotulo, no su caja.
-    plano = texto.lower()
     for rotulo in (
-        "datos del cliente",
-        "descripción del producto",
-        "p. unitario",
-        "subtotal",
-        "total",
-        "página 1 de 1",
+        "Datos del Cliente",
+        "Descripción del Producto",
+        "P. Unitario",
+        "Subtotal",
+        "TOTAL",
+        "Página 1 de 1",
     ):
-        assert rotulo in plano, rotulo
+        assert contiene(texto, rotulo), f"{rotulo} — el papel dice: {texto}"
 
     # Lo unico que cambia es el tipo de documento y el correlativo.
     assert "COTIZACIÓN DE PROTOTIPO" in texto
@@ -1344,10 +1343,13 @@ async def test_el_plazo_y_lo_acordado_salen_en_las_condiciones_del_documento_glo
     assert respuesta.status_code == 200, respuesta.text
     texto = _texto_pdf(respuesta.content)
 
-    assert "Plazo estimado de desarrollo: 6 días" in texto
-    assert "Acabado: Mate" in texto
-    assert "Color: Crema" in texto
-    assert "Técnica: Torno" in texto
+    for acordado in (
+        "Plazo estimado de desarrollo: 6 días",
+        "Acabado: Mate",
+        "Color: Crema",
+        "Técnica: Torno",
+    ):
+        assert contiene(texto, acordado), f"{acordado} — el papel dice: {texto}"
 
 
 # ---------------------------------------------------------------------------
@@ -1381,14 +1383,30 @@ ESQUELETO_DOCUMENTAL = (
 
 
 def aplanar(texto: str) -> str:
-    """Un texto sin depender de donde se partieron las lineas.
-
-    Vive aqui y no en el servicio porque es una preocupacion de QUIEN LEE
-    el papel, no de quien lo dibuja: el documento esta bien maquetado, lo
-    que no se puede es afirmar sobre el como si el corte de linea fuera
-    parte del contenido.
-    """
+    """Espacios colapsados. Para leer, y para afirmar AUSENCIAS."""
     return re.sub(r"\s+", " ", texto)
+
+
+def _comparable(texto: str) -> str:
+    """Sin ningun espacio y en minusculas.
+
+    `pypdf` no lee palabras: lee glifos con coordenadas, y decide poner un
+    espacio cuando el hueco horizontal le parece bastante. Con otras fuentes
+    instaladas ese hueco cambia, y «P. UNITARIO» sale «P.UNITARIO». Por eso
+    en la CI fallaba justo esa etiqueta mientras «Cant.» y «Subtotal» —de la
+    MISMA fila y de una sola palabra— pasaban.
+
+    Quitar los espacios de los DOS lados afirma lo que el rotulo dice sin
+    afirmar nada sobre como el extractor repartio los huecos. Se usa solo
+    para presencias: para una ausencia seria mas laxo de la cuenta, y ahi
+    interesa lo contrario.
+    """
+    return re.sub(r"\s+", "", texto).lower()
+
+
+def contiene(texto: str, rotulo: str) -> bool:
+    """Si el papel dice eso, sin importar mayusculas ni espaciado."""
+    return _comparable(rotulo) in _comparable(texto)
 
 
 def _texto_pdf(contenido: bytes) -> str:
@@ -1413,8 +1431,7 @@ def _secciones(texto: str) -> set[str]:
     mayusculas por CSS: el rotulo se dibuja «DATOS DEL CLIENTE» aunque en la
     plantilla diga «Datos del Cliente».
     """
-    plano = texto.lower()
-    return {rotulo for rotulo in ESQUELETO_DOCUMENTAL if rotulo.lower() in plano}
+    return {rotulo for rotulo in ESQUELETO_DOCUMENTAL if contiene(texto, rotulo)}
 
 
 @pytest.mark.asyncio
@@ -1448,12 +1465,12 @@ async def test_el_cpr_y_el_ctz_son_el_mismo_documento(
     texto_ctz = _texto_pdf(papel_ctz.content)
     texto_cpr = _texto_pdf(papel_cpr.content)
 
-    # Que esta comparacion sobreviva a otra maquina no se da por supuesto.
-    # En la CI, sin las mismas fuentes, «P. Unitario» caia partido en dos
-    # lineas y la asercion fallaba mientras el documento estaba perfecto.
-    # Se comprueba aqui, con el corte puesto a mano, que aplanar lo salva.
-    assert "P. Unitario" in aplanar("... CANT. UNIDAD P.\nUnitario SUBTOTAL ...")
-    assert "Tecnica: Torno" in aplanar("Acabado: Mate Tecnica:\nTorno")
+    # Que esto sobreviva a otra maquina no se da por supuesto: en la CI fallaba
+    # con el documento perfecto. Se comprueban aqui las tres formas en que un
+    # extractor puede repartir los huecos de «P. Unitario», para que quitar
+    # `contiene` falle en esta maquina y no dentro de veinte minutos.
+    for reparto in ("P. Unitario", "P.Unitario", "P .  Unitario", "P.\nUnitario"):
+        assert contiene(f"CANT. UNIDAD {reparto} SUBTOTAL", "P. Unitario"), reparto
 
     secciones_ctz = _secciones(texto_ctz)
     assert secciones_ctz == set(ESQUELETO_DOCUMENTAL), sorted(
