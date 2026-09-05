@@ -13,11 +13,12 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
     DbSessionDep,
+    PrototypeQuotationPdfServiceDep,
     PrototypeQuotationServiceDep,
 )
 from app.models.prototype_quotations import PrototypeQuotationStatus
@@ -162,3 +163,36 @@ async def mark_prototype_quotation_paid(
     resultado = await service.present(fila)
     await session.commit()
     return resultado
+
+
+@router.get(
+    "/{quotation_id}/pdf",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "Documento comercial de la cotizacion de prototipo.",
+        },
+        409: {"description": "La cotizacion todavia es un borrador."},
+    },
+)
+async def download_prototype_quotation_pdf(
+    quotation_id: int,
+    service: PrototypeQuotationServiceDep,
+    pdf: PrototypeQuotationPdfServiceDep,
+    _: AdminUserDep,
+) -> Response:
+    """El documento del cliente.
+
+    Una confirmada se dibuja con lo que congelo: ni tarifas de hoy ni impuesto
+    de hoy. Un borrador no se descarga —todavia no tiene numero ni precio
+    firme—, porque enviarlo invitaria a mandar un papel que puede cambiar
+    manana y que no se puede referenciar por codigo.
+    """
+    fila = await service.get(quotation_id)
+    contenido, nombre = await pdf.render(fila)
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{nombre}"'},
+    )
