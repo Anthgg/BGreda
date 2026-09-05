@@ -7,11 +7,13 @@ con los numeros exactos, no aproximados.
 
 from __future__ import annotations
 
+import inspect
 from datetime import date
 from decimal import Decimal
 
 import pytest
 
+from app.core import prototype_pricing
 from app.core.prototype_pricing import (
     PrototypeCostingInput,
     PrototypeMaterialInput,
@@ -279,3 +281,117 @@ def test_la_unidad_del_material_viaja_tal_cual_y_no_se_convierte() -> None:
     assert resultado.materials[0].uom_code == "g"
     assert resultado.materials[0].total_quantity == Decimal(30)
     assert resultado.materials_cost == Decimal("0.60")
+
+
+# -- Moneda de emision -------------------------------------------------------
+#
+# Paridad con el Cotizador principal: la casa cotiza en soles o en dolares, y un
+# prototipo no es menos documento que una pieza de catalogo. Lo que se convierte
+# es el PRECIO; el costo se queda en soles, porque en soles se paga al artista y
+# se compra el barro.
+
+
+def test_por_omision_se_cotiza_en_soles_y_sin_tasa() -> None:
+    """Nada de lo anterior cambia: PEN sigue siendo el caso por defecto."""
+    resultado = price_prototype(_caso_excel())
+
+    assert resultado.currency == "PEN"
+    assert resultado.exchange_rate is None
+    assert resultado.raw_net_total == resultado.base_cost == Decimal("800.00")
+
+
+def test_en_dolares_el_neto_se_divide_por_la_tasa_y_el_costo_sigue_en_soles() -> None:
+    """800 soles a 4.00 son 200 dolares. IGV 36, bruto 236, ya alineado.
+
+    Multiplicar en vez de dividir daria 3200, que tiene toda la pinta de ser un
+    precio y es dieciseis veces el correcto.
+    """
+    resultado = price_prototype(_caso_excel(currency="USD", exchange_rate=Decimal(4)))
+
+    assert resultado.base_cost == Decimal("800.00")
+    assert resultado.raw_net_total == Decimal("200.00")
+    assert resultado.raw_tax == Decimal("36.00")
+    assert resultado.commercial_gross_total == Decimal("236.00")
+    assert resultado.commercial_net_total == Decimal("200.00")
+    assert resultado.currency == "USD"
+    assert resultado.exchange_rate == Decimal(4)
+
+
+def test_el_desglose_interno_no_se_convierte_concepto_a_concepto() -> None:
+    """Los conceptos son costo, y el costo esta en soles.
+
+    Convertirlos uno a uno daria un desglose cuya suma no cuadra con el total
+    por los redondeos de cada division.
+    """
+    resultado = price_prototype(_caso_excel(currency="USD", exchange_rate=Decimal(4)))
+
+    assert resultado.design_cost == Decimal("240.00")
+    assert resultado.artist_cost == Decimal("200.00")
+    assert resultado.materials_cost == Decimal("10.00")
+    assert resultado.firing_cost == Decimal("350.00")
+
+
+def test_el_escalon_comercial_se_aplica_sobre_el_bruto_en_dolares() -> None:
+    """A 3.75 salen 213.33 netos; el bruto 251.73 sube al escalon 252.00.
+
+    El escalon es una politica sobre el numero que se firma. Redondear en soles
+    y convertir despues daria un total en dolares que no termina en escalon.
+    """
+    resultado = price_prototype(_caso_excel(currency="USD", exchange_rate=Decimal("3.75")))
+
+    assert resultado.raw_net_total == Decimal("213.33")
+    assert resultado.raw_gross_total == Decimal("251.73")
+    assert resultado.commercial_gross_total == Decimal("252.00")
+    assert (
+        resultado.commercial_net_total + resultado.commercial_tax_total
+        == resultado.commercial_gross_total
+    )
+
+
+def test_una_cotizacion_en_dolares_sin_tasa_se_rechaza() -> None:
+    """Sin tasa no hay conversion, y cotizar 800 dolares por 800 soles regala
+    tres cuartas partes del trabajo."""
+    with pytest.raises(Exception, match="EXCHANGE_RATE_REQUIRED"):
+        price_prototype(_caso_excel(currency="USD"))
+
+
+def test_una_cotizacion_en_soles_con_tasa_se_rechaza() -> None:
+    """Guardar una tasa en un documento en soles describiria una conversion que
+    nunca ocurrio."""
+    with pytest.raises(Exception, match="no lleva tipo de cambio"):
+        price_prototype(_caso_excel(exchange_rate=Decimal(4)))
+
+
+def test_una_moneda_que_la_casa_no_emite_se_rechaza() -> None:
+    with pytest.raises(Exception, match="Moneda no admitida"):
+        price_prototype(_caso_excel(currency="EUR", exchange_rate=Decimal(4)))
+
+
+def test_una_tasa_de_cero_se_rechaza_en_vez_de_dividir_por_cero() -> None:
+    with pytest.raises(Exception, match="mayor que cero"):
+        price_prototype(_caso_excel(currency="USD", exchange_rate=Decimal(0)))
+
+
+def test_el_total_por_muestra_esta_en_la_moneda_de_emision() -> None:
+    """Con dos muestras solo se duplica el material: los dias no se pagan dos
+    veces. 240+200+20+350 = 810 soles, que a 4.00 son 202.50 dolares; con IGV
+    238.95, que sube al escalon 239.00 y sale a 119.50 por muestra."""
+    resultado = price_prototype(_caso_excel(quantity=2, currency="USD", exchange_rate=Decimal(4)))
+
+    assert resultado.base_cost == Decimal("810.00")
+    assert resultado.raw_net_total == Decimal("202.50")
+    assert resultado.commercial_gross_total == Decimal("239.00")
+    assert resultado.total_per_prototype == Decimal("119.50")
+
+
+def test_la_conversion_no_la_reimplementa_este_motor() -> None:
+    """AUTHORITY_REUSE.
+
+    El motor de prototipos no puede tener su propia aritmetica de cambio: si la
+    tuviera, algun dia una de las dos cambiaria y ganaria la que nadie mira.
+    """
+    fuente = inspect.getsource(prototype_pricing)
+
+    assert "convert_net_to_quote_currency" in fuente
+    assert "/ entrada.exchange_rate" not in fuente
+    assert "* entrada.exchange_rate" not in fuente

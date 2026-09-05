@@ -796,3 +796,221 @@ async def test_una_muestra_sin_ningun_vinculo_dice_que_falta_pedido(
     detalle = await api.get(f"/api/v1/prototypes/{creado.json()['id']}", headers=head(admin_csrf))
     codigos = {issue["code"] for issue in detalle.json()["readiness"]["issues"]}
     assert "NO_QUOTATION" in codigos
+
+
+# ---------------------------------------------------------------------------
+# PARIDAD MONEDA / TIPO DE CAMBIO
+#
+# El Cotizador principal emite en soles o en dolares desde 009F. Un prototipo
+# se le vende al mismo cliente y lo firma la misma casa: si uno puede y el otro
+# no, la limitacion no es del negocio sino del software.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_por_omision_la_cotizacion_de_prototipo_sale_en_la_moneda_de_la_casa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CURRENCY_DEFAULT: no mandar moneda sigue tomando la de Configuracion."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_defecto")
+
+    vista = await api.post(f"{COTIZADOR}/preview", json=_payload(caso), headers=head(admin_csrf))
+    assert vista.status_code == 200, vista.text
+    cuerpo = vista.json()
+
+    assert cuerpo["currency_code"] == "PEN"
+    assert cuerpo["exchange_rate"] is None
+    assert Decimal(cuerpo["costing"]["raw_net_total"]) == Decimal(800)
+    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(944)
+
+
+@pytest.mark.asyncio
+async def test_se_puede_cotizar_un_prototipo_en_dolares(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CURRENCY_PARITY: la misma capacidad comercial que el Cotizador principal.
+
+    800 soles a 4.00 son 200 dolares; IGV 36; total 236. El costo sigue en
+    soles porque en soles se paga al artista.
+    """
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_usd")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+
+    vista = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
+    assert vista.status_code == 200, vista.text
+    cuerpo = vista.json()
+
+    assert cuerpo["currency_code"] == "USD"
+    assert cuerpo["currency_symbol"] == "US$"
+    assert Decimal(cuerpo["exchange_rate"]) == Decimal(4)
+    assert Decimal(cuerpo["costing"]["base_cost"]) == Decimal(800)
+    assert Decimal(cuerpo["costing"]["raw_net_total"]) == Decimal(200)
+    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(236)
+
+
+@pytest.mark.asyncio
+async def test_en_dolares_sin_tipo_de_cambio_no_se_cotiza(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CURRENCY_GUARD: el mismo 422 y el mismo motivo que el Cotizador principal."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_sin_tasa")
+    datos = _payload(caso) | {"currency_code": "USD"}
+
+    vista = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
+    assert vista.status_code == 422, vista.text
+    assert "EXCHANGE_RATE_REQUIRED" in vista.text
+
+
+@pytest.mark.asyncio
+async def test_en_soles_con_tipo_de_cambio_no_se_cotiza(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Una tasa guardada en un documento en soles describiria una conversion
+    que nunca ocurrio."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_tasa_sobrante")
+    datos = _payload(caso) | {"currency_code": "PEN", "exchange_rate": "4"}
+
+    vista = await api.post(f"{COTIZADOR}/preview", json=datos, headers=head(admin_csrf))
+    assert vista.status_code == 422, vista.text
+
+
+@pytest.mark.asyncio
+async def test_la_moneda_del_borrador_se_guarda_y_se_relee(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """La eleccion sobrevive al viaje a la base, no solo a la respuesta."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_persiste")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "3.75"}
+
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    identificador = creada.json()["id"]
+
+    fila = await db_session.get(PrototypeQuotation, identificador)
+    assert fila is not None
+    await db_session.refresh(fila)
+    assert fila.currency_code_snapshot == "USD"
+    assert fila.currency_symbol_snapshot == "US$"
+    assert fila.exchange_rate_snapshot == Decimal("3.75")
+
+    leida = await api.get(f"{COTIZADOR}/{identificador}", headers=head(admin_csrf))
+    assert leida.json()["currency_code"] == "USD"
+    assert Decimal(leida.json()["exchange_rate"]) == Decimal("3.75")
+
+
+@pytest.mark.asyncio
+async def test_volver_a_soles_borra_la_tasa_del_borrador(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Dejarla puesta describiria una conversion que ya no ocurre."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_vuelta")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    assert creada.status_code == 201, creada.text
+    identificador = creada.json()["id"]
+
+    editada = await api.put(
+        f"{COTIZADOR}/{identificador}",
+        json=_payload(caso) | {"currency_code": "PEN"},
+        headers=head(admin_csrf),
+    )
+    assert editada.status_code == 200, editada.text
+
+    fila = await db_session.get(PrototypeQuotation, identificador)
+    assert fila is not None
+    await db_session.refresh(fila)
+    assert fila.currency_code_snapshot == "PEN"
+    assert fila.exchange_rate_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_al_emitir_se_congela_la_moneda_del_borrador_y_no_la_de_configuracion(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CURRENCY_FREEZE.
+
+    Sobrescribir aqui con la moneda de la casa emitiria en soles un documento
+    que se pacto en dolares: el numero no cambiaria y la etiqueta mentiria.
+    """
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_congela")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    identificador = creada.json()["id"]
+
+    emitida = await api.post(
+        f"{COTIZADOR}/{identificador}/confirm", json={}, headers=head(admin_csrf)
+    )
+    assert emitida.status_code == 200, emitida.text
+
+    fila = await db_session.get(PrototypeQuotation, identificador)
+    assert fila is not None
+    await db_session.refresh(fila)
+    assert fila.currency_code_snapshot == "USD"
+    assert fila.exchange_rate_snapshot == Decimal(4)
+    assert fila.commercial_gross_total == Decimal(236)
+    assert fila.cost_snapshot["effective"]["currency"] == "USD"
+    assert Decimal(fila.cost_snapshot["effective"]["exchange_rate"]) == Decimal(4)
+
+
+@pytest.mark.asyncio
+async def test_una_emitida_en_dolares_no_se_revalora_si_cambia_la_tasa_de_la_casa(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """El documento firmado no cambia de precio porque cambie el dolar."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_inmutable")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    identificador = creada.json()["id"]
+    await api.post(f"{COTIZADOR}/{identificador}/confirm", json={}, headers=head(admin_csrf))
+
+    await _ajustes(db_session, currency_code="USD", currency_symbol="US$")
+
+    leida = await api.get(f"{COTIZADOR}/{identificador}", headers=head(admin_csrf))
+    cuerpo = leida.json()
+    assert cuerpo["currency_code"] == "USD"
+    assert Decimal(cuerpo["exchange_rate"]) == Decimal(4)
+    assert Decimal(cuerpo["costing"]["commercial_gross_total"]) == Decimal(236)
+
+
+@pytest.mark.asyncio
+async def test_el_listado_dice_en_que_moneda_esta_cada_total(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Sin esto el listado pondria `S/` delante de un importe en dolares."""
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_listado")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "4"}
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    identificador = creada.json()["id"]
+    await api.post(f"{COTIZADOR}/{identificador}/confirm", json={}, headers=head(admin_csrf))
+
+    listado = await api.get(COTIZADOR, headers=head(admin_csrf))
+    assert listado.status_code == 200, listado.text
+    fila = next(item for item in listado.json()["items"] if item["id"] == identificador)
+    assert fila["currency_code"] == "USD"
+    assert fila["currency_symbol"] == "US$"
+    assert Decimal(fila["commercial_gross_total"]) == Decimal(236)
+
+
+@pytest.mark.asyncio
+async def test_el_pdf_en_dolares_lleva_el_tipo_de_cambio_y_el_simbolo_correcto(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """CURRENCY_PDF.
+
+    Un documento en dolares sin la tasa deja al cliente sin saber con que
+    numero se convirtio lo que esta firmando; y un `S/` delante de dolares es
+    exactamente el error que nadie detecta hasta que ya esta firmado.
+    """
+    caso = await _caso_excel(api, admin_csrf, db_session, "_moneda_pdf")
+    datos = _payload(caso) | {"currency_code": "USD", "exchange_rate": "3.75"}
+    creada = await api.post(COTIZADOR, json=datos, headers=head(admin_csrf))
+    identificador = creada.json()["id"]
+    await api.post(f"{COTIZADOR}/{identificador}/confirm", json={}, headers=head(admin_csrf))
+
+    pdf = await api.get(f"{COTIZADOR}/{identificador}/pdf", headers=head(admin_csrf))
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.headers["content-type"] == "application/pdf"
+    paginas = PdfReader(io.BytesIO(pdf.content)).pages
+    texto = "\n".join(page.extract_text() or "" for page in paginas)
+
+    assert "1 USD = S/ 3.75" in texto
+    assert "US$" in texto
+    assert "S/ 236" not in texto

@@ -8,15 +8,19 @@ seria dejar que la pantalla fije el precio.
 Por el mismo motivo la unidad de medida solo viaja de salida. La manda el
 catalogo del material, y admitirla como entrada permitiria cotizar kilos de
 algo que se lleva en gramos.
+
+La moneda si es intencion, no importe: decir «esto se cobra en dolares» es una
+decision comercial de quien cotiza, exactamente igual que en el Cotizador de
+producto. Lo que sigue sin viajar es el resultado de convertir.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.firings import FiringType
 from app.models.prototype_quotations import (
@@ -84,7 +88,31 @@ class PrototypeQuotationDraftIn(_Strict):
     adjustment_days: Decimal = Field(default=Decimal(0), ge=0, max_digits=18, decimal_places=6)
     fixed_cost_override: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=6)
 
+    #: Moneda en la que se EMITE el documento. `None` toma la de Configuracion,
+    #: que es lo que hacian todas las cotizaciones de prototipo antes de esto.
+    #: Los costos siguen en soles: esto decide el precio que se factura.
+    currency_code: Literal["PEN", "USD"] | None = None
+    #: Cuantos soles vale un dolar (`1 USD = X PEN`). Obligatorio para USD y
+    #: prohibido para PEN, porque en soles no hay conversion que declarar.
+    exchange_rate: Annotated[
+        Decimal | None, Field(gt=0, le=1_000_000, max_digits=18, decimal_places=6)
+    ] = None
+
     materials: list[PrototypeQuotationMaterialIn] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def coherent_currency(self) -> PrototypeQuotationDraftIn:
+        """Los dos unicos estados con sentido, en la puerta de entrada.
+
+        La misma regla y el mismo codigo de error que el Cotizador principal:
+        dos documentos de la misma casa no pueden discrepar sobre cuando hace
+        falta declarar una tasa.
+        """
+        if self.currency_code == "USD" and self.exchange_rate is None:
+            raise ValueError("EXCHANGE_RATE_REQUIRED")
+        if self.currency_code != "USD" and self.exchange_rate is not None:
+            raise ValueError("Una cotizacion en PEN no lleva tipo de cambio")
+        return self
 
 
 class PrototypeQuotationUpdateIn(PrototypeQuotationDraftIn):
@@ -119,7 +147,18 @@ class PrototypeCostBreakdownOut(BaseModel):
     materials_cost: Decimal
     firing_cost: Decimal
     fixed_cost: Decimal
+    #: La suma de los conceptos, SIEMPRE en soles: es el costo, no el precio.
     base_cost: Decimal
+
+    #: El mismo neto ya en la moneda de emision. Con PEN coincide con
+    #: `base_cost`; con USD es la unica cifra que explica por que el total no
+    #: se parece al costo.
+    raw_net_total: Decimal
+    #: Con que moneda y con que tasa se llego hasta aqui. Viajan dentro del
+    #: desglose y no solo en la cabecera para que la pantalla pueda etiquetar
+    #: cada mitad con la suya: el costo en soles, el precio en la de emision.
+    currency: str
+    exchange_rate: Decimal | None = None
 
     #: Antes del escalon comercial. Explica de donde viene el ajuste.
     raw_tax: Decimal
@@ -217,6 +256,11 @@ class PrototypeQuotationListItemOut(BaseModel):
     description: str
     quantity: int
     commercial_gross_total: Decimal | None = None
+    #: Con que moneda se lee ese total. Sin esto el listado pondria `S/`
+    #: delante de un importe en dolares: el numero seria correcto y la
+    #: etiqueta mentiria, que es la peor combinacion posible.
+    currency_code: str | None = None
+    currency_symbol: str | None = None
     estimated_days: Decimal | None = None
     confirmed_at: datetime | None = None
 

@@ -28,7 +28,11 @@ from app.documents.prototype_quotation import (
     build_prototype_line,
     build_prototype_totals,
 )
-from app.documents.quotation import CustomerDocInfo, DocumentHeaderInfo
+from app.documents.quotation import (
+    CustomerDocInfo,
+    DocumentHeaderInfo,
+    format_exchange_rate,
+)
 from app.models.masters import Partner
 from app.models.prototype_quotations import PrototypeQuotation, PrototypeQuotationStatus
 from app.services.quotation_pdf import TEMPLATES_DIR, QuotationPdfService
@@ -91,6 +95,7 @@ class PrototypeQuotationPdfService:
         from app.documents.quotation import _build_bank_accounts_doc, _build_conditions_doc
 
         simbolo = fila.currency_symbol_snapshot or "S/"
+        moneda = fila.currency_code_snapshot or "PEN"
         # Los tres numeros salen CONGELADOS de la fila. No se recalculan aqui:
         # el escalon comercial se aplico una sola vez al emitir.
         neto = fila.commercial_net_total or ZERO
@@ -108,7 +113,11 @@ class PrototypeQuotationPdfService:
                 is_cancelled=fila.status is PrototypeQuotationStatus.CANCELLED,
                 emission_date=format_date_display(fila.confirmed_at or fila.created_at),
                 currency_symbol=simbolo,
-                currency_code=fila.currency_code_snapshot or "PEN",
+                currency_code=moneda,
+                # En soles sale None y la plantilla no imprime la fila. Un
+                # documento en dolares sin la tasa deja al cliente sin saber
+                # con que numero se convirtio lo que esta firmando.
+                exchange_rate_text=format_exchange_rate(fila.exchange_rate_snapshot, moneda),
             ),
             lines=[build_prototype_line(CONCEPTO, fila.quantity, neto, simbolo)],
             specs=PrototypeDocSpecs(

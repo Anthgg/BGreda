@@ -54,6 +54,8 @@ async def list_prototype_quotations(
                 description=fila.description,
                 quantity=fila.quantity,
                 commercial_gross_total=fila.commercial_gross_total,
+                currency_code=fila.currency_code_snapshot,
+                currency_symbol=fila.currency_symbol_snapshot,
                 estimated_days=fila.estimated_days,
                 confirmed_at=fila.confirmed_at,
             )

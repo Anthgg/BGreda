@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
+from app.core.pricing import BASE_CURRENCY, SUPPORTED_CURRENCIES
 from app.core.prototype_pricing import (
     PrototypeCosting,
     PrototypeCostingInput,
@@ -70,6 +71,11 @@ ENTITY = "prototype_quotation"
 #: guarda junto al valor porque «0.50» sin su origen no explica nada dentro de
 #: dos anos, cuando la configuracion diga otra cosa.
 ROUNDING_SOURCE_SETTINGS = "COMMERCIAL_SETTINGS"
+
+#: El mismo mapa que el Cotizador principal. `US$` y no `$`: en Peru un `$`
+#: suelto se lee como sol tan a menudo como como dolar, y aqui la diferencia
+#: es de casi cuatro a uno.
+CURRENCY_SYMBOLS = {"PEN": "S/", "USD": "US$"}
 
 
 class PrototypeQuotationNotFoundError(APIError):
@@ -263,6 +269,42 @@ class PrototypeQuotationService:
             )
         return tuple(entradas)
 
+    @staticmethod
+    def _resolver_moneda(
+        solicitada: str | None, tasa: Decimal | None, ajustes: CommercialSettings
+    ) -> tuple[str, Decimal | None]:
+        """En que moneda se emite y con que tasa.
+
+        La cotizacion manda; Configuracion solo aporta el valor inicial cuando
+        el borrador no dice nada. Una moneda configurada que no sea PEN ni USD
+        se cae a PEN en vez de propagar un codigo que el motor rechazaria mas
+        adelante con un error mucho menos claro. Es la misma decision que toma
+        `_resolve_currency` en el Cotizador principal, y esta escrita igual a
+        proposito: dos documentos de la misma casa no pueden discrepar sobre
+        en que moneda se emiten.
+        """
+        if solicitada is not None:
+            elegida = solicitada
+        else:
+            configurada = ajustes.currency_code or BASE_CURRENCY
+            elegida = configurada if configurada in SUPPORTED_CURRENCIES else BASE_CURRENCY
+        if elegida == BASE_CURRENCY:
+            # En soles no hay conversion que declarar: guardar una tasa aqui
+            # describiria algo que nunca ocurrio.
+            return BASE_CURRENCY, None
+        return elegida, tasa
+
+    @staticmethod
+    def _simbolo(codigo: str, ajustes: CommercialSettings) -> str:
+        """El simbolo con el que se presenta la moneda.
+
+        Se respeta el de Configuracion solo cuando coincide la moneda: un `S/`
+        guardado alli no debe acabar encabezando importes en dolares.
+        """
+        if codigo == (ajustes.currency_code or BASE_CURRENCY) and ajustes.currency_symbol:
+            return ajustes.currency_symbol
+        return CURRENCY_SYMBOLS.get(codigo, codigo)
+
     async def _costing_input(
         self, fila: PrototypeQuotation, *, congelado: bool
     ) -> PrototypeCostingInput:
@@ -279,6 +321,15 @@ class PrototypeQuotationService:
             rounding_step = Decimal(str(congelados["rounding_step"]))
             firing_rate = Decimal(str(congelados["firing_rate"]))
             firing_days_per_batch = int(congelados["firing_days_per_batch"])
+            # De la foto, no de la fila: la moneda forma parte del precio, y un
+            # documento emitido tiene que volver a valorarse con la que uso
+            # aunque alguien toque la columna despues.
+            moneda = str(congelados.get("currency") or BASE_CURRENCY)
+            tasa_cambio = (
+                Decimal(str(congelados["exchange_rate"]))
+                if congelados.get("exchange_rate") is not None
+                else None
+            )
         else:
             # Nulo significa «usa lo de la casa». Ver el docstring del modulo.
             design_rate = (
@@ -306,6 +357,11 @@ class PrototypeQuotationService:
             firing_rate, firing_days_per_batch = await self._firing_rate(
                 fila.kiln_id, fila.firing_type, momento=momento
             )
+            # `_aplicar` ya escribio la eleccion. El respaldo cubre una fila que
+            # nunca paso por el, no una moneda que nadie escogio.
+            moneda, tasa_cambio = self._resolver_moneda(
+                fila.currency_code_snapshot, fila.exchange_rate_snapshot, ajustes
+            )
 
         return PrototypeCostingInput(
             quantity=fila.quantity,
@@ -324,6 +380,8 @@ class PrototypeQuotationService:
             fixed_cost=fixed_cost,
             tax_percent=tax_percent,
             rounding_step=rounding_step,
+            currency=moneda,
+            exchange_rate=tasa_cambio,
             requested_at=momento,
         )
 
@@ -396,13 +454,14 @@ class PrototypeQuotationService:
             drying_days=fila.drying_days,
             adjustment_days=fila.adjustment_days,
             fixed_cost_override=fila.fixed_cost_override,
-            # Una confirmada muestra la moneda con la que se emitio; un borrador,
-            # la vigente. El documento firmado no cambia de moneda.
-            currency_code=(fila.currency_code_snapshot if congelado else ajustes.currency_code),
+            # Sale del COSTEO y no de la fila, para que lo que se muestra sea
+            # exactamente lo que se uso al convertir. Una confirmada devuelve la
+            # que congelo; un borrador, la que eligio.
+            currency_code=costeo.currency,
             currency_symbol=(
-                fila.currency_symbol_snapshot if congelado else ajustes.currency_symbol
+                fila.currency_symbol_snapshot or self._simbolo(costeo.currency, ajustes)
             ),
-            exchange_rate=fila.exchange_rate_snapshot,
+            exchange_rate=costeo.exchange_rate,
             costing=PrototypeCostBreakdownOut(
                 design_cost=costeo.design_cost,
                 artist_cost=costeo.artist_cost,
@@ -411,6 +470,9 @@ class PrototypeQuotationService:
                 firing_cost=costeo.firing_cost,
                 fixed_cost=costeo.fixed_cost,
                 base_cost=costeo.base_cost,
+                raw_net_total=costeo.raw_net_total,
+                currency=costeo.currency,
+                exchange_rate=costeo.exchange_rate,
                 raw_tax=costeo.raw_tax,
                 raw_gross_total=costeo.raw_gross_total,
                 commercial_net_total=costeo.commercial_net_total,
@@ -544,8 +606,21 @@ class PrototypeQuotationService:
     async def _aplicar(self, fila: PrototypeQuotation, datos: dict[str, Any]) -> None:
         """Escribe las ENTRADAS. Ningun importe: esos los calcula el backend."""
         materiales = datos.pop("materials", None)
+        moneda = datos.pop("currency_code", None)
+        tasa = datos.pop("exchange_rate", None)
         for campo, valor in datos.items():
             setattr(fila, campo, valor)
+
+        # La moneda se guarda en las mismas columnas que luego se congelan, tal
+        # como hace el Cotizador de producto: mientras es borrador describen la
+        # eleccion vigente, y al emitir dejan de moverse. Una segunda pareja de
+        # columnas «de borrador» daria dos sitios donde mirar la moneda, y algun
+        # dia dirian cosas distintas.
+        ajustes = await self._settings()
+        codigo, tasa_efectiva = self._resolver_moneda(moneda, tasa, ajustes)
+        fila.currency_code_snapshot = codigo
+        fila.currency_symbol_snapshot = self._simbolo(codigo, ajustes)
+        fila.exchange_rate_snapshot = tasa_efectiva
 
         if fila.customer_id is not None:
             cliente = await self._session.get(Partner, fila.customer_id)
@@ -603,8 +678,11 @@ class PrototypeQuotationService:
             linea.unit_cost_snapshot = material.unit_cost
             linea.product_name_snapshot = material.description
 
-        fila.currency_code_snapshot = ajustes.currency_code
-        fila.currency_symbol_snapshot = ajustes.currency_symbol
+        # Se congela la del BORRADOR, no la de Configuracion: sobrescribirla
+        # aqui emitiria en soles una cotizacion que se pacto en dolares.
+        fila.currency_code_snapshot = entrada.currency
+        fila.currency_symbol_snapshot = self._simbolo(entrada.currency, ajustes)
+        fila.exchange_rate_snapshot = entrada.exchange_rate
         fila.tax_percent_snapshot = entrada.tax_percent
         fila.rounding_step_snapshot = entrada.rounding_step
         fila.rounding_source_snapshot = ROUNDING_SOURCE_SETTINGS
@@ -765,6 +843,10 @@ def _snapshot(entrada: PrototypeCostingInput, costeo: PrototypeCosting) -> dict[
             "rounding_step": str(entrada.rounding_step),
             "firing_rate": str(entrada.firing_rate),
             "firing_days_per_batch": entrada.firing_days_per_batch,
+            "currency": entrada.currency,
+            "exchange_rate": (
+                str(entrada.exchange_rate) if entrada.exchange_rate is not None else None
+            ),
         },
         "breakdown": {
             "design_cost": str(costeo.design_cost),
@@ -774,6 +856,7 @@ def _snapshot(entrada: PrototypeCostingInput, costeo: PrototypeCosting) -> dict[
             "firing_cost": str(costeo.firing_cost),
             "fixed_cost": str(costeo.fixed_cost),
             "base_cost": str(costeo.base_cost),
+            "raw_net_total": str(costeo.raw_net_total),
             "raw_gross_total": str(costeo.raw_gross_total),
         },
         "days": {

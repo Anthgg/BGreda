@@ -20,6 +20,11 @@ De ahi salen tres reglas que no se pueden heredar de `price_line`:
 - **El matricero cuesta un precio FIJO.** Sus dias cuentan para el plazo, no
   multiplican su importe: `D13 = C13` en la hoja «Cotizador Prototipo». Es el
   error facil de este modelo, porque los otros dos conceptos si multiplican.
+- **La moneda de emision tampoco se reimplementa.** El costo se calcula siempre
+  en soles —los materiales, las tarifas y el costo fijo estan en soles— y solo
+  el NETO se lleva a la moneda del documento, con la misma
+  `convert_net_to_quote_currency` que usa el Cotizador principal. Convertir
+  concepto a concepto daria un desglose cuya suma no cuadra con el total.
 
 Todo en `Decimal`. Los importes se cuantizan a dos decimales una sola vez, al
 final de cada concepto, para que la suma de las partes sea exactamente el total
@@ -32,7 +37,12 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.core.pricing import ceil_to_step, reconstruct_net_and_tax
+from app.core.pricing import (
+    BASE_CURRENCY,
+    ceil_to_step,
+    convert_net_to_quote_currency,
+    reconstruct_net_and_tax,
+)
 
 ZERO = Decimal(0)
 MONEY = Decimal("0.01")
@@ -104,6 +114,13 @@ class PrototypeCostingInput:
     #: paso inventado es un precio inventado.
     rounding_step: Decimal
 
+    #: Moneda en la que se EMITE el documento. Los costos siguen en soles: esto
+    #: decide el precio que se factura, igual que en el Cotizador principal.
+    currency: str = BASE_CURRENCY
+    #: Cuantos soles vale un dolar. Obligatorio con USD y prohibido con PEN; lo
+    #: valida `convert_net_to_quote_currency`, que es la unica autoridad.
+    exchange_rate: Decimal | None = None
+
     requested_at: date | None = None
 
 
@@ -128,7 +145,15 @@ class PrototypeCosting:
     materials_cost: Decimal
     firing_cost: Decimal
     fixed_cost: Decimal
+    #: La suma de los conceptos, SIEMPRE en soles. Es el costo, no el precio.
     base_cost: Decimal
+
+    #: El mismo neto ya llevado a la moneda de emision. Con PEN coincide con
+    #: `base_cost`; con USD es lo que de verdad se cobra, y es sobre este
+    #: numero —no sobre el costo— sobre el que corren el IGV y el escalon.
+    raw_net_total: Decimal
+    currency: str
+    exchange_rate: Decimal | None
 
     #: Lo que da la aritmetica ANTES del escalon comercial. Viaja para poder
     #: explicar de donde sale el ajuste, no para imprimirlo.
@@ -231,8 +256,15 @@ def price_prototype(entrada: PrototypeCostingInput) -> PrototypeCosting:
 
     # Sin factor y sin margen: el neto de partida ES el costo base. Lo que si
     # se aplica es el escalon comercial, y una sola vez, sobre el bruto.
-    raw_tax = _money(base_cost * entrada.tax_percent / Decimal(100))
-    raw_gross_total = base_cost + raw_tax
+    #
+    # La conversion va ANTES del IGV y del escalon, como en `price_line`: el
+    # escalon es una politica sobre el numero que se firma, y firmar en dolares
+    # un bruto redondeado en soles daria un total que no termina en escalon.
+    raw_net_total = _money(
+        convert_net_to_quote_currency(base_cost, entrada.currency, entrada.exchange_rate)
+    )
+    raw_tax = _money(raw_net_total * entrada.tax_percent / Decimal(100))
+    raw_gross_total = raw_net_total + raw_tax
     commercial_gross_total = ceil_to_step(raw_gross_total, entrada.rounding_step)
     # Se reconstruye en vez de conservar el neto crudo: el numero que se firma
     # es el bruto, y dejar el neto viejo al lado de un bruto redondeado daria
@@ -265,6 +297,9 @@ def price_prototype(entrada: PrototypeCostingInput) -> PrototypeCosting:
         firing_cost=firing_cost,
         fixed_cost=fixed_cost,
         base_cost=base_cost,
+        raw_net_total=raw_net_total,
+        currency=entrada.currency,
+        exchange_rate=entrada.exchange_rate,
         raw_tax=raw_tax,
         raw_gross_total=raw_gross_total,
         commercial_net_total=commercial_net_total,
