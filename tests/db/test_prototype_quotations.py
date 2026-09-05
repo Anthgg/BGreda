@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -1301,8 +1302,7 @@ async def test_el_pdf_del_prototipo_usa_la_plantilla_global_de_cotizaciones(
     documento = await _confirmada(api, admin_csrf, db_session, "_pdfglobal")
     respuesta = await api.get(f"{COTIZADOR}/{documento['id']}/pdf", headers=head(admin_csrf))
     assert respuesta.status_code == 200, respuesta.text
-    paginas = PdfReader(io.BytesIO(respuesta.content)).pages
-    texto = "\n".join(p.extract_text() or "" for p in paginas)
+    texto = _texto_pdf(respuesta.content)
 
     # Los rotulos son los de `quotations/quotation.html`, literalmente. Se
     # comparan sin distinguir mayusculas porque el sistema documental las
@@ -1342,8 +1342,7 @@ async def test_el_plazo_y_lo_acordado_salen_en_las_condiciones_del_documento_glo
 
     respuesta = await api.get(f"{COTIZADOR}/{creada.json()['id']}/pdf", headers=head(admin_csrf))
     assert respuesta.status_code == 200, respuesta.text
-    paginas = PdfReader(io.BytesIO(respuesta.content)).pages
-    texto = "\n".join(p.extract_text() or "" for p in paginas)
+    texto = _texto_pdf(respuesta.content)
 
     assert "Plazo estimado de desarrollo: 6 días" in texto
     assert "Acabado: Mate" in texto
@@ -1381,8 +1380,30 @@ ESQUELETO_DOCUMENTAL = (
 )
 
 
+def aplanar(texto: str) -> str:
+    """Un texto sin depender de donde se partieron las lineas.
+
+    Vive aqui y no en el servicio porque es una preocupacion de QUIEN LEE
+    el papel, no de quien lo dibuja: el documento esta bien maquetado, lo
+    que no se puede es afirmar sobre el como si el corte de linea fuera
+    parte del contenido.
+    """
+    return re.sub(r"\s+", " ", texto)
+
+
 def _texto_pdf(contenido: bytes) -> str:
-    return "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(contenido)).pages)
+    """El texto del papel, con los espacios aplanados.
+
+    Un rotulo se busca por lo que DICE, no por donde el renderizador
+    decidio partir la linea. La primera version de estas pruebas no
+    aplanaba, y en la CI fallaba «P. Unitario» —la unica etiqueta de dos
+    palabras de una columna estrecha— mientras «Cant.» y «Subtotal», de la
+    MISMA fila, si aparecian: sin las mismas fuentes instaladas el ancho de
+    esa celda cambia y el corte cae entre «P.» y «Unitario». Atar la
+    asercion a eso probaba las fuentes de la maquina, no el documento.
+    """
+    crudo = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(contenido)).pages)
+    return aplanar(crudo)
 
 
 def _secciones(texto: str) -> set[str]:
@@ -1426,6 +1447,13 @@ async def test_el_cpr_y_el_ctz_son_el_mismo_documento(
 
     texto_ctz = _texto_pdf(papel_ctz.content)
     texto_cpr = _texto_pdf(papel_cpr.content)
+
+    # Que esta comparacion sobreviva a otra maquina no se da por supuesto.
+    # En la CI, sin las mismas fuentes, «P. Unitario» caia partido en dos
+    # lineas y la asercion fallaba mientras el documento estaba perfecto.
+    # Se comprueba aqui, con el corte puesto a mano, que aplanar lo salva.
+    assert "P. Unitario" in aplanar("... CANT. UNIDAD P.\nUnitario SUBTOTAL ...")
+    assert "Tecnica: Torno" in aplanar("Acabado: Mate Tecnica:\nTorno")
 
     secciones_ctz = _secciones(texto_ctz)
     assert secciones_ctz == set(ESQUELETO_DOCUMENTAL), sorted(
