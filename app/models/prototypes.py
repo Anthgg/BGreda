@@ -119,13 +119,25 @@ APPROVAL_COHERENT = (
 #: de que almacen salio. Antes de arrancar los dos pueden faltar —una muestra
 #: preliminar se registra sin saberlo todavia— pero una vez arrancada ya no.
 #:
+#: DOS origenes comerciales, no uno. Hasta 009K.1 el unico era la cotizacion de
+#: producto (`quotation_id`). 009K.1.1 anadio la cotizacion de prototipo
+#: (`prototype_quotation_id`), que es un origen igual de legitimo: tambien se
+#: emite, tambien se cobra, y es la que paga la muestra. La restriccion se
+#: quedo mirando solo el viejo, asi que una muestra nacida de un CPR pagado
+#: pasaba `evaluate_readiness` y moria contra la base al arrancar. Pedir
+#: CUALQUIERA de los dos es lo que hace que el papel y la tabla digan lo mismo.
+#:
+#: `stock_location_id` sigue siendo obligatorio: sin almacen no se sabe de
+#: donde salio el material, y eso no depende de quien pago.
+#:
 #: El PAGO no se puede comprobar aqui: vive en otra tabla y un CHECK no cruza
 #: filas. Lo impone el servicio, y hay pruebas contra PostgreSQL que lo
 #: demuestran con el inventario intacto detras.
 STARTED_REQUIRES_ORIGIN = (
     "status IS NULL"
     " OR status NOT IN ('STARTED', 'COMPLETED')"
-    " OR (quotation_id IS NOT NULL AND stock_location_id IS NOT NULL)"
+    " OR ((quotation_id IS NOT NULL OR prototype_quotation_id IS NOT NULL)"
+    " AND stock_location_id IS NOT NULL)"
 )
 
 
