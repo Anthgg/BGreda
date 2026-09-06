@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -25,7 +26,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.precision import percentage_numeric
+from app.core.precision import percentage_numeric, unit_cost_numeric
 from app.db.base import Base, TimestampMixin
 
 #: Identificador de la unica fila de cada tabla de configuracion.
@@ -154,6 +155,30 @@ class CommercialSettings(Base, VersionedSingletonMixin):
     )
 
     #: Paso del redondeo contractual del precio bruto. Solo 0,50 o 1,00.
+    #: Fase 009K.1.1. Tarifas por defecto del Cotizador de Prototipos. Viven
+    #: aqui y no en un modulo propio porque son politica comercial de la casa,
+    #: igual que el IGV o el paso de redondeo: un segundo motor de
+    #: configuracion daria dos sitios donde mirar y uno quedaria desactualizado.
+    #:
+    #: Nacen en cero a proposito. Un valor de arranque inventado se convierte
+    #: en un precio real en cuanto alguien cotiza sin mirar, y los numeros del
+    #: Excel (80, 100, 350) estan marcados ahi mismo como EJEMPLO.
+    prototype_design_rate: Mapped[Decimal] = mapped_column(
+        unit_cost_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
+    )
+    prototype_artist_rate: Mapped[Decimal] = mapped_column(
+        unit_cost_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
+    )
+    prototype_mold_maker_price: Mapped[Decimal] = mapped_column(
+        unit_cost_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
+    )
+    prototype_mold_maker_days: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), nullable=False, default=Decimal(0), server_default=text("0")
+    )
+    prototype_fixed_cost: Mapped[Decimal] = mapped_column(
+        unit_cost_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
+    )
+
     rounding_step: Mapped[Decimal] = mapped_column(
         percentage_numeric(),
         nullable=False,

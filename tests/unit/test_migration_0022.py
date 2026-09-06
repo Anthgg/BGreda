@@ -24,18 +24,6 @@ def test_migracion_0022_y_su_cadena() -> None:
     assert 'down_revision: str | None = "0021"' in contenido
 
 
-def test_alembic_una_sola_cabeza_y_es_0022() -> None:
-    """Una sola cabeza, y es la nueva.
-
-    Esta afirmacion se muda al ultimo archivo de cada fase a proposito: fijarla
-    en una revision concreta obliga a reescribir la prueba anterior cada vez, y
-    entonces deja de comprobar nada.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    heads = script.get_heads()
-    assert heads == ["0022"], heads
-
-
 def test_0021_sigue_siendo_alcanzable() -> None:
     """La cadena no se rompe: 0022 cuelga de 0021 y 0021 sigue existiendo."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))

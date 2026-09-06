@@ -232,6 +232,9 @@ async def reset_database(
             # en produccion; aqui hay que repetirla porque la base de test se
             # crea desde los modelos y ninguna migracion llega a correr.
             ("PROTOTYPE", "PRT", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 009K.1.1: cotizaciones de prototipo, CPR-2026-000001. Misma
+            # razon: la 0023 la siembra en produccion y aqui no corre.
+            ("PROTOTYPE_QUOTE", "CPR", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(
