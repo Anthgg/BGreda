@@ -113,15 +113,9 @@ def test_la_vuelta_atras_se_niega_cuando_hay_documentos_emitidos() -> None:
     assert "count(*) FROM prototype_quotations" in downgrade
 
 
-def test_alembic_una_sola_cabeza_y_es_0023() -> None:
-    """Una sola cabeza, y es la nueva.
-
-    Esta afirmacion se muda al ultimo archivo de cada fase a proposito: fijarla
-    en una revision concreta obliga a reescribir la prueba anterior cada vez, y
-    entonces deja de comprobar nada.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0023"], script.get_heads()
+# La afirmacion de «una sola cabeza» vivia aqui y se mudo a
+# `test_migration_0024.py`: siempre acompana a la ultima revision. Lo que 0023
+# sigue defendiendo es su propio eslabon de la cadena.
 
 
 def test_la_cadena_no_se_rompe() -> None:
