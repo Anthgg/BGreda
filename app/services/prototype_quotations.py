@@ -410,6 +410,8 @@ class PrototypeQuotationService:
             paid_at=fila.paid_at,
             confirmed_at=fila.confirmed_at,
             cancelled_at=fila.cancelled_at,
+            created_by_name=fila.created_by_name,
+            confirmed_by_name=fila.confirmed_by_name,
             customer_id=fila.customer_id,
             customer_name=fila.customer_name_snapshot,
             product_id=fila.product_id,
@@ -679,6 +681,10 @@ class PrototypeQuotationService:
         )
         fila.status = PrototypeQuotationStatus.CONFIRMED
         fila.confirmed_at = datetime.now(UTC)
+        # Fase 009K.2. Quien emite el CPR. `created_by_name` ya se copiaba al
+        # crear el borrador; esto cierra la otra mitad.
+        fila.confirmed_by = user.id
+        fila.confirmed_by_name = user.display_name
         # Se fija a mano, como en `update_draft`. Tras el flush, SQLAlchemy
         # expira las columnas que genera el servidor, y leer `updated_at`
         # despues dispara una recarga: una consulta escondida detras de un

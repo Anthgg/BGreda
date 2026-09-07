@@ -2012,6 +2012,9 @@ class QuotationBuilderService:
             commercial_factor=settings.default_quotation_factor,
             source_fingerprint=preview.source_fingerprint,
             created_by_id=user.id,
+            #: Fase 009K.2. Igual que en la via clasica: el nombre visible se
+            #: congela al crear, no al emitir.
+            created_by_name=user.display_name,
             items=[],
             # Inicializada, y no cargada despues: una coleccion sin cargar en
             # una fila recien creada dispara un lazy load, y `_apply` la lee
@@ -2075,6 +2078,8 @@ class QuotationBuilderService:
             raise QuotationBuilderIncompleteError(details=[{"warnings": recalculated.warnings}])
         row.status = QuotationStatus.CONFIRMED
         row.confirmed_at = datetime.now(UTC)
+        row.confirmed_by_id = user.id
+        row.confirmed_by_name = user.display_name
         # Fase 009G. La vigencia se congela aqui y solo aqui: es el unico
         # instante en que existe la cotizacion confirmada y todavia se sabe que
         # decia la configuracion. Leerla al generar el PDF hacia que cambiar el
@@ -2661,6 +2666,8 @@ class QuotationBuilderService:
             updated_at=row.updated_at,
             confirmed_at=row.confirmed_at,
             cancelled_at=row.cancelled_at,
+            created_by_name=row.created_by_name,
+            confirmed_by_name=row.confirmed_by_name,
             payment_status=row.payment_status,
             paid_at=row.paid_at,
         )

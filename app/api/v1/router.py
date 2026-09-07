@@ -19,6 +19,7 @@ from app.api.v1 import (
     recipes,
     settings,
     tracking,
+    users,
 )
 
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -40,3 +41,4 @@ api_v1_router.include_router(tracking.router)
 api_v1_router.include_router(prototypes.router)
 api_v1_router.include_router(prototype_quotations.router)
 api_v1_router.include_router(identity.router)
+api_v1_router.include_router(users.router)

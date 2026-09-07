@@ -185,6 +185,12 @@ class PrototypeQuotation(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     created_by_name: Mapped[str | None] = mapped_column(String(200))
 
+    #: Fase 009K.2. Quien la EMITIO. Mismo criterio que en el Cotizador: el
+    #: nombre se copia al confirmar y ya no se mueve, porque a partir de ahi
+    #: el documento es un compromiso y no una pantalla.
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    confirmed_by_name: Mapped[str | None] = mapped_column(String(200))
+
     lines: Mapped[list[PrototypeQuotationMaterial]] = relationship(
         "PrototypeQuotationMaterial",
         back_populates="quotation",

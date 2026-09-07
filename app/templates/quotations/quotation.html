@@ -151,6 +151,11 @@
 {% if doc.document.exchange_rate_text %}
 {% set _ = meta.append({'label': 'Tipo de cambio', 'value': doc.document.exchange_rate_text}) %}
 {% endif %}
+{# Fase 009K.2. Quien firma el papel. Va SIEMPRE, incluso cuando no consta:
+   un documento sin autor declarado lo dice —«No registrado»— en vez de dejar
+   un hueco que se lee como un olvido de maquetacion. El backend entrega el
+   nombre ya resuelto y congelado; aqui no se decide nada. #}
+{% set _ = meta.append({'label': 'Preparado por', 'value': doc.document.prepared_by}) %}
 
 {{ document_header(
      doc.company,

@@ -51,6 +51,7 @@ from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
 from app.services.storage import ObjectStorage, StorageUnavailableError
 from app.services.supabase_auth import SupabaseAuthClient
+from app.services.users import UserService
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
@@ -518,3 +519,14 @@ PrototypeQuotationPdfServiceDep = Annotated[
 PrototypeQuotationBridgeDep = Annotated[
     PrototypeQuotationBridge, Depends(get_prototype_quotation_bridge)
 ]
+
+
+async def get_user_service(
+    session: DbSessionDep,
+    supabase: SupabaseAuthDep,
+    audit: AuditRecorderDep,
+) -> UserService:
+    return UserService(session, supabase, audit)
+
+
+UserServiceDep = Annotated[UserService, Depends(get_user_service)]

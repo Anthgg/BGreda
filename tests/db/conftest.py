@@ -282,9 +282,42 @@ def storage() -> FakeObjectStorage:
 
 
 @pytest.fixture
+def supabase_fake() -> FakeSupabaseAuthClient:
+    """El doble de Supabase de esta prueba, accesible desde ella.
+
+    Se expone como fixture —antes vivia dentro de `api_app`— porque la
+    administracion de usuarios necesita mirar lo que se creo o se borro alli:
+    comprobar que un alta a medias se compenso exige poder preguntarselo.
+    """
+    client = FakeSupabaseAuthClient()
+    client.register(email=TEST_EMAIL, password=TEST_PASSWORD, user_id=TEST_USER_ID)
+    client.register(email=OPERATOR_EMAIL, password=OPERATOR_PASSWORD, user_id=OPERATOR_ID)
+    return client
+
+
+@pytest.fixture
+def profiles_fake() -> FakeProfileRepository:
+    """Los perfiles con los que autentica esta prueba.
+
+    Se expone —antes vivia dentro de `api_app`— porque la identidad documental
+    necesita poder anadir un segundo usuario y renombrar a uno existente: sin
+    eso no se puede comprobar que el nombre de un documento emitido no se mueve
+    cuando la persona cambia el suyo.
+    """
+    return FakeProfileRepository(
+        {
+            TEST_USER_ID: _profile(TEST_USER_ID, "Administrador", UserRole.ADMIN),
+            OPERATOR_ID: _profile(OPERATOR_ID, "Operario", UserRole.OPERATOR),
+        }
+    )
+
+
+@pytest.fixture
 def api_app(
     sessionmaker_for_tests: async_sessionmaker[AsyncSession],
     storage: FakeObjectStorage,
+    supabase_fake: FakeSupabaseAuthClient,
+    profiles_fake: FakeProfileRepository,
 ) -> FastAPI:
     """Aplicacion con PostgreSQL real y Supabase simulado."""
     from app.core.config import get_settings
@@ -292,16 +325,9 @@ def api_app(
     get_settings.cache_clear()
     application = create_app(get_settings())
 
-    supabase = FakeSupabaseAuthClient()
-    supabase.register(email=TEST_EMAIL, password=TEST_PASSWORD, user_id=TEST_USER_ID)
-    supabase.register(email=OPERATOR_EMAIL, password=OPERATOR_PASSWORD, user_id=OPERATOR_ID)
+    supabase = supabase_fake
 
-    profiles = FakeProfileRepository(
-        {
-            TEST_USER_ID: _profile(TEST_USER_ID, "Administrador", UserRole.ADMIN),
-            OPERATOR_ID: _profile(OPERATOR_ID, "Operario", UserRole.OPERATOR),
-        }
-    )
+    profiles = profiles_fake
 
     async def _session_override() -> AsyncIterator[AsyncSession]:
         async with sessionmaker_for_tests() as session:

@@ -1466,6 +1466,9 @@ class QuotationService:
             commercial_factor=Decimal(1),
             source_fingerprint="0" * 64,
             created_by_id=user.id,
+            # Fase 009K.2. El nombre se copia AQUI, al crearla. Guardarlo al
+            # confirmar seria tarde: el borrador ya se ensena con autor.
+            created_by_name=user.display_name,
         )
         self._session.add(quotation)
         await self._session.flush()
@@ -1562,6 +1565,11 @@ class QuotationService:
         await self._apply(quotation, payload, calculation)
         quotation.status = QuotationStatus.CONFIRMED
         quotation.confirmed_at = datetime.now(UTC)
+        # Fase 009K.2. Quien emite no siempre es quien escribio. Se copia el
+        # nombre, no solo el identificador: dentro de un ano el perfil puede
+        # llamarse de otra forma y este papel ya se habra enviado.
+        quotation.confirmed_by_id = user.id
+        quotation.confirmed_by_name = user.display_name
         # Fase 009G: misma congelacion que en el Cotizador. Las dos rutas de
         # confirmacion emiten el mismo PDF, asi que las dos tienen que dejar
         # escrito el plazo con el que se emitio.
@@ -1840,9 +1848,8 @@ class QuotationService:
             id=quotation.id,
             code=quotation.code,
             status=quotation.status,
-            created_by_id=str(quotation.created_by_id)
-            if quotation.created_by_id is not None
-            else None,
+            created_by_name=quotation.created_by_name,
+            confirmed_by_name=quotation.confirmed_by_name,
             confirmed_at=quotation.confirmed_at,
             cancelled_at=quotation.cancelled_at,
             created_at=quotation.created_at,

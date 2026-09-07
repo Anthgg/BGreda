@@ -403,7 +403,12 @@ class QuotationOut(QuotationCalculateOut):
     id: int
     code: str
     status: QuotationStatus
-    created_by_id: str | None
+    #: Fase 009K.2. NOMBRES, no identificadores. El UUID del actor se quedo
+    #: dentro: la pantalla ensena a una persona, y para eso no hace falta
+    #: publicar la clave con la que el sistema la busca. `None` en los
+    #: documentos anteriores a esta fase, que no registraron a nadie.
+    created_by_name: str | None = None
+    confirmed_by_name: str | None = None
     confirmed_at: datetime | None
     cancelled_at: datetime | None
     created_at: datetime
