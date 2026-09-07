@@ -189,6 +189,18 @@ class PrototypeCostBreakdownOut(BaseModel):
     materials: list[PrototypeQuotationMaterialOut] = Field(default_factory=list)
 
 
+class PrototypeQuotationPaymentIn(_Strict):
+    """Lo que hay que decir para cobrar una cotizacion de prototipo.
+
+    Fase 009K.4. Un solo dato, y obligatorio: de que almacen saldra el
+    material de la muestra. No se hereda de ningun sitio y no hay valor por
+    omision —tampoco cuando solo existe un almacen activo—, porque el dia que
+    haya dos, un default silencioso descontaria del equivocado sin avisar.
+    """
+
+    stock_location_id: int = Field(gt=0)
+
+
 class PrototypeQuotationOut(BaseModel):
     """La cotizacion completa, para la pantalla de quien cotiza."""
 
@@ -244,6 +256,14 @@ class PrototypeQuotationOut(BaseModel):
     #: La muestra fisica que nacio al cobrar, si ya se cobro.
     prototype_id: int | None = None
     prototype_code: str | None = None
+    #: Fase 009K.4. La orden de produccion que fabrica esa muestra.
+    #:
+    #: Es lo que la pantalla necesita para llevar al taller: el identificador
+    #: REAL de la orden, no el de la muestra. Deducir uno del otro funcionaria
+    #: mientras los correlativos coincidieran por casualidad y llevaria a la
+    #: orden equivocada el dia que dejaran de hacerlo.
+    production_order_id: int | None = None
+    production_order_code: str | None = None
 
     updated_at: datetime | None = None
 

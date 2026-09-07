@@ -43,6 +43,7 @@ from tests.db.test_prototype_quotations import (
     COTIZADOR,
     _caso_referencia,
     _payload,
+    cobrar,
 )
 from tests.db.test_quotation_builder_api import head
 
@@ -135,11 +136,13 @@ async def _muestra_de_cpr(
     assert creada.status_code == 201, creada.text
     confirmada = await api.post(f"{COTIZADOR}/{creada.json()['id']}/confirm", headers=head(csrf))
     assert confirmada.status_code == 200, confirmada.text
-    pagada = await api.post(f"{COTIZADOR}/{confirmada.json()['id']}/mark-paid", headers=head(csrf))
+    # Fase 009K.4: el almacen se decide AL COBRAR, porque cobrar es cuando se
+    # decide fabricar. Antes se le asignaba despues a la muestra.
+    almacen = await crear_ubicacion(api, csrf, f"Almacen CPR{sufijo}")
+    pagada = await cobrar(api, csrf, confirmada.json()["id"], stock_location_id=almacen)
     assert pagada.status_code == 200, pagada.text
 
     muestra_id = int(pagada.json()["prototype_id"])
-    almacen = await crear_ubicacion(api, csrf, f"Almacen CPR{sufijo}")
     await dar_existencia(
         api, csrf, product_id=caso["_pasta"]["id"], location_id=almacen, cantidad=existencia
     )

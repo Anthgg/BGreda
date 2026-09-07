@@ -39,7 +39,9 @@ from app.core.prototype_pricing import (
     price_prototype,
 )
 from app.models.audit import AuditAction
+from app.models.inventory import StockLocation
 from app.models.masters import Partner, Product, ProductType
+from app.models.production import ProductionOrder
 from app.models.prototype_quotations import (
     PrototypeQuotation,
     PrototypeQuotationMaterial,
@@ -63,6 +65,7 @@ from app.schemas.prototype_quotations import (
 )
 from app.services.audit import AuditRecorder
 from app.services.masters import MasterDataService
+from app.services.production import ProductionOrderService
 from app.services.sequences import SequenceService
 
 ZERO = Decimal(0)
@@ -101,6 +104,19 @@ class PrototypeQuotationNotConfirmableError(APIError):
     status_code = 409
     code = "PROTOTYPE_QUOTATION_NOT_CONFIRMABLE"
     message = "Solo se puede emitir una cotizacion de prototipo en borrador"
+
+
+class PrototypeQuotationStockLocationInvalidError(APIError):
+    """Fase 009K.4. Cobrar exige decir de que almacen saldra el material.
+
+    No hay ubicacion por defecto ni aunque hoy solo exista una: el dia que
+    haya dos, un default silencioso descontaria del almacen equivocado sin
+    avisar. Por eso ausente, inexistente e inactivo dan todos el mismo no.
+    """
+
+    status_code = 422
+    code = "PROTOTYPE_QUOTATION_STOCK_LOCATION_INVALID"
+    message = "Indica un almacen activo del que saldra el material de la muestra"
 
 
 class PrototypeQuotationNotPayableError(APIError):
@@ -165,10 +181,16 @@ class PrototypeQuotationService:
         session: AsyncSession,
         audit: AuditRecorder,
         sequences: SequenceService,
+        ordenes: ProductionOrderService | None = None,
     ) -> None:
         self._session = session
         self._audit = audit
         self._sequences = sequences
+        # Fase 009K.4. Cobrar materializa tambien la orden de produccion, y se
+        # hace con EL servicio de ordenes, no con una copia: el correlativo, la
+        # unicidad por muestra y la auditoria son suyos, y un segundo camino
+        # que insertara ordenes acabaria divergiendo del primero.
+        self._ordenes = ordenes or ProductionOrderService(session, audit, sequences)
 
     # -- Lectura -----------------------------------------------------------
     def _base_query(self) -> Select[tuple[PrototypeQuotation]]:
@@ -392,6 +414,16 @@ class PrototypeQuotationService:
             if fila.id
             else None
         )
+        # Fase 009K.4. La orden que fabrica esa muestra, si existe. Se lee
+        # aqui —no se deduce ni se busca por codigo— porque su identificador
+        # es lo unico que lleva a la orden correcta.
+        orden = (
+            await self._session.scalar(
+                select(ProductionOrder).where(ProductionOrder.prototype_id == muestra.id).limit(1)
+            )
+            if muestra is not None
+            else None
+        )
         por_producto = {linea.product_id: linea for linea in fila.lines}
         # La identidad del producto sale del maestro, no de la cotizacion: si
         # todavia no existe, la pantalla tiene que poder decir «pendiente» en
@@ -498,6 +530,8 @@ class PrototypeQuotationService:
             ),
             prototype_id=muestra.id if muestra else None,
             prototype_code=muestra.code if muestra else None,
+            production_order_id=orden.id if orden else None,
+            production_order_code=orden.code if orden else None,
             updated_at=fila.updated_at,
         )
 
@@ -727,26 +761,51 @@ class PrototypeQuotationService:
         return fila
 
     async def mark_paid(
-        self, quotation_id: int, *, user: AuthenticatedUser
-    ) -> tuple[PrototypeQuotation, Prototype]:
-        """Registra el cobro y habilita la muestra para el taller.
+        self,
+        quotation_id: int,
+        *,
+        stock_location_id: int,
+        user: AuthenticatedUser,
+    ) -> tuple[PrototypeQuotation, Prototype, ProductionOrder]:
+        """Registra el cobro y deja la muestra lista para el taller.
 
-        Cobrar NO gasta material. Lo unico que hace es abrir la puerta: la
-        muestra fisica queda creada y arrancable, y el consumo ocurre al
-        arrancarla, que es cuando el barro sale de verdad del almacen.
+        Cobrar NO gasta material. Lo unico que hace es abrir la puerta: quedan
+        creados el producto, la muestra fisica y su ORDEN DE PRODUCCION, y el
+        consumo ocurre al arrancarla, que es cuando el barro sale de verdad
+        del almacen.
 
-        Es idempotente porque un reintento del navegador no puede duplicar ni
-        el cobro ni la muestra.
+        Fase 009K.4: el almacen llega de fuera y es OBLIGATORIO. No se deduce,
+        no se hereda y no se toma «el unico que hay»: el proyecto decidio hace
+        tiempo que no existe ubicacion por defecto ni aunque hoy solo exista
+        una, porque el dia que haya dos un default silencioso descontaria del
+        almacen equivocado sin avisar. Quien cobra decide de donde va a salir
+        el material, igual que quien crea una orden de cotizacion.
+
+        Es idempotente: un reintento del navegador no puede duplicar el cobro,
+        ni la muestra, ni el producto, ni la orden. Y un segundo cobro con OTRO
+        almacen no mueve el de la orden que ya existe —eso cambiaria en
+        silencio de donde sale el material de algo ya decidido—: devuelve la
+        orden tal como esta.
         """
         fila = await self.get(quotation_id, for_update=True)
         if fila.status is not PrototypeQuotationStatus.CONFIRMED:
             raise PrototypeQuotationNotPayableError()
 
+        # El almacen se valida ANTES de tocar nada. Un cobro que va a
+        # rechazarse no tiene por que dejar a medias un producto ni una
+        # muestra.
+        location = await self._session.get(StockLocation, stock_location_id)
+        if location is None or not location.active:
+            raise PrototypeQuotationStockLocationInvalidError()
+
         muestra = await self._session.scalar(
             select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
         )
         if fila.payment_status is PrototypeQuotationPaymentStatus.PAID and muestra is not None:
-            return fila, muestra
+            orden, _ = await self._ordenes.create_for_prototype(
+                prototype=muestra, stock_location_id=stock_location_id, user=user
+            )
+            return fila, muestra, orden
 
         if fila.payment_status is not PrototypeQuotationPaymentStatus.PAID:
             fila.payment_status = PrototypeQuotationPaymentStatus.PAID
@@ -762,6 +821,14 @@ class PrototypeQuotationService:
         if muestra is None:
             muestra = await self._crear_muestra(fila, user=user)
 
+        # La orden nace DESPUES del producto y la muestra, porque necesita a
+        # los dos, y dentro de la misma transaccion: si crearla fallara, el
+        # cobro entero se deshace y no queda una muestra pagada sin forma de
+        # fabricarla.
+        orden, _ = await self._ordenes.create_for_prototype(
+            prototype=muestra, stock_location_id=stock_location_id, user=user
+        )
+
         fila.updated_at = datetime.now(UTC)
         await self._session.flush()
         self._audit.record_action(
@@ -770,9 +837,14 @@ class PrototypeQuotationService:
             action=AuditAction.UPDATE,
             user_id=user.id,
             user_display_name=user.display_name,
-            metadata={"event": "PAID", "prototype_id": muestra.id},
+            metadata={
+                "event": "PAID",
+                "prototype_id": muestra.id,
+                "production_order_id": orden.id,
+                "stock_location_id": stock_location_id,
+            },
         )
-        return fila, muestra
+        return fila, muestra, orden
 
     async def _materializar_producto(
         self, fila: PrototypeQuotation, *, user: AuthenticatedUser

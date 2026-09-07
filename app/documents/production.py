@@ -23,6 +23,7 @@ una fila sin mirar el `if`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -121,6 +122,33 @@ class ProductionDocLine:
     missing_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PrototypeOriginInfo:
+    """De donde viene una orden que fabrica una muestra. Fase 009K.4.
+
+    Los dos codigos, y nada mas. La cotizacion de prototipo tiene precio de
+    diseno, de artista y de moldeo; ninguno ayuda a fabricar la pieza y ninguno
+    tiene sitio donde entrar aqui.
+    """
+
+    quotation_code: str | None
+    prototype_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PrototypeMaterialRow:
+    """Un material que la muestra va a gastar, ya formateado.
+
+    Llega resuelto por la misma razon que `prepared_names`: construir un
+    documento no puede depender de una sesion abierta, y formatear la cantidad
+    aqui crearia un segundo formato para el mismo numero.
+    """
+
+    name: str
+    reference: str | None
+    required_formatted: str | None
+
+
 @dataclass(slots=True)
 class ProductionOrderDocument:
     """Hoja de taller completa. Interna: exige sesion para obtenerse."""
@@ -211,6 +239,60 @@ class PublicTrackingSheet:
 # ---------------------------------------------------------------------------
 # Constructores
 # ---------------------------------------------------------------------------
+def _prototype_doc_lines(
+    order: ProductionOrder,
+    materials: Sequence[PrototypeMaterialRow],
+) -> list[ProductionDocLine]:
+    """Las filas de una orden de muestra: una por material de la pieza.
+
+    Una muestra es UNA pieza con varios materiales elegidos a mano, justo al
+    reves que una orden de cotizacion, donde cada fila es un producto distinto
+    con su material derivado de la receta. Quien va a fabricarla necesita ver
+    la lista de lo que va a gastar, asi que la lista manda sobre las filas.
+
+    La pieza se repite en cada fila para que ninguna sea anonima, pero la
+    CANTIDAD se imprime una sola vez: repetir «1» tres veces en una columna que
+    se lee de arriba abajo invita a sumar tres piezas donde hay una.
+    """
+    pieza = order.lines[0] if order.lines else None
+    nombre = pieza.product_name_snapshot if pieza is not None else "—"
+    referencia = pieza.product_internal_reference_snapshot if pieza is not None else None
+    medidas = format_dimensions(pieza) if pieza is not None else None
+    cantidad = f"{pieza.quantity:,}" if pieza is not None and pieza.quantity is not None else "—"
+
+    if not materials:
+        # Una muestra sin materiales lo DICE. Un hueco donde deberia ir la
+        # lista se lee como «no hace falta nada», y no es lo mismo.
+        return [
+            ProductionDocLine(
+                line_number=1,
+                product_name=nombre,
+                product_reference=referencia,
+                dimensions_formatted=medidas,
+                quantity_formatted=cantidad,
+                prepared_product_name=None,
+                prepared_product_reference=None,
+                required_formatted=None,
+                missing_reason="La muestra no tiene materiales elegidos",
+            )
+        ]
+
+    return [
+        ProductionDocLine(
+            line_number=index,
+            product_name=nombre,
+            product_reference=referencia,
+            dimensions_formatted=medidas,
+            quantity_formatted=cantidad if index == 1 else "",
+            prepared_product_name=material.name,
+            prepared_product_reference=material.reference,
+            required_formatted=material.required_formatted,
+            missing_reason=None,
+        )
+        for index, material in enumerate(materials, start=1)
+    ]
+
+
 def build_production_order_document(
     *,
     order: ProductionOrder,
@@ -220,15 +302,32 @@ def build_production_order_document(
     prepared_names: dict[int, tuple[str, str]],
     qr_data_uri: str | None,
     qr_caption: str,
+    prototype_origin: PrototypeOriginInfo | None = None,
+    prototype_materials: Sequence[PrototypeMaterialRow] = (),
 ) -> ProductionOrderDocument:
-    """Arma la hoja de taller.
+    """Arma la hoja de taller. La MISMA para los dos origenes.
 
     `prepared_names` mapea el id del preparado a (nombre, codigo interno). Se
     recibe ya resuelto para que este modulo no toque la base: construir un
-    documento no puede depender de una sesion abierta.
+    documento no puede depender de una sesion abierta. Por lo mismo llegan
+    resueltos el origen y los materiales de una muestra.
+
+    Fase 009K.4. Una orden nacida de una muestra imprime esta hoja y no otra.
+    Cambian dos cosas y solo dos: el hecho que dice de donde viene, y de donde
+    salen las filas de material —de la receta congelada en la cotizacion, o de
+    lo que alguien eligio a mano en la muestra—. Un segundo documento habria
+    duplicado la maquetacion, el QR, los estados y el aviso operativo para no
+    repetir esas dos.
     """
-    facts = [
-        DocFact("Cotización origen", quotation_code or "—"),
+    facts = (
+        [
+            DocFact("Origen", prototype_origin.quotation_code or "—"),
+            DocFact("Muestra", prototype_origin.prototype_code or "—"),
+        ]
+        if prototype_origin is not None
+        else [DocFact("Cotización origen", quotation_code or "—")]
+    )
+    facts += [
         DocFact("Almacén de salida", stock_location_name or "—"),
         DocFact("Creada", format_datetime_display(order.created_at) or "—"),
         DocFact("Arrancada", format_datetime_display(order.started_at) or "—"),
@@ -236,6 +335,21 @@ def build_production_order_document(
     ]
     if order.cancelled_at is not None:
         facts.append(DocFact("Anulada", format_datetime_display(order.cancelled_at) or "—"))
+
+    if prototype_origin is not None:
+        return ProductionOrderDocument(
+            company=company,
+            title=PRODUCTION_ORDER_TITLE,
+            code=order.code,
+            status_label=_INTERNAL_STATUS_LABELS[order.status],
+            status_tone=_STATUS_TONES[order.status],
+            is_cancelled=order.status is ProductionOrderStatus.CANCELLED,
+            facts=facts,
+            lines=_prototype_doc_lines(order, prototype_materials),
+            total_pieces=sum(line.quantity or 0 for line in order.lines),
+            qr_data_uri=qr_data_uri,
+            qr_caption=qr_caption,
+        )
 
     lines: list[ProductionDocLine] = []
     total = 0

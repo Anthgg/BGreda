@@ -27,6 +27,7 @@ from app.schemas.prototype_quotations import (
     PrototypeQuotationListItemOut,
     PrototypeQuotationOut,
     PrototypeQuotationPage,
+    PrototypeQuotationPaymentIn,
     PrototypeQuotationUpdateIn,
 )
 
@@ -151,17 +152,24 @@ async def cancel_prototype_quotation(
 @router.post("/{quotation_id}/mark-paid", response_model=PrototypeQuotationOut)
 async def mark_prototype_quotation_paid(
     quotation_id: int,
+    payload: PrototypeQuotationPaymentIn,
     service: PrototypeQuotationServiceDep,
     admin: AdminUserDep,
     session: DbSessionDep,
 ) -> PrototypeQuotationOut:
-    """Registra el cobro y habilita la muestra para el taller.
+    """Registra el cobro y deja la muestra lista para el taller.
 
-    No gasta material: eso ocurre al arrancarla. Devuelve la cotizacion con la
-    muestra ya asociada, para que la pantalla pueda enlazarla sin pedirla otra
-    vez.
+    No gasta material: eso ocurre al arrancar la orden. Devuelve la cotizacion
+    con la muestra Y la orden de produccion ya asociadas, para que la pantalla
+    pueda llevar al taller sin pedirlas otra vez.
+
+    Fase 009K.4: el almacen es obligatorio y explicito. Cobrar es el momento en
+    que alguien decide fabricar, y decidir fabricar incluye decir de donde va a
+    salir el material.
     """
-    fila, _muestra = await service.mark_paid(quotation_id, user=admin)
+    fila, _muestra, _orden = await service.mark_paid(
+        quotation_id, stock_location_id=payload.stock_location_id, user=admin
+    )
     resultado = await service.present(fila)
     await session.commit()
     return resultado

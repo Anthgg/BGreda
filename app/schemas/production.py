@@ -10,19 +10,24 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.production import ProductionOrderStatus, ProductionReadinessCode
 from app.models.quotations import QuotationPaymentStatus
 
 
 class ProductionOrderCreateIn(BaseModel):
-    """Alta de la orden de una cotizacion confirmada."""
+    """Alta de una orden. De una cotizacion confirmada, o de una muestra."""
 
     model_config = ConfigDict(extra="forbid")
 
-    quotation_id: int = Field(gt=0)
+    quotation_id: int | None = Field(default=None, gt=0)
+    #: Fase 009K.4. El otro origen posible. Se usa para las ITERACIONES: una
+    #: muestra sucesora no tiene cotizacion de prototipo propia que cobrar, y
+    #: sin esta puerta no podria fabricarse por el camino unico.
+    prototype_id: int | None = Field(default=None, gt=0)
     #: Obligatoria y explicita. No se resuelve por defecto ni cuando solo hay
     #: una ubicacion: el dia que haya dos, el default silencioso descontaria
     #: del almacen equivocado sin que nadie lo notara.
@@ -30,6 +35,18 @@ class ProductionOrderCreateIn(BaseModel):
     #: Solo para reintentos de red. La unicidad de verdad la impone el UNIQUE
     #: de `quotation_id` en la base.
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
+
+    @model_validator(mode="after")
+    def _exactamente_un_origen(self) -> ProductionOrderCreateIn:
+        """Uno de los dos, nunca los dos ni ninguno.
+
+        Es la misma regla que el CHECK `exactly_one_origin` de la tabla, dicha
+        aqui para que quien se equivoque reciba un 422 que explica el error y
+        no un 500 con un mensaje de PostgreSQL.
+        """
+        if (self.quotation_id is None) == (self.prototype_id is None):
+            raise ValueError("Indica una cotización o una muestra, y solo una de las dos.")
+        return self
 
 
 class ReadinessIssueOut(BaseModel):
@@ -51,11 +68,26 @@ class ProductionReadinessOut(BaseModel):
     issues: list[ReadinessIssueOut]
 
 
+class ProductionOrderOrigin(StrEnum):
+    """De donde nace una orden de produccion. Fase 009K.4.
+
+    Lo dice el BACKEND y viaja explicito. La alternativa —que el navegador lo
+    deduzca de que campo venga relleno— convierte una regla del dominio en una
+    heuristica de pantalla, y el dia que se anada un tercer origen habra dos
+    sitios donde arreglarlo.
+    """
+
+    QUOTATION = "QUOTATION"
+    PROTOTYPE = "PROTOTYPE"
+
+
 class ProductionOrderLineOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    quotation_item_id: int
+    #: Nulo en la linea de una orden de MUESTRA (Fase 009K.4): no copia ningun
+    #: item de cotizacion porque no hay cotizacion de la que copiar.
+    quotation_item_id: int | None
     sort_order: int
     product_id: int
     product_name: str
@@ -81,8 +113,18 @@ class ProductionOrderSummaryOut(BaseModel):
     id: int
     code: str
     status: ProductionOrderStatus
-    quotation_id: int
-    quotation_code: str
+    #: Fase 009K.4. El origen, dicho por el backend.
+    origin_type: ProductionOrderOrigin = ProductionOrderOrigin.QUOTATION
+    #: Nulos cuando la orden nace de una muestra.
+    quotation_id: int | None = None
+    quotation_code: str | None = None
+    #: Nulos cuando la orden nace de una cotizacion.
+    prototype_id: int | None = None
+    prototype_code: str | None = None
+    #: La cotizacion de prototipo de la que salio la muestra, si la hubo. Es
+    #: el documento que el taller reconoce, y por eso viaja al lado del PRT.
+    prototype_quotation_id: int | None = None
+    prototype_quotation_code: str | None = None
     stock_location_id: int
     stock_location_name: str
     line_count: int

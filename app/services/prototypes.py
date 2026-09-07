@@ -950,6 +950,17 @@ class PrototypeService:
             else None
         )
         readiness = await self.evaluate_readiness(prototype)
+        # Fase 009K.4. Se LEE la orden; jamas se crea. Un GET que materializara
+        # una orden convertiria abrir una ficha en un acto de gestion, y las 11
+        # muestras historicas quedarian con ordenes que nadie pidio y con un
+        # almacen que nadie eligio.
+        orden = (
+            await self._session.execute(
+                select(ProductionOrder.id, ProductionOrder.code).where(
+                    ProductionOrder.prototype_id == prototype.id
+                )
+            )
+        ).first()
         # Las cotizaciones que NACIERON de esta muestra. Se consultan aqui y no
         # por relacion: son pocas, se leen una sola vez, y una coleccion cargada
         # en cada listado costaria una consulta por fila.
@@ -992,6 +1003,8 @@ class PrototypeService:
                 PrototypeOriginQuotationOut(id=fila.id, code=fila.code, status=fila.status.value)
                 for fila in originadas
             ],
+            production_order_id=orden.id if orden is not None else None,
+            production_order_code=orden.code if orden is not None else None,
             materials=[
                 PrototypeMaterialOut(
                     id=linea.id,
@@ -1074,6 +1087,12 @@ async def assert_prototypes_approved(
     vigente de ese pedido no este aprobada para que no se pueda arrancar: no
     hay forma de fabricar media orden.
     """
+    # Fase 009K.4: una orden de MUESTRA no tiene cotizacion, y tampoco tiene
+    # sentido preguntarle a una muestra si ella misma esta aprobada antes de
+    # fabricarla. Quien llama ya no invoca este guardia en esa rama; la salida
+    # temprana esta aqui igualmente para que la funcion sea correcta sola.
+    if order.quotation_id is None:
+        return
     pendientes = await service.blocking_prototypes(order.quotation_id)
     if pendientes:
         raise ProductionOrderPrototypeNotApprovedError(

@@ -9,6 +9,20 @@ la orden es papeleo: reserva el correlativo, congela lo que hay que fabricar y
 no toca ni un gramo de inventario. Arrancarla es el hecho fisico: descuenta el
 material preparado y deja el movimiento que lo prueba. Quien crea una orden por
 error no ha gastado nada; quien la arranca, si.
+
+Fase 009K.4: la orden gana un SEGUNDO origen. Hasta aqui toda orden nacia de
+una cotizacion, y una muestra fisica se fabricaba por un camino operativo
+propio —su pantalla, su arranque, su consumo—. Dos sistemas para el mismo
+hecho acaban discrepando, y el taller tenia que aprenderse los dos. Ahora la
+orden es el unico documento de ejecucion fisica y puede venir de una
+cotizacion **o** de una muestra, nunca de las dos ni de ninguna: eso lo impone
+un CHECK, no la buena voluntad del servicio.
+
+Lo que NO se unifica es lo que de verdad es distinto. Una orden de cotizacion
+deriva su material de la receta congelada; una de muestra lo toma de las lineas
+que alguien eligio a mano en el prototipo. Y el movimiento sigue siendo
+`PROTOTYPE_OUT` para las muestras: cambiarlo a `PRODUCTION_OUT` habria
+reescrito el significado de todo el historico de inventario.
 """
 
 from __future__ import annotations
@@ -41,6 +55,17 @@ QR_TOKEN_LENGTH = 64
 #: Minimo de entropia exigido por el esquema. Impide que alguien guarde ahi el
 #: codigo de la orden o un correlativo corto.
 QR_TOKEN_MIN_LENGTH = 32
+
+
+#: Fase 009K.4. Una orden tiene EXACTAMENTE un origen.
+#:
+#: No es cortesia: sin esto cabrian una orden sin origen —que no sabria que
+#: fabricar— y una orden con los dos, que tendria dos modelos de material
+#: contradictorios y dos tipos de movimiento para el mismo arranque.
+EXACTLY_ONE_ORIGIN = (
+    "(quotation_id IS NOT NULL AND prototype_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL)"
+)
 
 
 class ProductionOrderStatus(StrEnum):
@@ -104,6 +129,15 @@ class ProductionReadinessCode(StrEnum):
     UNSUPPORTED_UOM_CONVERSION = "UNSUPPORTED_UOM_CONVERSION"
     #: La ubicacion de la orden ya no sirve para descontar.
     INVALID_STOCK_LOCATION = "INVALID_STOCK_LOCATION"
+    #: Fase 009K.4. La orden dice fabricar una muestra que ya no esta.
+    PROTOTYPE_MISSING = "PROTOTYPE_MISSING"
+    #: Fase 009K.4. La muestra no tiene materiales elegidos. Sin ellos no hay
+    #: nada que descontar, y una muestra que no gasta nada es una ficha sin
+    #: llenar, no una muestra.
+    MISSING_MATERIAL_LINES = "MISSING_MATERIAL_LINES"
+    #: Fase 009K.4. La cotizacion de prototipo de la que nacio no consta
+    #: cobrada. Es el equivalente al guardia de pago de una cotizacion.
+    PROTOTYPE_QUOTATION_NOT_PAID = "PROTOTYPE_QUOTATION_NOT_PAID"
 
 
 class ProductionOrder(Base, TimestampMixin):
@@ -118,8 +152,22 @@ class ProductionOrder(Base, TimestampMixin):
     #: compruebe antes de insertar no basta: dos peticiones simultaneas pasan
     #: las dos la comprobacion y crean dos ordenes del mismo pedido, cada una
     #: dispuesta a consumir el material entero.
-    quotation_id: Mapped[int] = mapped_column(
-        ForeignKey("quotations.id", ondelete="RESTRICT"), nullable=False, unique=True
+    #:
+    #: Fase 009K.4: anulable, porque una orden puede nacer de una MUESTRA en
+    #: vez de una cotizacion. Anulable no significa opcional: el CHECK
+    #: `exactly_one_origin` sigue exigiendo exactamente uno de los dos.
+    quotation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quotations.id", ondelete="RESTRICT"), unique=True
+    )
+
+    #: Fase 009K.4. La muestra fisica que esta orden fabrica, si nacio de una.
+    #:
+    #: UNICA por el mismo motivo que `quotation_id`: es lo unico que impide que
+    #: dos cobros simultaneos de la misma cotizacion de prototipo creen dos
+    #: ordenes, cada una dispuesta a gastar el barro entero. RESTRICT como el
+    #: resto del proyecto: una muestra con orden no se borra por debajo.
+    prototype_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prototypes.id", ondelete="RESTRICT"), unique=True
     )
 
     #: De donde sale el material. Explicita siempre: no hay ubicacion por
@@ -161,6 +209,7 @@ class ProductionOrder(Base, TimestampMixin):
         CheckConstraint(
             f"length(btrim(qr_token)) >= {QR_TOKEN_MIN_LENGTH}", name="qr_token_long_enough"
         ),
+        CheckConstraint(EXACTLY_ONE_ORIGIN, name="exactly_one_origin"),
     )
 
     lines: Mapped[list[ProductionOrderLine]] = relationship(
@@ -172,7 +221,15 @@ class ProductionOrder(Base, TimestampMixin):
 
 
 class ProductionOrderLine(Base, TimestampMixin):
-    """Lo que hay que fabricar, copiado de la cotizacion confirmada.
+    """Lo que hay que fabricar.
+
+    En una orden de COTIZACION es una copia de la linea confirmada, y hay una
+    por producto. En una orden de MUESTRA es una sola linea: la pieza que el
+    taller va a fabricar, con `quotation_item_id` en nulo porque no hay
+    cotizacion de la que copiar. El material de esa orden NO sale de aqui sino
+    de `prototype_material_lines`, que es donde alguien lo eligio a mano.
+
+    Lo demas no cambia: copia, no referencia viva.
 
     Todos los datos tecnicos son copia y no referencia viva. Al arrancar no se
     vuelve a leer el maestro: si alguien cambia la receta o el gramaje entre
@@ -187,8 +244,12 @@ class ProductionOrderLine(Base, TimestampMixin):
     production_order_id: Mapped[int] = mapped_column(
         ForeignKey("production_orders.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    quotation_item_id: Mapped[int] = mapped_column(
-        ForeignKey("quotation_items.id", ondelete="RESTRICT"), nullable=False
+    #: Fase 009K.4: anulable, porque la linea de una orden de MUESTRA no
+    #: copia ninguna linea de cotizacion —no hay cotizacion—. Para una orden
+    #: de cotizacion sigue siendo obligatoria, y eso lo exige el servicio al
+    #: crearla: la base no puede expresarlo sin mirar la tabla de al lado.
+    quotation_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quotation_items.id", ondelete="RESTRICT")
     )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 

@@ -268,6 +268,17 @@ class PrototypeOut(PrototypeSummaryOut):
     quotation_payment_status: str | None
     materials: list[PrototypeMaterialOut]
     readiness: PrototypeReadinessOut
+    #: Fase 009K.4. La orden que fabrica esta muestra, si existe. Nula en las
+    #: 11 anteriores a esta fase, que se hicieron sin orden: no se les invento
+    #: una retroactiva porque nadie la creo ni eligio su almacen.
+    #:
+    #: Es lo que permite a la pantalla mandar a quien abre una muestra a la
+    #: orden, en vez de ensenarle un segundo flujo operativo para el mismo
+    #: hecho fisico. Va en la FICHA y no en el listado: el salto ocurre al
+    #: abrir una, y ponerlo en cada fila costaria una consulta por fila para
+    #: un dato que el listado no pinta.
+    production_order_id: int | None = None
+    production_order_code: str | None = None
 
 
 class PrototypePage(BaseModel):
