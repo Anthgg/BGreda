@@ -200,6 +200,11 @@ class PrototypeQuotationOut(BaseModel):
     confirmed_at: datetime | None = None
     cancelled_at: datetime | None = None
 
+    #: Fase 009K.2. Quien la preparo y quien la emitio, por nombre visible del
+    #: dia en que ocurrio. Sin identificadores: la pantalla ensena personas.
+    created_by_name: str | None = None
+    confirmed_by_name: str | None = None
+
     customer_id: int | None = None
     customer_name: str | None = None
     product_id: int | None = None

@@ -105,15 +105,8 @@ def test_el_downgrade_aborta_si_hay_muestras_de_cpr_arrancadas() -> None:
         assert prohibido not in downgrade, prohibido
 
 
-def test_alembic_una_sola_cabeza_y_es_0024() -> None:
-    """Una sola cabeza, y es la nueva.
-
-    Esta afirmacion se muda al ultimo archivo de cada fase a proposito: fijarla
-    en una revision concreta obliga a reescribir la prueba anterior cada vez, y
-    entonces deja de comprobar nada.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0024"], script.get_heads()
+# La afirmacion de «una sola cabeza» vivia aqui y se mudo a
+# `test_migration_0025.py`: siempre acompana a la ultima revision.
 
 
 def test_la_cadena_no_se_rompe() -> None:

@@ -370,6 +370,18 @@ class Quotation(Base, TimestampMixin):
     )
 
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    #: Fase 009K.2. El nombre visible de quien la creo, COPIADO al crearla.
+    #:
+    #: No es redundante con `created_by_id`: el identificador dice a quien
+    #: preguntar hoy, y esto dice que ponia en el papel aquel dia. Si manana
+    #: esa persona se casa, se cambia el nombre o deja la casa, una cotizacion
+    #: de hace un ano no puede empezar a decir otra cosa.
+    created_by_name: Mapped[str | None] = mapped_column(String(200))
+
+    #: Quien la EMITIO, que no siempre es quien la escribio: un borrador puede
+    #: prepararlo alguien y firmarlo otro. Nulos mientras siga en borrador.
+    confirmed_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    confirmed_by_name: Mapped[str | None] = mapped_column(String(200))
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

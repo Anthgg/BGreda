@@ -519,6 +519,12 @@ class QuotationBuilderOut(BaseModel):
     updated_at: datetime | None = None
     confirmed_at: datetime | None = None
     cancelled_at: datetime | None = None
+    #: Fase 009K.2. Quien la preparo y quien la emitio, por su nombre visible
+    #: tal como estaba ESE dia. Nulos en lo anterior a esta fase, que no
+    #: registro a nadie: la pantalla dice «No registrado», no se lo inventa.
+    #: Van nombres y no identificadores a proposito.
+    created_by_name: str | None = None
+    confirmed_by_name: str | None = None
     #: Fase 009H. Nulo significa que el pago no lo registro el sistema —todo lo
     #: anterior a 009H—, no que este impaga. La interfaz debe distinguirlo.
     payment_status: QuotationPaymentStatus | None = None

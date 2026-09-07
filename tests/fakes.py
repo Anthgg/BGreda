@@ -8,7 +8,12 @@ import uuid
 from app.core.errors import AuthInvalidCredentialsError, AuthSessionExpiredError
 from app.models.profile import Profile
 from app.services.profiles import ProfileRepository
-from app.services.supabase_auth import SupabaseAuthClient, SupabaseSession, SupabaseUser
+from app.services.supabase_auth import (
+    SupabaseAuthClient,
+    SupabaseSession,
+    SupabaseUser,
+    SupabaseUserAlreadyExistsError,
+)
 
 
 class FakeSupabaseAuthClient(SupabaseAuthClient):
@@ -21,6 +26,11 @@ class FakeSupabaseAuthClient(SupabaseAuthClient):
         self._refresh_tokens: dict[str, str] = {}
         self._counter = itertools.count(1)
         self.sign_out_calls: list[str] = []
+        #: Rastro de las operaciones de administracion, para poder afirmar que
+        #: la compensacion de un alta a medias se ejecuto de verdad.
+        self.admin_created: list[uuid.UUID] = []
+        self.admin_deleted: list[uuid.UUID] = []
+        self.fallos: set[str] = set()
 
     # -- utilidades de configuracion del doble ---------------------------
     def register(self, *, email: str, password: str, user_id: uuid.UUID) -> None:
@@ -60,6 +70,47 @@ class FakeSupabaseAuthClient(SupabaseAuthClient):
             for token, owner in list(self._refresh_tokens.items()):
                 if owner == email:
                     del self._refresh_tokens[token]
+
+    # -- administracion (Fase 009K.2) ------------------------------------
+    #
+    # El doble se comporta como GoTrue en lo que importa: rechaza correos
+    # repetidos, no conoce cuentas que no ha creado, y permite provocar fallos
+    # de red a voluntad para poder probar la compensacion del alta.
+    async def admin_list_users(self) -> list[SupabaseUser]:
+        self._fallar_si_toca("admin_list_users")
+        return [SupabaseUser(id=uid, email=correo) for uid, correo in self._identities.values()]
+
+    async def admin_get_user(self, user_id: uuid.UUID) -> SupabaseUser | None:
+        self._fallar_si_toca("admin_get_user")
+        for uid, correo in self._identities.values():
+            if uid == user_id:
+                return SupabaseUser(id=uid, email=correo)
+        return None
+
+    async def admin_create_user(self, email: str, password: str) -> SupabaseUser:
+        self._fallar_si_toca("admin_create_user")
+        if email in self._identities:
+            raise SupabaseUserAlreadyExistsError()
+        user_id = uuid.uuid4()
+        self.register(email=email, password=password, user_id=user_id)
+        self.admin_created.append(user_id)
+        return SupabaseUser(id=user_id, email=email)
+
+    async def admin_delete_user(self, user_id: uuid.UUID) -> None:
+        self._fallar_si_toca("admin_delete_user")
+        self.admin_deleted.append(user_id)
+        for correo, (uid, _) in list(self._identities.items()):
+            if uid == user_id:
+                del self._identities[correo]
+                self._credentials.pop(correo, None)
+
+    def fallar_en(self, operacion: str) -> None:
+        """Hace que la siguiente llamada a esa operacion reviente."""
+        self.fallos.add(operacion)
+
+    def _fallar_si_toca(self, operacion: str) -> None:
+        if operacion in self.fallos:
+            raise RuntimeError(f"fallo inyectado en {operacion}")
 
     # -- interno ---------------------------------------------------------
     def _issue(self, email: str) -> SupabaseSession:

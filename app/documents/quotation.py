@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect as sa_inspect
 
+from app.core.actors import nombre_de_actor
 from app.documents.common import (
     CompanyDocInfo,
     build_company_doc_info,
@@ -141,6 +142,13 @@ class DocumentHeaderInfo:
     validity_date: str | None = None
     currency_symbol: str = "S/"
     currency_code: str | None = "PEN"
+    #: Fase 009K.2. Quien firma el papel, por su nombre visible congelado.
+    #:
+    #: Se prefiere quien EMITIO sobre quien escribio: emitir es el gesto que
+    #: convierte un borrador en documento. Nunca se resuelve el perfil actual
+    #: —eso haria que una cotizacion enviada hace un ano cambiara de autor— ni
+    #: se usa quien descarga el PDF, que no tiene nada que ver.
+    prepared_by: str | None = None
     #: Fase 009G. Ya formateado —«1 USD = S/ 3.31»— porque la plantilla solo
     #: renderiza. Nulo en soles: ahi no hubo conversion, y ensenar una tasa
     #: describiria un cambio de moneda que nunca ocurrio.
@@ -351,6 +359,7 @@ def build_quotation_pdf_document(
         # calla; poner la de hoy explicaria el precio con un numero que no lo
         # produjo.
         exchange_rate_text=format_exchange_rate(quotation.exchange_rate_snapshot, currency_code),
+        prepared_by=nombre_de_actor(quotation.confirmed_by_name or quotation.created_by_name),
     )
 
     # 4. Items comerciales (EXCLUSIVAMENTE DESDE SNAPSHOTS)
@@ -575,6 +584,9 @@ def build_draft_quotation_pdf_document(
         exchange_rate_text=format_exchange_rate(
             quotation_out.exchange_rate_snapshot, currency_code
         ),
+        # Un borrador todavia no lo ha emitido nadie, asi que ensena a quien lo
+        # escribio. Sigue siendo un nombre copiado, no el de quien mira.
+        prepared_by=nombre_de_actor(quotation_out.created_by_name),
     )
 
     # 4. Items comerciales

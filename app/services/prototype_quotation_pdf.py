@@ -29,6 +29,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.actors import nombre_de_actor
 from app.core.errors import APIError
 from app.documents.common import (
     build_company_doc_info,
@@ -132,6 +133,10 @@ class PrototypeQuotationPdfService:
                 validity_date=None,
                 currency_symbol=simbolo,
                 currency_code=moneda,
+                # Misma regla que el Cotizador: quien emitio manda sobre quien
+                # escribio, y un CPR anterior a 009K.2 —sin actor de emision—
+                # cae en su creador, que si se registraba desde 009K.1.1.
+                prepared_by=nombre_de_actor(fila.confirmed_by_name or fila.created_by_name),
                 # En soles sale None y la fila no se dibuja: no hubo conversion
                 # que contar.
                 exchange_rate_text=format_exchange_rate(fila.exchange_rate_snapshot, moneda),
