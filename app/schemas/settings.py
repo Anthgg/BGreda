@@ -14,9 +14,12 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.models.quotations import KilnMode
 from app.models.settings import (
     DEFAULT_ESTIMATED_GLAZE_PERCENT,
+    DEFAULT_KILN_MODE,
     DEFAULT_PRODUCTION_FACTOR,
+    DEFAULT_PRODUCTION_FACTOR_ENABLED,
     DEFAULT_ROUNDING_STEP,
     MAX_GLAZE_PERCENT,
     MAX_TAX_PERCENT,
@@ -272,6 +275,35 @@ class CommercialSettingsBase(_StrictModel):
     #: Paso del redondeo contractual del precio bruto. Solo 0,50 o 1,00: un
     #: tercer valor produciria precios que no son multiplos de nada.
     rounding_step: Annotated[Decimal, Field(max_digits=9, decimal_places=6)] = DEFAULT_ROUNDING_STEP
+
+    #: Fase 009K.3. Si una cotizacion NUEVA nace aplicando el factor.
+    #:
+    #: Nace en `False`: el factor deja de aplicarse por omision y pasa a ser
+    #: una decision consciente de quien cotiza. Apagado NO es
+    #: `production_factor_default = 0` —eso no lo admite ningun CHECK—: es
+    #: esta bandera, y el multiplicador efectivo vale 1.
+    production_factor_enabled_default: bool = DEFAULT_PRODUCTION_FACTOR_ENABLED
+    #: Fase 009K.3. Modo de horno con el que nace una cotizacion nueva.
+    kiln_mode_default: KilnMode = KilnMode(DEFAULT_KILN_MODE)
+
+    @field_validator("production_factor_enabled_default", mode="before")
+    @classmethod
+    def _factor_enabled_default(cls, value: object) -> object:
+        """Una configuracion anterior a 009K.3 tiene la columna en NULL.
+
+        NULL no es un tercer estado: es «esta instalacion es anterior a la
+        fase». Se resuelve aqui, en la frontera, para que ni el servicio ni la
+        pantalla tengan que recordar la conversion —y para no necesitar un
+        UPDATE que escribiria en la configuracion de alguien una eleccion que
+        nadie tomo.
+        """
+        return DEFAULT_PRODUCTION_FACTOR_ENABLED if value is None else value
+
+    @field_validator("kiln_mode_default", mode="before")
+    @classmethod
+    def _kiln_mode_default(cls, value: object) -> object:
+        """NULL se lee `TOGETHER`: es lo que el motor hacia antes del modo."""
+        return DEFAULT_KILN_MODE if value is None else value
 
     @field_validator("rounding_step", mode="after")
     @classmethod

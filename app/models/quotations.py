@@ -80,6 +80,32 @@ class QuotationWorkflow(StrEnum):
     COTIZADOR = "COTIZADOR"
 
 
+class KilnMode(StrEnum):
+    """Como se carga el horno al planificar la produccion de una cotizacion.
+
+    Fase 009K.3. `TOGETHER` es lo que el Cotizador ha hecho siempre: una sola
+    hoja de quema donde todos los productos comparten sesion, el volumen se
+    acumula y el costo se reparte por participacion. `PER_PRODUCT` es el modo
+    nuevo: cada producto planifica SU hornada, aunque el horno sea el mismo,
+    y por tanto paga la quema entera.
+
+    Que dos productos con el mismo horno no compartan volumen en `PER_PRODUCT`
+    no es una duplicacion accidental: es literalmente lo que significa «por
+    producto».
+
+    La ausencia —NULL en la columna— es historia, no un tercer modo: toda
+    cotizacion anterior a 009K.3 se calculo en conjunto, asi que NULL se lee
+    como `TOGETHER`.
+    """
+
+    TOGETHER = "TOGETHER"
+    PER_PRODUCT = "PER_PRODUCT"
+
+
+#: Modo de horno con el que se interpreta una cotizacion sin modo declarado.
+DEFAULT_KILN_MODE = KilnMode.TOGETHER
+
+
 class Technique(Base, TimestampMixin):
     __tablename__ = "techniques"
 
@@ -336,6 +362,21 @@ class Quotation(Base, TimestampMixin):
     #: vigencia. Ante NULL el documento omite la linea en vez de suponer.
     validity_days_snapshot: Mapped[int | None] = mapped_column(Integer)
 
+    #: Fase 009K.3. Si esta cotizacion aplica el factor de produccion.
+    #:
+    #: El factor pasa a ser OPCIONAL y nace apagado. Apagado NO se representa
+    #: con `production_factor = 0`: cero esta prohibido por el motor de
+    #: precios, por el CHECK de configuracion y por el esquema de entrada. Se
+    #: representa con esta bandera, y el multiplicador efectivo es 1.
+    #:
+    #: NULL es historia: la cotizacion es anterior a 009K.3 y su intencion se
+    #: lee del factor que quedo guardado en su snapshot. No se rellena.
+    production_factor_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    #: Fase 009K.3. Como se carga el horno: junto o producto a producto.
+    #: NULL se interpreta `TOGETHER`, que es lo que el motor hacia antes de
+    #: que el modo existiera.
+    kiln_mode: Mapped[KilnMode | None] = mapped_column(StrEnumType(KilnMode, 20))
+
     #: Gramos de receta que lleva **una** pieza. Nulo mientras no se indique:
     #: no hay valor por omision, porque suponer uno daria un costo de materiales
     #: creible y falso que nadie revisaria.
@@ -431,6 +472,13 @@ class Quotation(Base, TimestampMixin):
         CheckConstraint("total_days >= 0", name="total_days_non_negative"),
         CheckConstraint("space_cost >= 0", name="space_cost_non_negative"),
         CheckConstraint("commercial_factor > 0", name="commercial_factor_positive"),
+        # Fase 009K.3: los dos unicos modos que el motor sabe planificar. Un
+        # tercer valor escrito a mano no daria error, elegiria en silencio la
+        # rama TOGETHER del codigo.
+        CheckConstraint(
+            "kiln_mode IS NULL OR kiln_mode IN ('TOGETHER', 'PER_PRODUCT')",
+            name="kiln_mode_allowed",
+        ),
         CheckConstraint("status IN ('DRAFT', 'CONFIRMED', 'CANCELLED')", name="status_allowed"),
         CheckConstraint("workflow IN ('LEGACY', 'COTIZADOR')", name="workflow_allowed"),
         # Fase 009F: dos monedas, no un mercado. Sin este CHECK, el de

@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -32,6 +32,7 @@ from app.models.masters import Partner, Product
 from app.models.prototypes import Prototype
 from app.models.quotations import (
     CommercialLineKind,
+    KilnMode,
     OtherCost,
     OtherCostCalculationType,
     Quotation,
@@ -45,7 +46,12 @@ from app.models.recipes import Recipe, RecipeStatus, RecipeVersion
 from app.models.sequence import SequenceType
 from app.models.settings import CommercialSettings
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.firings import FiringIn, FiringLineIn, FiringSessionIn
+from app.schemas.firings import (
+    FiringCalculateOut,
+    FiringIn,
+    FiringLineIn,
+    FiringSessionIn,
+)
 from app.schemas.quotation_builder import (
     BodyMaterialIn,
     BodyMaterialOut,
@@ -87,6 +93,11 @@ from app.services.sequences import SequenceService
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal(0)
+#: Fase 009K.3. Multiplicador de un factor APAGADO. Uno y no cero: cero lo
+#: rechazan `price_line`, el CHECK de configuracion y el esquema de entrada,
+#: asi que apagar el factor nunca fue representable con un valor. Se apaga con
+#: una bandera, y el multiplicador neutro de una multiplicacion es el uno.
+NEUTRAL_PRODUCTION_FACTOR = Decimal(1)
 BUILDER_ENTITY = "quotation_builder"
 #: Entidad de auditoria de los cargos comerciales. Aparte de la cotizacion
 #: para que el historial diga QUE se toco, no solo que algo cambio.
@@ -471,6 +482,165 @@ def _confirmed_production_summary(
     if weighted_volume:
         enriched["occupancy_percentage"] = str(weighted_occupancy / weighted_volume)
     return enriched
+
+
+@dataclass(frozen=True)
+class _ProductionSimulation:
+    """Lo que la simulacion de produccion sabe de una cotizacion.
+
+    Fase 009K.3. Antes era una tupla de cuatro: con `PER_PRODUCT` dejaron de
+    bastar, porque las sesiones y el horno de una pieza ya no se pueden
+    deducir filtrando una lista global —dos productos pueden tener sesiones
+    distintas en el MISMO horno—. Son datos por producto, y decirlo asi evita
+    que una lectura descuidada le atribuya a una pieza las hornadas de otra.
+    """
+
+    #: Resumen de la hoja tal y como se guarda en `firing_snapshot`.
+    summary: dict[str, Any]
+    #: Linea calculada de cada producto, por `product_id`.
+    line_by_product: dict[int, dict[str, Any]] = field(default_factory=dict)
+    #: Sesiones que queman a cada producto. En `TOGETHER` son las de sus rutas
+    #: dentro de la hoja comun; en `PER_PRODUCT`, las de su propia hoja.
+    sessions_by_product: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    #: Primera sesion de cada producto: es lo que la pantalla ensena como «su»
+    #: horno.
+    kiln_by_product: dict[int, dict[str, Any]] = field(default_factory=dict)
+    #: Horno de CABECERA. Sigue siendo la primera sesion de la hoja: la
+    #: cotizacion entera tiene un horno principal aunque el modo sea por
+    #: producto.
+    kiln_snapshot: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+def _merge_firing_results(resultados: list[FiringCalculateOut]) -> FiringCalculateOut:
+    """Une varias hojas por producto en un resumen unico de cabecera.
+
+    Con una sola hoja devuelve LA MISMA, sin tocarla: el modo `TOGETHER` tiene
+    que salir byte a byte como salia antes de que existiera esta funcion.
+
+    Con varias, cada campo se une como corresponde a su naturaleza y no todos
+    igual: los importes y las hornadas se SUMAN —son de hojas distintas que se
+    van a encender de verdad—, la ocupacion se toma como MAXIMO —es un
+    porcentaje, y sumar porcentajes de hornos distintos no significa nada— y
+    el factor efectivo se RECALCULA sobre los totales, que es como lo define
+    `compute_firing`: costo total sobre subtotal, no un promedio de factores.
+    """
+    if len(resultados) == 1:
+        return resultados[0]
+
+    subtotal = sum((resultado.subtotal for resultado in resultados), ZERO)
+    total_cost = sum((resultado.total_cost for resultado in resultados), ZERO)
+    primero = resultados[0]
+    return primero.model_copy(
+        update={
+            "total_volume_cm3": sum((r.total_volume_cm3 for r in resultados), ZERO),
+            "subtotal": subtotal,
+            "total_cost": total_cost,
+            "tax_amount": sum((r.tax_amount for r in resultados), ZERO),
+            "total_with_tax": sum((r.total_with_tax for r in resultados), ZERO),
+            "occupancy_percentage": max(r.occupancy_percentage for r in resultados),
+            "occupancy_factor": (
+                total_cost / subtotal if subtotal > ZERO else NEUTRAL_PRODUCTION_FACTOR
+            ),
+            "total_batches": sum(r.total_batches for r in resultados),
+            "total_days": sum(r.total_days for r in resultados),
+            "capacity_exceeded": any(r.capacity_exceeded for r in resultados),
+            # Se renumeran: cada hoja empieza en cero, y concatenarlas sin
+            # tocar el orden dejaria varias sesiones diciendo que son la
+            # primera.
+            "sessions": [
+                sesion.model_copy(update={"sort_order": indice})
+                for indice, sesion in enumerate(
+                    sesion for resultado in resultados for sesion in resultado.sessions
+                )
+            ],
+            "lines": [
+                linea.model_copy(update={"sort_order": indice})
+                for indice, linea in enumerate(
+                    linea for resultado in resultados for linea in resultado.lines
+                )
+            ],
+        }
+    )
+
+
+def _stored_factor_enabled(row: Quotation) -> bool:
+    """Fase 009K.3. Si una cotizacion GUARDADA aplico el factor.
+
+    Con la bandera escrita, manda la bandera. Sin ella —cotizacion anterior a
+    esta fase— se lee del factor que quedo en el snapshot, que es donde vivia
+    la verdad desde 009E: un factor que no es uno es un factor aplicado.
+
+    No se resuelve al reves —«sin bandera, apagado»— porque eso ensenaria como
+    «sin factor» documentos que se cobraron con factor tres.
+    """
+    if row.production_factor_enabled is not None:
+        return row.production_factor_enabled
+    factor = next(
+        (
+            valor
+            for item in row.items
+            if (valor := _stored_production_factor(item.production_snapshot.get("commercial_plan")))
+        ),
+        None,
+    )
+    return factor is not None and factor != NEUTRAL_PRODUCTION_FACTOR
+
+
+def _stored_kiln_mode(row: Quotation) -> KilnMode:
+    """Fase 009K.3. Modo con el que se planifico una cotizacion guardada.
+
+    NULL es `TOGETHER`: la auditoria demostro que ese fue el comportamiento
+    real de todo lo anterior, asi que no hay nada que adivinar.
+    """
+    return row.kiln_mode or KilnMode.TOGETHER
+
+
+def _resolve_production_factor(
+    payload: QuotationBuilderDraftIn, settings: CommercialSettings
+) -> tuple[bool, Decimal]:
+    """Fase 009K.3. Decide si el factor se aplica y con que valor.
+
+    Devuelve `(activado, multiplicador efectivo)`. Apagado el multiplicador es
+    UNO, nunca cero: cero no lo admite el motor de precios ni la base.
+
+    Tres entradas posibles, y el orden importa:
+
+    1. **La pantalla nueva manda `production_factor_enabled`** y nada mas. La
+       autoridad del VALOR es entonces Configuracion, no el navegador: un
+       cliente no elige cuanto vale el factor de la casa.
+    2. **`production_factor` sin bandera** es una peticion anterior a esta
+       fase —o el borrador que vuelve por `_to_input` al confirmar—. Ahi la
+       intencion se deduce: un override que no es uno es un factor aplicado, y
+       el valor guardado gana al de Configuracion. Sin esto, confirmar un
+       borrador de 009E recalcularia con el factor de hoy y cambiaria el
+       importe justo en el momento de congelarlo.
+    3. **Ninguna de las dos** es una cotizacion nueva sin decision: manda
+       Configuracion, que arranca APAGADA.
+    """
+    override = payload.production_factor
+    enabled = payload.production_factor_enabled
+    if enabled is None:
+        enabled = (
+            override != NEUTRAL_PRODUCTION_FACTOR
+            if override is not None
+            else bool(settings.production_factor_enabled_default)
+        )
+    if not enabled:
+        return False, NEUTRAL_PRODUCTION_FACTOR
+    return True, override or settings.production_factor_default
+
+
+def _resolve_kiln_mode(payload: QuotationBuilderDraftIn, settings: CommercialSettings) -> KilnMode:
+    """Fase 009K.3. Modo de carga del horno de esta cotizacion.
+
+    Sin modo declarado manda Configuracion; sin configuracion, `TOGETHER`. No
+    hay un tercer estado: la ausencia siempre significa lo que el motor hacia
+    antes de que el modo existiera.
+    """
+    if payload.kiln_mode is not None:
+        return payload.kiln_mode
+    return KilnMode(settings.kiln_mode_default or KilnMode.TOGETHER)
 
 
 def _stored_production_factor(plan: object) -> Decimal | None:
@@ -1133,6 +1303,71 @@ class QuotationBuilderService:
             resolved.append((item, product, dimensions, recipe))
         return resolved
 
+    def _firing_payload(
+        self,
+        kiln_id: int | None,
+        entries: list[
+            tuple[
+                QuotationBuilderItemIn,
+                Product,
+                dict[str, Decimal | None],
+                tuple[int | None, int | None, str | None, bool],
+            ]
+        ],
+    ) -> FiringIn:
+        """Arma UNA hoja de quema con las piezas que se le den.
+
+        En `TOGETHER` se le dan todas: las rutas `(horno, tipo)` se deduplican
+        y las piezas comparten sesion, que es como el Cotizador ha planificado
+        siempre. En `PER_PRODUCT` se le da una pieza cada vez, y entonces la
+        hoja de esa pieza no tiene con quien compartir volumen.
+
+        Fase 009C: solo se abren sesiones para las quemas realmente
+        seleccionadas. Antes se creaban siempre baja Y alta, lo que obligaba a
+        pagar dos quemas aunque la pieza necesitara una sola.
+        """
+        session_routes: list[tuple[int, FiringType]] = []
+        for item, _product, _dimensions, _recipe in entries:
+            low_kiln_id, high_kiln_id = _selected_kilns(item, kiln_id)
+            routes = [
+                (low_kiln_id, FiringType.LOW) if low_kiln_id is not None else None,
+                (high_kiln_id, FiringType.HIGH) if high_kiln_id is not None else None,
+            ]
+            for route in routes:
+                if route is not None and route not in session_routes:
+                    session_routes.append(route)
+        # El horno del factor debe participar en LA HOJA (regla de
+        # FiringService._build), no necesariamente en las sesiones de esta
+        # linea: una pieza puede valorarse con la capacidad de otro horno de
+        # la misma hoja. Si el elegido no llego a la hoja se deja en None y
+        # el dominio usa el primer horno de la propia linea.
+        sheet_kilns = {route[0] for route in session_routes}
+        return FiringIn(
+            sessions=[
+                FiringSessionIn(kiln_id=route[0], firing_type=route[1], sort_order=index)
+                for index, route in enumerate(session_routes)
+            ],
+            lines=[
+                FiringLineIn(
+                    product_id=product.id,
+                    description=product.name,
+                    quantity=cast(int, item.quantity),
+                    length_cm=cast(Decimal, dimensions["length"]),
+                    width_cm=cast(Decimal, dimensions["width"]),
+                    height_cm=cast(Decimal, dimensions["height"]),
+                    low_kiln_id=_selected_kilns(item, kiln_id)[0],
+                    high_kiln_id=_selected_kilns(item, kiln_id)[1],
+                    factor_kiln_id=(
+                        (item.factor_kiln_id or kiln_id)
+                        if (item.factor_kiln_id or kiln_id) in sheet_kilns
+                        else None
+                    ),
+                    sort_order=index,
+                )
+                for index, (item, product, dimensions, _recipe) in enumerate(entries)
+            ],
+        )
+
     async def _simulate_production(
         self,
         kiln_id: int | None,
@@ -1144,7 +1379,9 @@ class QuotationBuilderService:
                 tuple[int | None, int | None, str | None, bool],
             ]
         ],
-    ) -> tuple[dict[str, Any], dict[int, dict[str, Any]], dict[str, Any], list[str]]:
+        *,
+        kiln_mode: KilnMode = KilnMode.TOGETHER,
+    ) -> _ProductionSimulation:
         warnings: list[str] = []
         simulated = [entry for entry in resolved if entry[0].firing_line_id is None]
         if not resolved:
@@ -1168,7 +1405,7 @@ class QuotationBuilderService:
 
         if warnings:
             summary = {"estimated": True, "complete": False, "warnings": _unique(warnings)}
-            return summary, {}, {}, _unique(warnings)
+            return _ProductionSimulation(summary=summary, warnings=_unique(warnings))
 
         if not simulated:
             summary = {
@@ -1179,81 +1416,87 @@ class QuotationBuilderService:
                 "sessions": [],
                 "lines": [],
             }
-            return summary, {}, {}, []
+            return _ProductionSimulation(summary=summary)
 
         for item, _product, dimensions, _recipe in simulated:
             assert item.quantity is not None
             assert all(dimensions[field] is not None for field in PRODUCTION_DIMENSIONS)
-        # Fase 009C: solo se abren sesiones para las quemas realmente
-        # seleccionadas. Antes se creaban siempre baja Y alta, lo que obligaba
-        # a pagar dos quemas aunque la pieza necesitara una sola.
-        session_routes: list[tuple[int, FiringType]] = []
-        for item, _product, _dimensions, _recipe in simulated:
-            low_kiln_id, high_kiln_id = _selected_kilns(item, kiln_id)
-            routes = [
-                (low_kiln_id, FiringType.LOW) if low_kiln_id is not None else None,
-                (high_kiln_id, FiringType.HIGH) if high_kiln_id is not None else None,
-            ]
-            for route in routes:
-                if route is not None and route not in session_routes:
-                    session_routes.append(route)
-        # El horno del factor debe participar en LA HOJA (regla de
-        # FiringService._build), no necesariamente en las sesiones de esta
-        # linea: una pieza puede valorarse con la capacidad de otro horno de
-        # la misma hoja. Si el elegido no llego a la hoja se deja en None y
-        # el dominio usa el primer horno de la propia linea.
-        sheet_kilns = {route[0] for route in session_routes}
-        firing_payload = FiringIn(
-            sessions=[
-                FiringSessionIn(kiln_id=route[0], firing_type=route[1], sort_order=index)
-                for index, route in enumerate(session_routes)
-            ],
-            lines=[
-                FiringLineIn(
-                    product_id=product.id,
-                    description=product.name,
-                    quantity=cast(int, item.quantity),
-                    length_cm=cast(Decimal, dimensions["length"]),
-                    width_cm=cast(Decimal, dimensions["width"]),
-                    height_cm=cast(Decimal, dimensions["height"]),
-                    low_kiln_id=_selected_kilns(item, kiln_id)[0],
-                    high_kiln_id=_selected_kilns(item, kiln_id)[1],
-                    factor_kiln_id=(
-                        (item.factor_kiln_id or kiln_id)
-                        if (item.factor_kiln_id or kiln_id) in sheet_kilns
-                        else None
-                    ),
-                    sort_order=index,
-                )
-                for index, (item, product, dimensions, _recipe) in enumerate(simulated)
-            ],
+
+        # Fase 009K.3. Una hoja con todo, o una hoja por producto.
+        #
+        # `compute_firing` no se toca: se le da otro reparto de piezas. En
+        # `PER_PRODUCT` cada hoja tiene una sola linea, asi que su
+        # participacion por volumen es 1 y absorbe la tarifa entera de sus
+        # sesiones. Dos productos con el MISMO horno dejan de sumar volumen y
+        # cada uno cuenta sus propias hornadas: eso no es una duplicacion
+        # accidental, es exactamente lo que significa «por producto».
+        #
+        # Se reparten las piezas en lugar de repetir sesiones dentro de una
+        # sola hoja porque `FiringService._build` rechaza —con razon— sesiones
+        # `(horno, tipo)` repetidas: una hoja de quema REAL describe UNA
+        # hornada fisica, y esa regla no se relaja para el planificador.
+        grupos = (
+            [[entry] for entry in simulated] if kiln_mode is KilnMode.PER_PRODUCT else [simulated]
         )
         # multi_batch=True: el Cotizador planifica, asi que un volumen que no
         # entra en una hornada se resuelve con varias, no con una alerta.
-        result = await self._firings.calculate(firing_payload, multi_batch=True)
+        resultados = [
+            await self._firings.calculate(self._firing_payload(kiln_id, grupo), multi_batch=True)
+            for grupo in grupos
+        ]
+
+        line_by_product: dict[int, dict[str, Any]] = {}
+        sessions_by_product: dict[int, list[dict[str, Any]]] = {}
+        kiln_by_product: dict[int, dict[str, Any]] = {}
+        for grupo, resultado in zip(grupos, resultados, strict=True):
+            sesiones = [session.model_dump(mode="json") for session in resultado.sessions]
+            for linea in resultado.lines:
+                if linea.product_id is not None:
+                    line_by_product[linea.product_id] = linea.model_dump(mode="json")
+            for item, product, _dimensions, _recipe in grupo:
+                # En TOGETHER la hoja es comun: las sesiones de una pieza son
+                # las de SUS rutas, no todas las de la hoja. En PER_PRODUCT la
+                # hoja ya es suya y el filtro deja lo mismo, pero se aplica
+                # igual para que las dos ramas digan lo mismo de una pieza.
+                rutas = _selected_routes(item, kiln_id)
+                propias = [
+                    sesion
+                    for sesion in sesiones
+                    if (sesion.get("kiln_id"), sesion.get("firing_type")) in rutas
+                ]
+                sessions_by_product[product.id] = propias
+                kiln_by_product[product.id] = propias[0] if propias else {}
+
+        result = _merge_firing_results(resultados)
         raw = result.model_dump(mode="json")
         raw["estimated"] = True
         raw["complete"] = not result.capacity_exceeded
-        line_by_product = {
-            line.product_id: line.model_dump(mode="json")
-            for line in result.lines
-            if line.product_id is not None
-        }
-        kiln_snapshot = result.sessions[0].model_dump(mode="json") if result.sessions else {}
+        raw["kiln_mode"] = kiln_mode.value
         if result.capacity_exceeded:
             warnings.append("KILN_CAPACITY_EXCEEDED")
-        return raw, line_by_product, kiln_snapshot, warnings
+        return _ProductionSimulation(
+            summary=raw,
+            line_by_product=line_by_product,
+            sessions_by_product=sessions_by_product,
+            kiln_by_product=kiln_by_product,
+            kiln_snapshot=result.sessions[0].model_dump(mode="json") if result.sessions else {},
+            warnings=warnings,
+        )
 
     async def preview(self, payload: QuotationBuilderDraftIn) -> QuotationBuilderOut:
         customer = await self._quotations.resolve_customer(payload.customer_id)
         settings = await self._quotations.commercial_settings()
         resolved = await self._resolve_items(payload)
-        (
-            production,
-            production_lines,
-            kiln_snapshot,
-            production_warnings,
-        ) = await self._simulate_production(payload.kiln_id, resolved)
+        # Fase 009K.3. Las dos decisiones nuevas se resuelven ANTES de simular:
+        # el modo cambia como se planifica la quema, y el factor, cuanto vale
+        # cada linea. Ninguna de las dos se deduce a mitad del calculo.
+        kiln_mode = _resolve_kiln_mode(payload, settings)
+        factor_enabled, production_factor = _resolve_production_factor(payload, settings)
+        simulation = await self._simulate_production(payload.kiln_id, resolved, kiln_mode=kiln_mode)
+        production = simulation.summary
+        production_lines = simulation.line_by_product
+        kiln_snapshot = simulation.kiln_snapshot
+        production_warnings = simulation.warnings
 
         item_outputs: list[QuotationBuilderItemOut] = []
         # El orden de la lista es la autoridad del builder. Normalizarlo evita
@@ -1340,13 +1583,12 @@ class QuotationBuilderService:
             # baja y alta pueden ir en hornos de duracion distinta: 27 hornadas
             # en el pequeno (3 dias) mas 3 en el grande (4 dias) son 81 + 12 =
             # 93 dias, no 30 x nada.
-            item_routes = _selected_routes(item, payload.kiln_id)
-            item_sessions = [
-                session
-                for session in production.get("sessions", [])
-                if (session.get("kiln_id"), session.get("firing_type")) in item_routes
-            ]
-            item_plan = [
+            # Fase 009K.3: las sesiones de la pieza las da la simulacion, que
+            # sabe de que hoja salio. Filtrar aqui la lista global bastaba
+            # mientras la hoja era una; con `PER_PRODUCT` le atribuiria a esta
+            # pieza las hornadas de otra que use el mismo horno.
+            item_sessions = simulation.sessions_by_product.get(product.id, [])
+            item_plan: list[dict[str, Any]] = [
                 {
                     "kiln_id": session.get("kiln_id"),
                     "kiln_code": session.get("kiln_code"),
@@ -1367,7 +1609,7 @@ class QuotationBuilderService:
                 cost=Decimal(str(line_snapshot.get("allocated_cost", "0"))),
                 snapshot={
                     "estimated": True,
-                    "kiln": kiln_snapshot,
+                    "kiln": simulation.kiln_by_product.get(product.id, kiln_snapshot),
                     "production": line_snapshot,
                     "batches": item_batches,
                     "firing_plan": item_plan,
@@ -1660,10 +1902,12 @@ class QuotationBuilderService:
         # es su costo factorado sobre el total factorado de la cotizacion.
         # ------------------------------------------------------------------
         # Fase 009E: la politica sale de la configuracion comercial, no de una
-        # constante del codigo. El override por cotizacion gana al default; el
-        # paso de redondeo es politica de la empresa y no se sobreescribe desde
-        # una cotizacion, para que nadie se salte Configuracion pieza a pieza.
-        production_factor = payload.production_factor or settings.production_factor_default
+        # constante del codigo. El paso de redondeo es politica de la empresa y
+        # no se sobreescribe desde una cotizacion, para que nadie se salte
+        # Configuracion pieza a pieza.
+        #
+        # Fase 009K.3: el factor se resolvio arriba, junto al modo de horno.
+        # Apagado vale UNO —el neutro de una multiplicacion—, nunca cero.
         rounding_step = settings.rounding_step
         # Fase 009F: la moneda es intencion de la cotizacion. Configuracion
         # sigue dando el valor inicial, pero deja de ser la autoridad: dos
@@ -1797,6 +2041,8 @@ class QuotationBuilderService:
             quotation_tax_total=tax_amount,
             quotation_gross_total=total,
             production_factor=production_factor,
+            production_factor_enabled=factor_enabled,
+            kiln_mode=kiln_mode,
             rounding_step=rounding_step,
             total_fixed_cost=total_fixed_cost,
             tax_percentage_snapshot=header_tax_percentage,
@@ -1855,6 +2101,13 @@ class QuotationBuilderService:
         row.space_cost = sum((item.space_cost for item in preview.items), ZERO)
         row.commercial_factor_default_snapshot = settings.default_quotation_factor
         row.commercial_factor = settings.default_quotation_factor
+        # Fase 009K.3. Las dos decisiones se guardan como lo que son: una
+        # eleccion, no un derivado. El valor efectivo del factor ya viaja
+        # dentro del `commercial_plan` de cada linea; lo que aqui se congela es
+        # la INTENCION, que es lo unico que un 1 guardado no sabria distinguir
+        # de «se aplico un factor de uno».
+        row.production_factor_enabled = preview.production_factor_enabled
+        row.kiln_mode = preview.kiln_mode
         row.base_commercial_cost = sum((item.final_total_cost for item in preview.items), ZERO)
         row.calculated_total = row.base_commercial_cost
         row.calculated_unit_price = ZERO
@@ -2318,6 +2571,14 @@ class QuotationBuilderService:
                 ),
                 None,
             ),
+            # Fase 009K.3: la intencion vuelve tal cual se guardo, incluido el
+            # NULL de lo anterior a esta fase. Convertir ese NULL aqui en un
+            # `False` haria que confirmar un borrador de 009E le quitara el
+            # factor —y le cambiara el importe— en el mismo acto de
+            # congelarlo. La deduccion se hace donde se resuelve el factor, y
+            # alli el override guardado sigue mandando.
+            production_factor_enabled=row.production_factor_enabled,
+            kiln_mode=row.kiln_mode,
             # Fase 009F: la moneda y la tasa tambien vuelven como ENTRADA.
             #
             # Al CONFIRMAR importa porque el recalculo de deriva tiene que
@@ -2647,6 +2908,8 @@ class QuotationBuilderService:
                 (item.production_factor for item in item_outputs if item.production_factor),
                 ZERO,
             ),
+            production_factor_enabled=_stored_factor_enabled(row),
+            kiln_mode=_stored_kiln_mode(row),
             rounding_step=next(
                 (item.rounding_step for item in item_outputs if item.rounding_step), ZERO
             ),

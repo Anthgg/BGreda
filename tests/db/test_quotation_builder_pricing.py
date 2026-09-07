@@ -136,11 +136,18 @@ async def test_el_reparto_es_proporcional_al_costo_factorado(
 # Factor, margen, IGV y redondeo
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_el_factor_de_produccion_por_defecto_es_tres(
+async def test_el_factor_de_produccion_configurado_es_tres(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """DEFAULT_PRODUCTION_FACTOR + PRODUCTION_FACTOR_DOUBLE_COUNT: 0."""
+    """DEFAULT_PRODUCTION_FACTOR + PRODUCTION_FACTOR_DOUBLE_COUNT: 0.
+
+    Fase 009K.3: el factor ya no se aplica por omision, asi que aqui se pide
+    expresamente. Lo que esta prueba protege no cambia —cuanto vale el factor
+    de la casa y que entra UNA sola vez—; lo que cambia es que ahora hay que
+    encenderlo, y eso lo cubre `test_el_factor_nace_apagado`.
+    """
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    payload = _with_policy(payload, production_factor_enabled=True)
 
     body = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
 
@@ -358,6 +365,9 @@ async def test_el_factor_por_defecto_sale_de_la_configuracion(
 ) -> None:
     """DEFAULT_FACTOR_FROM_SETTINGS + DRAFT_DEFAULT_FACTOR_CHANGE_RECALCULATES."""
     payload, _products = await _complete_payload(api, admin_csrf, db_session)
+    # Fase 009K.3: encendido a proposito. Lo que se comprueba es de donde sale
+    # el VALOR, no si se aplica.
+    payload = _with_policy(payload, production_factor_enabled=True)
 
     antes = (await api.post(f"{BUILDER}/preview", json=payload, headers=head(admin_csrf))).json()
     assert Decimal(antes["production_factor"]) == Decimal(3)

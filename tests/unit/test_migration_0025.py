@@ -79,17 +79,6 @@ def test_no_se_renombran_las_columnas_viejas() -> None:
     assert "alter_column" not in upgrade
 
 
-def test_alembic_una_sola_cabeza_y_es_0025() -> None:
-    """Una sola cabeza, y es la nueva.
-
-    Esta afirmacion acompana siempre a la ultima revision: fijarla en una
-    concreta obliga a reescribir la prueba anterior cada vez, y entonces deja
-    de comprobar nada.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0025"], script.get_heads()
-
-
 def test_la_cadena_no_se_rompe() -> None:
     """0025 cuelga de 0024, y 0024 sigue existiendo."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
