@@ -223,11 +223,19 @@ async def test_la_vuelta_a_0024_retira_las_columnas_y_deja_los_datos(
 
 
 @pytest.mark.asyncio
-async def test_subir_hasta_la_cabeza_pasa_por_0025_y_deja_una_sola(
-    migration_engine: AsyncEngine,
-) -> None:
+async def test_subir_hasta_la_cabeza_pasa_por_0025(migration_engine: AsyncEngine) -> None:
+    """Subir del todo NO se detiene en 0025: pasa por ella y sigue.
+
+    Que la cabeza sea la ultima revision lo afirma la prueba de ESA revision
+    —hoy `test_migration_0026_runs`—, y por eso aqui no se nombra ninguna:
+    fijarla obligaria a reescribir este archivo en cada fase, y una prueba que
+    hay que reescribir cada vez deja de comprobar nada.
+    """
     _upgrade("head")
-    assert await _current(migration_engine) == "0025"
+    assert await _current(migration_engine) != "0025", "0025 dejo de ser la cabeza"
+    for tabla, columnas in COLUMNAS_NUEVAS.items():
+        for columna in columnas:
+            assert await _columna(migration_engine, tabla, columna) == "YES", (tabla, columna)
     heads = _alembic("heads")
     assert heads.returncode == 0, heads.stderr
     assert heads.stdout.count("(head)") == 1, heads.stdout

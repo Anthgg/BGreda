@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.quotations import (
+    KilnMode,
     QuotationPaymentStatus,
     QuotationStatus,
     QuotationWorkflow,
@@ -299,9 +300,27 @@ class QuotationBuilderDraftIn(_Strict):
     kiln_id: PositiveInt | None = None
     #: Fase 009E. Factor de PRODUCCION de esta cotizacion. Multiplica el costo
     #: tecnico y no tiene nada que ver con el margen. `None` usa el canonico.
+    #:
+    #: Fase 009K.3: el Cotizador ya NO lo envia. Sigue existiendo porque por
+    #: aqui vuelve el factor congelado de un borrador cuando se confirma —sin
+    #: eso, confirmar recalcularia con el valor de hoy y perderia el que se
+    #: guardo— y porque romperlo dejaria colgados a los consumidores previos.
+    #: No es una via para elegir un factor arbitrario desde la pantalla nueva:
+    #: cuando el modo esta ACTIVADO y no viene override, la autoridad del
+    #: valor es Configuracion.
     production_factor: Annotated[
         Decimal | None, Field(gt=0, le=1_000, max_digits=18, decimal_places=6)
     ] = None
+    #: Fase 009K.3. La INTENCION: aplicar el factor, o no aplicarlo.
+    #:
+    #: Es lo unico que manda la pantalla nueva. `None` significa «esta
+    #: peticion es anterior a 009K.3 y no expreso intencion»: entonces se
+    #: deduce del override si lo hay, y si no, de Configuracion. Apagado NO se
+    #: expresa con `production_factor = 0`, que ningun CHECK admite.
+    production_factor_enabled: bool | None = None
+    #: Fase 009K.3. Como se carga el horno. `None` toma el de Configuracion,
+    #: que a su vez arranca en `TOGETHER`, el comportamiento historico.
+    kiln_mode: KilnMode | None = None
     #: Fase 009F. Moneda en la que se EMITE la cotizacion. `None` toma la de
     #: Configuracion, que es lo que hacia el sistema entero antes de 009F.
     #: Los costos siguen en PEN: esto solo decide el precio que se factura.
@@ -501,6 +520,12 @@ class QuotationBuilderOut(BaseModel):
     #: vuelve a redondear — el cliente suma las lineas del documento.
     quotation_gross_total: Decimal = Decimal(0)
     production_factor: Decimal = Decimal(0)
+    #: Fase 009K.3. Si el factor se aplico. Va al lado del valor y no en su
+    #: lugar: apagado el valor efectivo es 1, y un 1 suelto no distingue «no
+    #: se aplico» de «se aplico un factor de uno».
+    production_factor_enabled: bool = False
+    #: Fase 009K.3. Modo de horno con el que se planifico.
+    kiln_mode: KilnMode = KilnMode.TOGETHER
     rounding_step: Decimal = Decimal(0)
     total_fixed_cost: Decimal = Decimal(0)
     #: Fase 009F. `currency_code_snapshot` es la autoridad semantica; el

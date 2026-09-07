@@ -646,3 +646,110 @@ async def test_un_update_rechazado_no_deja_auditoria_de_exito(
     db_session.expire_all()
     despues = await db_session.scalar(select(func.count()).select_from(AuditEvent))
     assert despues == antes
+
+
+# ---------------------------------------------------------------------------
+# Fase 009K.3 - con que nace una cotizacion nueva
+# ---------------------------------------------------------------------------
+async def test_los_dos_ajustes_de_009k3_nacen_en_su_omision(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """El factor apagado y el horno cargado en conjunto.
+
+    Es el cambio de negocio de la fase, leido desde donde lo lee la pantalla.
+    """
+    body = (await api.get(COMMERCIAL)).json()
+
+    assert body["production_factor_enabled_default"] is False
+    assert body["kiln_mode_default"] == "TOGETHER"
+    # El factor sigue valiendo lo que valia: lo que cambia es si se aplica.
+    assert Decimal(body["production_factor_default"]) == Decimal(3)
+
+
+async def test_guardar_sin_tocarlos_no_los_escribe_ni_los_audita(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """NULL en estas columnas SIGNIFICA la omision; no es un hueco que rellenar.
+
+    El PUT manda el ajuste entero, asi que los dos campos viajan siempre con el
+    valor que la pantalla mostro. Persistirlo no cambiaria nada y ademas
+    apuntaria en el historial dos cambios que nadie hizo, en el primer guardado
+    de cualquier ajuste: alguien toca el IGV y la auditoria dice que tambien
+    movio el factor y el modo de horno.
+    """
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(
+            1,
+            tax_percent="18",
+            production_factor_enabled_default=False,
+            kiln_mode_default="TOGETHER",
+        ),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+
+    fila = (
+        await db_session.execute(
+            text(
+                "SELECT production_factor_enabled_default, kiln_mode_default"
+                " FROM commercial_settings WHERE id = 1"
+            )
+        )
+    ).one()
+    assert fila == (None, None), fila
+
+    historial = (
+        (
+            await db_session.execute(
+                text(
+                    "SELECT field FROM audit_events"
+                    " WHERE entity_type = 'commercial_settings' ORDER BY field"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert historial == ["tax_percent"], historial
+
+
+async def test_elegir_algo_distinto_de_la_omision_si_se_guarda(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """Cuando SI hubo decision, se persiste y el historial la registra."""
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(
+            1,
+            production_factor_enabled_default=True,
+            kiln_mode_default="PER_PRODUCT",
+        ),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+    assert respuesta.json()["production_factor_enabled_default"] is True
+    assert respuesta.json()["kiln_mode_default"] == "PER_PRODUCT"
+
+    fila = (
+        await db_session.execute(
+            text(
+                "SELECT production_factor_enabled_default, kiln_mode_default"
+                " FROM commercial_settings WHERE id = 1"
+            )
+        )
+    ).one()
+    assert fila == (True, "PER_PRODUCT"), fila
+
+
+async def test_un_modo_de_horno_inventado_se_rechaza(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """Sin esta puerta, un valor invalido elegiria TOGETHER en silencio."""
+    respuesta = await api.put(
+        COMMERCIAL,
+        json=_payload(1, kiln_mode_default="POR_PRODUCTO"),
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert respuesta.status_code == 422, respuesta.text

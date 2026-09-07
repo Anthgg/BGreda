@@ -19,7 +19,14 @@ from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
 from app.models.catalog import CurrencyCatalog, UbigeoDistrict
-from app.models.settings import SINGLETON_ID, BankAccount, CommercialSettings, CompanySettings
+from app.models.settings import (
+    DEFAULT_KILN_MODE,
+    DEFAULT_PRODUCTION_FACTOR_ENABLED,
+    SINGLETON_ID,
+    BankAccount,
+    CommercialSettings,
+    CompanySettings,
+)
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.settings import (
     BankAccountBase,
@@ -52,6 +59,32 @@ class InvalidCatalogValueError(APIError):
     status_code = 422
     code = "INVALID_CATALOG_VALUE"
     message = "La moneda o ubicacion seleccionada no existe en el catalogo vigente"
+
+
+#: Fase 009K.3. Columnas donde NULL no es un hueco: SIGNIFICA el valor por
+#: omision, y la frontera de entrada ya lo resuelve al leer.
+_OMISIONES_009K3 = (
+    ("production_factor_enabled_default", DEFAULT_PRODUCTION_FACTOR_ENABLED),
+    ("kiln_mode_default", DEFAULT_KILN_MODE),
+)
+
+
+def _preservar_omisiones_009k3(settings: CommercialSettings, incoming: dict[str, Any]) -> None:
+    """Deja en NULL lo que sigue siendo el valor por omision.
+
+    El PUT de configuracion manda el ajuste ENTERO, asi que estas dos columnas
+    viajan siempre —con el valor que la pantalla mostro, que para una
+    instalacion anterior a 009K.3 es el resuelto del NULL—. Escribirlo encima
+    no cambia nada y ademas registraria en el historial dos cambios que nadie
+    hizo, en el primer guardado de cualquier ajuste: alguien toca el IGV y la
+    auditoria dice que tambien movio el factor y el modo de horno.
+
+    Solo se persiste una eleccion DISTINTA de la omision. Entonces si hubo
+    decision, y entonces el historial dice la verdad.
+    """
+    for campo, por_omision in _OMISIONES_009K3:
+        if getattr(settings, campo) is None and incoming.get(campo) == por_omision:
+            incoming.pop(campo, None)
 
 
 def _editable_fields(model: type[Any]) -> list[str]:
@@ -154,6 +187,7 @@ class SettingsService:
 
         incoming = payload.model_dump(exclude={"version", "bank_account"})
         await self._canonicalize_currency(incoming)
+        _preservar_omisiones_009k3(settings, incoming)
         fields = _editable_fields(CommercialSettingsUpdate)
         changes = diff_model(settings, incoming, fields)
 

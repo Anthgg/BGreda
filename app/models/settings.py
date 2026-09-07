@@ -14,6 +14,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -54,6 +55,20 @@ MAX_GLAZE_PERCENT = Decimal("100")
 #: Valor con el que la migracion 0015 inicializa el porcentaje. Vive aqui para
 #: que el modelo, el esquema y la migracion digan el mismo numero.
 DEFAULT_ESTIMATED_GLAZE_PERCENT = Decimal("15")
+
+#: Fase 009K.3. El factor de produccion nace APAGADO. Se guarda como bandera y
+#: no como `production_factor_default = 0`, que ningun CHECK admitiria.
+DEFAULT_PRODUCTION_FACTOR_ENABLED = False
+
+#: Fase 009K.3. Modo de horno por omision. `TOGETHER` es lo que el Cotizador
+#: hacia antes de que el modo existiera; cambiar el arranque a `PER_PRODUCT`
+#: es una decision comercial, no un detalle tecnico.
+DEFAULT_KILN_MODE = "TOGETHER"
+
+#: Los dos unicos modos de carga del horno. Se escribe aqui, y no se importa
+#: de `app.models.quotations`, porque ese modulo importa este: la dependencia
+#: en el otro sentido seria circular.
+KILN_MODES = ("TOGETHER", "PER_PRODUCT")
 
 
 class VersionedSingletonMixin(TimestampMixin):
@@ -186,6 +201,17 @@ class CommercialSettings(Base, VersionedSingletonMixin):
         server_default=text("0.50"),
     )
 
+    #: Fase 009K.3. Si una cotizacion NUEVA nace con el factor aplicado.
+    #:
+    #: Anulable a proposito: la instalacion que ya existe no se toca, y NULL
+    #: se resuelve como `DEFAULT_PRODUCTION_FACTOR_ENABLED` —apagado—, que es
+    #: la decision de esta fase. Rellenarlo con un UPDATE seria escribir en la
+    #: configuracion de alguien una eleccion que nadie hizo.
+    production_factor_enabled_default: Mapped[bool | None] = mapped_column(Boolean)
+    #: Fase 009K.3. Modo de horno con el que nace una cotizacion nueva. NULL
+    #: se resuelve como `TOGETHER`, el comportamiento historico.
+    kiln_mode_default: Mapped[str | None] = mapped_column(String(20))
+
     # ---- Textos de documentos (texto plano, jamas HTML) ------------------
     general_conditions: Mapped[str | None] = mapped_column(Text)
     payment_notes: Mapped[str | None] = mapped_column(Text)
@@ -206,6 +232,13 @@ class CommercialSettings(Base, VersionedSingletonMixin):
         ),
         CheckConstraint("default_quotation_factor > 0", name="default_quotation_factor_positive"),
         CheckConstraint("production_factor_default > 0", name="production_factor_default_positive"),
+        # Fase 009K.3: el modo por omision tampoco puede ser un texto
+        # cualquiera. Sin CHECK, un valor invalido no fallaria: elegiria en
+        # silencio la rama TOGETHER.
+        CheckConstraint(
+            "kiln_mode_default IS NULL OR kiln_mode_default IN ('TOGETHER', 'PER_PRODUCT')",
+            name="kiln_mode_default_allowed",
+        ),
         # En la base y no solo en Pydantic: una politica que admitiera 0,25
         # produciria precios que no son multiplos de nada.
         CheckConstraint("rounding_step IN (0.50, 1.00)", name="rounding_step_allowed"),
