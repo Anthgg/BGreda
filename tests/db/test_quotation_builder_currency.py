@@ -431,6 +431,11 @@ async def _plan_guardado(db_session: AsyncSession, quotation_id: int) -> list[di
     return [(fila["production_snapshot"] or {}).get("commercial_plan") or {} for fila in filas]
 
 
+#: Precision con la que se compara la traza guardada. Es dinero: dos
+#: decimales dicen todo lo que un documento tiene que sostener.
+CENTIMO = Decimal("0.01")
+
+
 @pytest.mark.asyncio
 async def test_el_plan_guardado_conserva_moneda_tasa_y_neto_base(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
@@ -453,9 +458,15 @@ async def test_el_plan_guardado_conserva_moneda_tasa_y_neto_base(
         assert plan["exchange_rate_source"] == "MANUAL"
         assert plan["raw_net_unit_base"] is not None
         # Y la traza cuadra: el neto en dólares sale de dividir el de soles.
-        assert Decimal(str(plan["raw_net_unit"])) == (
-            Decimal(str(plan["raw_net_unit_base"])) / Decimal(TASA)
-        )
+        #
+        # Se compara con precision de moneda y no cifra a cifra: el snapshot
+        # viaja por `jsonable_encoder`, que convierte los Decimal en float, de
+        # modo que 14 / 3,75 vuelve como 3.7333333333333334. La igualdad
+        # exacta pasaba solo mientras la division daba un numero redondo —con
+        # el factor tres que se aplicaba antes de 009K.3—, y eso no era una
+        # garantia, era suerte.
+        esperado = Decimal(str(plan["raw_net_unit_base"])) / Decimal(TASA)
+        assert Decimal(str(plan["raw_net_unit"])).quantize(CENTIMO) == esperado.quantize(CENTIMO)
 
 
 @pytest.mark.asyncio
