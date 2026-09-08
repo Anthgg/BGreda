@@ -120,6 +120,25 @@ class PrototypeQuotationStockLocationInvalidError(APIError):
     message = "Indica un almacen activo del que saldra el material de la muestra"
 
 
+class PrototypeQuotationMultipleRootsError(APIError):
+    """Dos muestras raiz para la misma cotizacion. Fase 009K.4.
+
+    No es un caso de negocio: es corrupcion. Una cotizacion materializa UNA
+    muestra —y `mark_paid` lo hace con la fila del documento bloqueada—, de
+    modo que la cadena tiene una sola raiz y las demas cuelgan de ella por
+    `supersedes_prototype_id`.
+
+    Se para en vez de elegir. Devolver cualquiera de las dos daria una
+    respuesta plausible sobre un dato roto, y el cobro contestaria con una
+    orden de produccion que no es la suya. El detalle lleva los identificadores
+    para que alguien pueda mirar cual sobra.
+    """
+
+    status_code = 409
+    code = "PROTOTYPE_QUOTATION_MULTIPLE_ROOT_PROTOTYPES"
+    message = "La cotizacion tiene mas de una muestra raiz y no se puede resolver sola"
+
+
 class PrototypeQuotationNotPayableError(APIError):
     status_code = 409
     code = "PROTOTYPE_QUOTATION_NOT_PAYABLE"
@@ -892,25 +911,50 @@ class PrototypeQuotationService:
         return producto
 
     async def _muestra_original(self, quotation_id: int) -> Prototype | None:
-        """La muestra que ESTE cobro materializo. La primera de su cadena.
+        """La muestra que ESTE cobro materializo: la RAIZ de su cadena.
 
         Desde el addendum de 009K.4 una cotizacion de prototipo puede tener
-        varias muestras colgando: la sucesora hereda el `prototype_quotation_id`
-        del padre para no perder de que encargo viene. Eso convierte esta
-        lectura en ambigua si no se ordena, y de ella depende la idempotencia
-        del cobro: un `LIMIT 1` sin orden podia devolver la sucesora, y un
-        segundo cobro habria contestado con la orden equivocada.
+        varias muestras colgando, porque la sucesora hereda el
+        `prototype_quotation_id` del padre para no perder de que encargo viene.
+        De esta lectura depende la idempotencia del cobro, asi que elegir mal
+        devolveria un `production_order_id` que no es el suyo.
 
-        La raiz es la de id menor porque es la que existio primero. Ordenarlo
-        explicitamente es lo que hace que la respuesta no dependa del plan que
-        elija PostgreSQL ese dia.
+        **La raiz se identifica por la CADENA, no por el identificador.** El
+        modelo ya dice quien es: `supersedes_prototype_id IS NULL` significa
+        «no sustituye a ninguna», y eso es exactamente lo que materializa el
+        cobro —`_crear_muestra` no lo rellena nunca, y `create_successor`
+        siempre lo rellena—. Ordenar por id daba hoy la misma respuesta, pero
+        por coincidencia: es un correlativo de inserción, no una declaracion de
+        parentesco, y bastaria una carga de datos o una muestra creada fuera de
+        orden para que dejara de coincidir.
+
+        El `ORDER BY id` se queda como DESEMPATE defensivo, no como definicion.
+
+        Si aparecieran dos raices para la misma cotizacion, no se elige una: se
+        para. Ese estado no lo puede producir este servicio —`mark_paid` toma
+        la fila del documento con cerrojo antes de mirar si ya hay muestra—,
+        asi que si existe es corrupcion historica, y contestar con cualquiera
+        de las dos convertiria un dato roto en una respuesta plausible.
         """
-        return await self._session.scalar(
-            select(Prototype)
-            .where(Prototype.prototype_quotation_id == quotation_id)
-            .order_by(Prototype.id)
-            .limit(1)
+        filas = list(
+            (
+                await self._session.execute(
+                    select(Prototype)
+                    .where(
+                        Prototype.prototype_quotation_id == quotation_id,
+                        Prototype.supersedes_prototype_id.is_(None),
+                    )
+                    .order_by(Prototype.id)
+                )
+            )
+            .scalars()
+            .all()
         )
+        if len(filas) > 1:
+            raise PrototypeQuotationMultipleRootsError(
+                details=[{"prototype_id": fila.id, "code": fila.code} for fila in filas]
+            )
+        return filas[0] if filas else None
 
     async def _crear_muestra(
         self, fila: PrototypeQuotation, *, user: AuthenticatedUser

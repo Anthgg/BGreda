@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockMovement
@@ -382,16 +382,15 @@ async def test_una_sucesora_de_muestra_sin_cotizacion_sigue_sin_cotizacion(
 
 
 @pytest.mark.asyncio
-async def test_cobrar_dos_veces_con_sucesora_sigue_devolviendo_la_primera(
+async def test_cobrar_dos_veces_con_sucesora_sigue_devolviendo_la_raiz(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """La idempotencia del cobro sobrevive a la herencia.
+    """R02 + R05 + R06 + R07. La idempotencia sobrevive a la herencia.
 
     Heredar `prototype_quotation_id` hace que una cotización pueda tener varias
-    muestras colgando, y el cobro las busca por ahí. Sin un orden explícito, un
-    `LIMIT 1` podía devolver la sucesora y el segundo cobro habría contestado
-    con la orden equivocada. La raíz de la cadena es la que este cobro
-    materializó, y es la que se devuelve siempre.
+    muestras colgando, y el cobro las busca por ahí. La que este cobro
+    materializó es la RAÍZ de la cadena —la que no sustituye a ninguna—, y es
+    la que se devuelve siempre, con su orden y no la de la sucesora.
     """
     datos = await _cobrada(api, admin_csrf, db_session, "_add_idem")
     await dar_existencia(
@@ -485,3 +484,115 @@ async def test_la_sucesora_arranca_con_el_guardia_de_cobro_de_su_cotizacion(
     assert lineas[0].material_role is not None
     assert lineas[0].material_role.value == "BODY"
     assert lineas[0].quantity_planned == Decimal("1.25")
+
+
+# ---------------------------------------------------------------------------
+# R01, R03, R04, R08 — cómo se identifica la raíz de la cadena
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_una_cotizacion_sin_iteraciones_devuelve_su_unica_muestra(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """R01. El caso normal: una cotización, una muestra, y esa es la raíz."""
+    datos = await _cobrada(api, admin_csrf, db_session, "_root_sola")
+
+    db_session.expire_all()
+    muestra = await db_session.get(Prototype, datos["muestra_id"])
+    assert muestra is not None
+    assert muestra.prototype_quotation_id == datos["cpr_id"]
+    assert muestra.supersedes_prototype_id is None, "la raíz no sustituye a ninguna"
+
+    documento = await api.get(f"{COTIZADOR}/{datos['cpr_id']}", headers=head(admin_csrf))
+    assert documento.json()["prototype_id"] == datos["muestra_id"]
+    assert documento.json()["production_order_id"] == datos["orden_id"]
+
+
+@pytest.mark.asyncio
+async def test_la_raiz_se_elige_por_la_cadena_y_no_por_el_identificador(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """R03 + R04. MARK_PAID_ROOT_PROTOTYPE_SELECTION: BY_EXPLICIT_CHAIN_ROOT.
+
+    Hoy la raíz también es la de id menor, y por eso ordenar por id daba la
+    respuesta correcta: es un correlativo de inserción, y la raíz se inserta
+    primero. Pero eso es una coincidencia, no una definición.
+
+    Aquí se rompe la coincidencia a propósito —se le pone a la raíz un id MAYOR
+    que el de su sucesora— y se comprueba que el cobro sigue devolviendo la
+    raíz. Es la única forma de distinguir «elige por parentesco» de «elige por
+    el número más bajo»: mientras coincidan, las dos implementaciones aprueban.
+    """
+    datos = await _cobrada(api, admin_csrf, db_session, "_root_orden")
+    raiz = datos["muestra_id"]
+
+    # Una segunda muestra de la MISMA cotización, con id mayor, declarada
+    # sucesora de la raíz. Se escribe en la base directamente porque el camino
+    # normal —`create_successor`— exige rechazar antes, y lo que se quiere
+    # montar aquí es la forma de la cadena, no su historia.
+    codigo = f"PRT-ROOT-{raiz}"
+    await db_session.execute(
+        text(
+            "INSERT INTO prototypes"
+            " (code, name, quantity, status, approval, requested_at,"
+            "  prototype_quotation_id, supersedes_prototype_id, created_at, updated_at)"
+            " VALUES (:codigo, :codigo, 1, 'CREATED', 'PENDING', now(),"
+            "  :cpr, :raiz, now(), now())"
+        ),
+        {"codigo": codigo, "cpr": datos["cpr_id"], "raiz": raiz},
+    )
+    await db_session.commit()
+
+    sucesora = await db_session.scalar(select(Prototype).where(Prototype.code == codigo))
+    assert sucesora is not None
+    assert sucesora.id > raiz, "el escenario que distingue las dos implementaciones"
+
+    repetido = await cobrar(api, admin_csrf, datos["cpr_id"], stock_location_id=datos["almacen"])
+    assert repetido.status_code == 200, repetido.text
+    assert repetido.json()["prototype_id"] == raiz
+    assert repetido.json()["production_order_id"] == datos["orden_id"]
+
+    documento = await api.get(f"{COTIZADOR}/{datos['cpr_id']}", headers=head(admin_csrf))
+    assert documento.json()["prototype_id"] == raiz
+
+
+@pytest.mark.asyncio
+async def test_dos_raices_para_la_misma_cotizacion_no_se_resuelven_solas(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """R08. MULTIPLE_ROOTS_SILENTLY_ACCEPTED: NO.
+
+    Este servicio no puede producir ese estado: `mark_paid` toma la fila del
+    documento con cerrojo antes de mirar si ya hay muestra. Si aparece, es
+    corrupción histórica —una carga de datos, una restauración a medias— y
+    elegir cualquiera de las dos convertiría un dato roto en una respuesta
+    plausible: el cobro contestaría con una orden de producción que no es la
+    suya, y nadie se enteraría.
+
+    Se para, y el detalle dice cuáles son para que alguien mire cuál sobra.
+    """
+    datos = await _cobrada(api, admin_csrf, db_session, "_root_doble")
+
+    codigo = f"PRT-DOBLE-{datos['muestra_id']}"
+    await db_session.execute(
+        text(
+            "INSERT INTO prototypes"
+            " (code, name, quantity, status, approval, requested_at,"
+            "  prototype_quotation_id, supersedes_prototype_id, created_at, updated_at)"
+            " VALUES (:codigo, :codigo, 1, 'CREATED', 'PENDING', now(),"
+            "  :cpr, NULL, now(), now())"
+        ),
+        {"codigo": codigo, "cpr": datos["cpr_id"]},
+    )
+    await db_session.commit()
+
+    repetido = await cobrar(api, admin_csrf, datos["cpr_id"], stock_location_id=datos["almacen"])
+    assert repetido.status_code == 409, repetido.text
+    cuerpo = repetido.json()["error"]
+    assert cuerpo["code"] == "PROTOTYPE_QUOTATION_MULTIPLE_ROOT_PROTOTYPES"
+    # Y dice cuáles, que es lo que hace accionable el aviso.
+    codigos = {detalle["code"] for detalle in cuerpo["details"]}
+    assert codigo in codigos
+
+    # Leer la cotización tampoco inventa una respuesta.
+    documento = await api.get(f"{COTIZADOR}/{datos['cpr_id']}", headers=head(admin_csrf))
+    assert documento.status_code == 409, documento.text
