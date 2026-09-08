@@ -52,6 +52,7 @@ from app.models.prototypes import (
     Prototype,
     PrototypeApproval,
     PrototypeMaterialLine,
+    PrototypeMaterialRole,
     PrototypeStatus,
 )
 from app.models.sequence import SequenceType
@@ -407,13 +408,7 @@ class PrototypeQuotationService:
 
         # Una fila de previsualizacion no existe en la base todavia: buscarle
         # muestra asociada seria una consulta por un id que no es de nadie.
-        muestra = (
-            await self._session.scalar(
-                select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
-            )
-            if fila.id
-            else None
-        )
+        muestra = await self._muestra_original(fila.id) if fila.id else None
         # Fase 009K.4. La orden que fabrica esa muestra, si existe. Se lee
         # aqui —no se deduce ni se busca por codigo— porque su identificador
         # es lo unico que lleva a la orden correcta.
@@ -798,9 +793,7 @@ class PrototypeQuotationService:
         if location is None or not location.active:
             raise PrototypeQuotationStockLocationInvalidError()
 
-        muestra = await self._session.scalar(
-            select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
-        )
+        muestra = await self._muestra_original(fila.id)
         if fila.payment_status is PrototypeQuotationPaymentStatus.PAID and muestra is not None:
             orden, _ = await self._ordenes.create_for_prototype(
                 prototype=muestra, stock_location_id=stock_location_id, user=user
@@ -898,6 +891,27 @@ class PrototypeQuotationService:
         )
         return producto
 
+    async def _muestra_original(self, quotation_id: int) -> Prototype | None:
+        """La muestra que ESTE cobro materializo. La primera de su cadena.
+
+        Desde el addendum de 009K.4 una cotizacion de prototipo puede tener
+        varias muestras colgando: la sucesora hereda el `prototype_quotation_id`
+        del padre para no perder de que encargo viene. Eso convierte esta
+        lectura en ambigua si no se ordena, y de ella depende la idempotencia
+        del cobro: un `LIMIT 1` sin orden podia devolver la sucesora, y un
+        segundo cobro habria contestado con la orden equivocada.
+
+        La raiz es la de id menor porque es la que existio primero. Ordenarlo
+        explicitamente es lo que hace que la respuesta no dependa del plan que
+        elija PostgreSQL ese dia.
+        """
+        return await self._session.scalar(
+            select(Prototype)
+            .where(Prototype.prototype_quotation_id == quotation_id)
+            .order_by(Prototype.id)
+            .limit(1)
+        )
+
     async def _crear_muestra(
         self, fila: PrototypeQuotation, *, user: AuthenticatedUser
     ) -> Prototype:
@@ -937,6 +951,19 @@ class PrototypeQuotationService:
                     product_internal_reference_snapshot=(
                         producto.internal_reference if producto else ""
                     ),
+                    # Lo que la cotizacion DECLARO como cuerpo llega como rol.
+                    # Es el mismo dato dicho dos veces en dos vocabularios, y
+                    # perderlo por el camino dejaba a la muestra sin saber cual
+                    # de sus materiales es el barro de la pieza —que es el
+                    # unico que puede viajar despues al Cotizador como material
+                    # base—.
+                    #
+                    # Solo se traduce el SI. Un `false` significa «no es el
+                    # cuerpo», no «es otra cosa»: la cotizacion no declara
+                    # esmaltes ni etapas, y ponerle GLAZE u OTHER seria
+                    # inventarle al taller una clasificacion que nadie hizo.
+                    # Por lo mismo `stage` se queda en nulo: no hay fuente.
+                    material_role=(PrototypeMaterialRole.BODY if linea.is_body_material else None),
                 )
             )
         self._session.add(muestra)

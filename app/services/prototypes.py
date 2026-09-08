@@ -332,11 +332,18 @@ class PrototypeService:
         materials: list[MaterialInput],
         user: AuthenticatedUser,
         supersedes_prototype_id: int | None = None,
+        prototype_quotation_id: int | None = None,
     ) -> Prototype:
         """Registra la muestra. No mueve ni un gramo.
 
         El correlativo lo emite el backend: nadie teclea el suyo, igual que en
         cotizaciones, quemas, preparaciones y ordenes.
+
+        `prototype_quotation_id` NO viaja en el alta publica y no se valida
+        aqui: lo pone `create_successor` copiandolo del padre, que es el unico
+        camino por el que una muestra puede colgar de una cotizacion de
+        prototipo sin haberla materializado ella misma. Aceptarlo desde fuera
+        permitiria colgar una muestra cualquiera de un cobro ajeno.
         """
         await self._validate_links(
             quotation_id=quotation_id,
@@ -358,6 +365,7 @@ class PrototypeService:
             notes=notes,
             technical_specifications=technical_specifications,
             supersedes_prototype_id=supersedes_prototype_id,
+            prototype_quotation_id=prototype_quotation_id,
             created_by=user.id,
             created_by_name=user.display_name,
             # Se inicializa AQUI, antes del flush, y no es cosmetica: en cuanto
@@ -388,6 +396,7 @@ class PrototypeService:
                 "status": prototype.status.value,
                 "material_count": len(materials),
                 "supersedes_prototype_id": supersedes_prototype_id,
+                "prototype_quotation_id": prototype_quotation_id,
             },
         )
         return prototype
@@ -807,10 +816,16 @@ class PrototypeService:
         """Crea la siguiente muestra a partir de una que no valio.
 
         Copia la INTENCION —a que pedido y producto va, de que almacen sale,
-        cuantas piezas, con que materiales— y nada de la historia: ni el
-        estado, ni las fechas, ni la decision, ni un solo movimiento. La
-        anterior se queda como estaba, que es el punto: un rechazo no se
-        reescribe.
+        cuantas piezas, con que materiales, y de que cobro nace— y nada de la
+        historia: ni el estado, ni las fechas, ni la decision, ni un solo
+        movimiento. La anterior se queda como estaba, que es el punto: un
+        rechazo no se reescribe.
+
+        La cotizacion de prototipo se HEREDA. Repetir una muestra no es un
+        encargo nuevo: es el mismo, que salio mal a la primera. Sin heredarla,
+        la cadena perdia su origen comercial en el primer intento fallido y la
+        orden de la sucesora no sabia decir de que cobro venia. Y no se crea
+        una CPR nueva ni se toca la del padre: el cliente pago una vez.
         """
         anterior = await self.get(prototype_id, for_update=True)
         await self._guard_lineage(anterior)
@@ -852,6 +867,7 @@ class PrototypeService:
                 ],
                 user=user,
                 supersedes_prototype_id=anterior.id,
+                prototype_quotation_id=anterior.prototype_quotation_id,
             )
         except IntegrityError as exc:
             # Red de seguridad del UNIQUE, para cualquier camino que llegue sin
