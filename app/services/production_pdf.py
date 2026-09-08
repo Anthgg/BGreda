@@ -31,14 +31,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.documents.common import build_company_doc_info, sanitize_pdf_filename
 from app.documents.production import (
     ProductionOrderDocument,
+    PrototypeMaterialRow,
+    PrototypeOriginInfo,
     PublicTrackingData,
     build_production_order_document,
     build_public_tracking_data,
     build_public_tracking_sheet,
+    format_measure,
 )
 from app.models.inventory import StockLocation
 from app.models.masters import Product
 from app.models.production import ProductionOrder
+from app.models.prototype_quotations import PrototypeQuotation
+from app.models.prototypes import Prototype, PrototypeMaterialLine
 from app.models.quotations import Quotation
 from app.models.settings import SINGLETON_ID, CompanySettings
 from app.services.document_assets import resolve_company_logo_data_uri
@@ -124,9 +129,65 @@ class ProductionPdfService:
         ).scalar_one_or_none()
 
     # -- Hoja de taller (interna) -------------------------------------------
+    async def _prototype_context(
+        self, order: ProductionOrder
+    ) -> tuple[PrototypeOriginInfo, list[PrototypeMaterialRow]]:
+        """Origen y materiales de una orden nacida de una muestra.
+
+        Los materiales salen de `prototype_material_lines` —lo que alguien
+        eligio a mano— y no de ninguna receta, porque una muestra no tiene. Se
+        leen los snapshots de la linea, no el maestro: la hoja debe decir lo
+        que la muestra decia cuando se cobro, aunque el catalogo haya cambiado
+        de nombre desde entonces.
+        """
+        prototype = await self._session.get(Prototype, order.prototype_id)
+        quotation = (
+            await self._session.get(PrototypeQuotation, prototype.prototype_quotation_id)
+            if prototype is not None and prototype.prototype_quotation_id is not None
+            else None
+        )
+        origin = PrototypeOriginInfo(
+            quotation_code=quotation.code if quotation is not None else None,
+            prototype_code=prototype.code if prototype is not None else None,
+        )
+        if prototype is None:
+            return origin, []
+
+        filas = (
+            (
+                await self._session.execute(
+                    select(PrototypeMaterialLine)
+                    .where(PrototypeMaterialLine.prototype_id == prototype.id)
+                    .order_by(PrototypeMaterialLine.sort_order, PrototypeMaterialLine.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return origin, [
+            PrototypeMaterialRow(
+                name=fila.product_name_snapshot,
+                reference=fila.product_internal_reference_snapshot,
+                required_formatted=format_measure(fila.quantity_planned, fila.uom_code),
+            )
+            for fila in filas
+        ]
+
     async def build_document(self, order: ProductionOrder) -> ProductionOrderDocument:
-        """Modelo de la hoja de taller, con todo lo operativo ya resuelto."""
-        quotation = await self._session.get(Quotation, order.quotation_id)
+        """Modelo de la hoja de taller, con todo lo operativo ya resuelto.
+
+        Fase 009K.4: `quotation_id` ya puede ser nulo. Pedirle a la sesion la
+        cotizacion `None` devolveria `None` sin quejarse, pero la consulta
+        sobra y el nulo tiene aqui un significado —la orden viene de una
+        muestra— que conviene leer de forma explicita.
+        """
+        origin: PrototypeOriginInfo | None = None
+        materials: list[PrototypeMaterialRow] = []
+        quotation = None
+        if order.prototype_id is not None:
+            origin, materials = await self._prototype_context(order)
+        elif order.quotation_id is not None:
+            quotation = await self._session.get(Quotation, order.quotation_id)
         location = await self._session.get(StockLocation, order.stock_location_id)
         company = await self._company_settings()
         logo_data_uri = await resolve_company_logo_data_uri(company, self._storage)
@@ -149,6 +210,8 @@ class ProductionPdfService:
                 order.qr_token, base_url=self._base_url, logo_data_uri=logo_data_uri
             ),
             qr_caption=QR_CAPTION,
+            prototype_origin=origin,
+            prototype_materials=materials,
         )
 
     async def render(self, order: ProductionOrder) -> tuple[bytes, str]:

@@ -37,6 +37,11 @@ from app.models.production import (
     ProductionOrderStatus,
     ProductionReadinessCode,
 )
+from app.models.prototype_quotations import (
+    PrototypeQuotation,
+    PrototypeQuotationPaymentStatus,
+)
+from app.models.prototypes import Prototype, PrototypeMaterialLine, PrototypeStatus
 from app.models.quotations import (
     Quotation,
     QuotationItem,
@@ -48,6 +53,7 @@ from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.production import (
     ProductionOrderLineOut,
+    ProductionOrderOrigin,
     ProductionOrderOut,
     ProductionOrderPage,
     ProductionOrderSummaryOut,
@@ -57,7 +63,11 @@ from app.schemas.production import (
 from app.services import body_material as body_material_mod
 from app.services.audit import AuditRecorder
 from app.services.inventory import InventoryService
-from app.services.prototypes import PrototypeService, assert_prototypes_approved
+from app.services.prototypes import (
+    PROTOTYPE_ENTITY,
+    PrototypeService,
+    assert_prototypes_approved,
+)
 from app.services.sequences import SequenceService
 
 #: Entidad con la que se firman los eventos de auditoria del modulo.
@@ -164,6 +174,18 @@ class ProductionOrderLocationInvalidError(APIError):
     status_code = 422
     code = "PRODUCTION_ORDER_LOCATION_INVALID"
     message = "La ubicacion de stock no existe o esta desactivada"
+
+
+class ProductionOrderPrototypeNotProducibleError(APIError):
+    """La muestra ya se fabrico, se completo o se anulo. Fase 009K.4.
+
+    409 y no 403: quien lo recibe puede tener todos los permisos y la respuesta
+    seria la misma, porque lo que falla es el estado de la muestra.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_PROTOTYPE_NOT_PRODUCIBLE"
+    message = "Solo una muestra sin fabricar puede originar una orden de produccion"
 
 
 class ProductionOrderQuotationNotPaidError(APIError):
@@ -391,7 +413,16 @@ class ProductionOrderService:
             .all()
         )
         for position, item in enumerate(items):
-            self._session.add(await self._line_from_item(order, item, position))
+            linea = await self._line_from_item(order, item, position)
+            # Fase 009K.4: `quotation_item_id` paso a ser anulable para que
+            # quepan las lineas de una orden de MUESTRA. Una linea de
+            # cotizacion sin item seguiria siendo un error, y la base ya no
+            # puede impedirlo —no sabe de que origen es la orden—, asi que se
+            # afirma aqui, donde si se sabe.
+            assert linea.quotation_item_id is not None, (
+                "una linea de orden de cotizacion siempre copia un item confirmado"
+            )
+            self._session.add(linea)
         await self._session.flush()
 
         self._audit.record_action(
@@ -411,6 +442,128 @@ class ProductionOrderService:
         )
         await self._session.refresh(order, ["lines"])
         return order, True
+
+    async def get_by_prototype(self, prototype_id: int) -> ProductionOrder | None:
+        """La orden de una muestra, si ya se creo."""
+        return await self._session.scalar(
+            self._base_query().where(ProductionOrder.prototype_id == prototype_id)
+        )
+
+    async def create_for_prototype(
+        self,
+        *,
+        prototype: Prototype,
+        stock_location_id: int,
+        user: AuthenticatedUser,
+    ) -> tuple[ProductionOrder, bool]:
+        """Crea la orden que fabrica una muestra. Devuelve `(orden, es_nueva)`.
+
+        Igual que su hermana de cotizacion: consume un correlativo y nada mas.
+        No mueve inventario, no aprueba nada y no decide si la muestra sirve.
+
+        Y con la misma idempotencia por el hecho: una muestra tiene como mucho
+        una orden, y pedirla dos veces devuelve la misma. La unicidad de verdad
+        la impone el UNIQUE de `prototype_id`, no esta comprobacion: dos cobros
+        simultaneos de la misma cotizacion de prototipo pasarian los dos
+        cualquier lectura previa.
+
+        El almacen llega SIEMPRE de fuera y ya validado. No hay ubicacion por
+        defecto ni aunque hoy solo exista una: el dia que haya dos, un default
+        silencioso descontaria del almacen equivocado sin avisar.
+        """
+        ya = await self.get_by_prototype(prototype.id)
+        if ya is not None:
+            return ya, False
+
+        location = await self._session.get(StockLocation, stock_location_id)
+        if location is None or not location.active:
+            raise ProductionOrderLocationInvalidError()
+
+        order = ProductionOrder(
+            code=await self._sequences.issue(SequenceType.PRODUCTION_ORDER, user_id=user.id),
+            quotation_id=None,
+            prototype_id=prototype.id,
+            stock_location_id=location.id,
+            status=ProductionOrderStatus.CREATED,
+            idempotency_key=None,
+            qr_token=secrets.token_urlsafe(32),
+            created_by=user.id,
+            created_by_name=user.display_name,
+        )
+        self._session.add(order)
+        await self._session.flush()
+
+        # UNA linea: la pieza. Las lineas de una orden de cotizacion son una
+        # por producto cotizado; una muestra es una sola pieza, y su material
+        # no vive aqui sino en `prototype_material_lines`, donde alguien lo
+        # eligio a mano. Sintetizar una receta para que encajara en el modelo
+        # de la cotizacion seria inventarse un dato tecnico.
+        producto = (
+            await self._session.get(Product, prototype.product_id)
+            if prototype.product_id is not None
+            else None
+        )
+        self._session.add(
+            ProductionOrderLine(
+                production_order_id=order.id,
+                quotation_item_id=None,
+                sort_order=0,
+                product_id=prototype.product_id,
+                product_name_snapshot=(producto.name if producto else prototype.name),
+                product_internal_reference_snapshot=(
+                    producto.internal_reference if producto else prototype.code
+                ),
+                quantity=prototype.quantity,
+                # Las medidas se COPIAN, como en la rama de cotizacion. La hoja
+                # de taller tiene que decir de que tamano es la pieza, y tiene
+                # que seguir diciendo lo mismo dentro de un ano aunque el
+                # maestro haya cambiado desde entonces.
+                width_snapshot=producto.width if producto else None,
+                height_snapshot=producto.height if producto else None,
+                length_snapshot=producto.length if producto else None,
+                depth_snapshot=producto.depth if producto else None,
+            )
+        )
+        await self._session.flush()
+
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.CREATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "origin": "PROTOTYPE",
+                "prototype_id": prototype.id,
+                "prototype_code": prototype.code,
+                "stock_location_id": location.id,
+                "status": order.status.value,
+                "line_count": 1,
+            },
+        )
+        await self._session.refresh(order, ["lines"])
+        return order, True
+
+    async def create_for_prototype_id(
+        self, prototype_id: int, *, stock_location_id: int, user: AuthenticatedUser
+    ) -> tuple[ProductionOrder, bool]:
+        """Igual que `create_for_prototype`, partiendo del id.
+
+        Solo se le crea orden a una muestra que todavia no se ha fabricado. Una
+        arrancada ya gasto su material por el camino que fuera, y darle ahora
+        una orden arrancable seria invitar a gastarlo dos veces; una completada
+        o anulada no tiene nada pendiente que fabricar.
+
+        Ese limite es tambien lo que impide rellenar hacia atras: ninguna de las
+        muestras historicas ya ejecutadas puede recibir una orden por aqui.
+        """
+        prototype = await self._prototypes.get(prototype_id)
+        if prototype.status is not PrototypeStatus.CREATED:
+            raise ProductionOrderPrototypeNotProducibleError()
+        return await self.create_for_prototype(
+            prototype=prototype, stock_location_id=stock_location_id, user=user
+        )
 
     async def _line_from_item(
         self, order: ProductionOrder, item: QuotationItem, position: int
@@ -543,6 +696,14 @@ class ProductionOrderService:
             issues.append(ReadinessIssue(code=ProductionReadinessCode.INVALID_STOCK_LOCATION))
             return issues, []
 
+        # Fase 009K.4. Los dos origenes se evaluan distinto porque su material
+        # ES distinto: la cotizacion lo deriva de una receta congelada y la
+        # muestra lo trae de una lista escrita a mano. Lo que comparten —el
+        # almacen, la agregacion por producto, el bloqueo ordenado, el
+        # «alcanza para todos o no arranca ninguno»— vive en `_stock_issues`.
+        if order.prototype_id is not None:
+            return await self._evaluate_prototype(order, lock=lock)
+
         # ---- 1. Lo que cada linea puede o no puede pedir -------------------
         per_product: dict[int, list[tuple[ProductionOrderLine, Decimal]]] = {}
         for line in order.lines:
@@ -653,6 +814,127 @@ class ProductionOrderService:
                     quantity=total,
                     uom_code=prepared.base_uom_code,
                     line_ids=tuple(line.id for line, _ in entries),
+                )
+            )
+
+        return issues, requirements
+
+    async def _prototype_lines(self, prototype_id: int) -> list[PrototypeMaterialLine]:
+        """Las lineas de material de una muestra, en orden estable."""
+        return list(
+            (
+                await self._session.execute(
+                    select(PrototypeMaterialLine)
+                    .where(PrototypeMaterialLine.prototype_id == prototype_id)
+                    .order_by(PrototypeMaterialLine.sort_order, PrototypeMaterialLine.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def _evaluate_prototype(
+        self, order: ProductionOrder, *, lock: bool
+    ) -> tuple[list[ReadinessIssue], list[MaterialRequirement]]:
+        """Disponibilidad de una orden que fabrica una muestra.
+
+        El material NO se deriva de ninguna receta: sale de las lineas que
+        alguien eligio a mano en el prototipo, que es la autoridad. Aqui solo
+        se comprueba que existan, que el producto siga siendo utilizable y que
+        el almacen de LA ORDEN tenga saldo suficiente.
+
+        Se agrega por producto antes de comprobar, por el mismo motivo que en
+        la rama de cotizacion: dos lineas que piden 100 g y 200 g del mismo
+        barro, comprobadas por separado contra 250 g, pasarian las dos y al
+        descontar dejarian el saldo en negativo.
+        """
+        issues: list[ReadinessIssue] = []
+        prototype = await self._session.get(Prototype, order.prototype_id)
+        if prototype is None:
+            issues.append(ReadinessIssue(code=ProductionReadinessCode.PROTOTYPE_MISSING))
+            return issues, []
+
+        if prototype.prototype_quotation_id is not None:
+            cotizacion = await self._session.get(
+                PrototypeQuotation, prototype.prototype_quotation_id
+            )
+            if (
+                cotizacion is None
+                or cotizacion.payment_status is not PrototypeQuotationPaymentStatus.PAID
+            ):
+                issues.append(
+                    ReadinessIssue(code=ProductionReadinessCode.PROTOTYPE_QUOTATION_NOT_PAID)
+                )
+
+        lineas = await self._prototype_lines(prototype.id)
+        if not lineas:
+            # Sin materiales no hay nada que descontar, y una muestra que no
+            # gasta nada no es una muestra: es una ficha sin llenar.
+            issues.append(ReadinessIssue(code=ProductionReadinessCode.MISSING_MATERIAL_LINES))
+            return issues, []
+
+        por_producto: dict[int, Decimal] = {}
+        for linea in lineas:
+            por_producto[linea.product_id] = (
+                por_producto.get(linea.product_id, Decimal(0)) + linea.quantity_planned
+            )
+
+        requirements: list[MaterialRequirement] = []
+        for product_id in sorted(por_producto):
+            # Orden estable de bloqueo, como en la rama de cotizacion: dos
+            # arranques que tomen los mismos materiales en orden distinto se
+            # abrazan y la base los mata por deadlock.
+            producto = await self._session.get(Product, product_id)
+            total = por_producto[product_id]
+            if producto is None or producto.base_uom_code is None:
+                issues.append(
+                    ReadinessIssue(
+                        code=ProductionReadinessCode.PREPARED_PRODUCT_NOT_RESOLVABLE,
+                        prepared_product_id=product_id,
+                        required_quantity=total,
+                    )
+                )
+                continue
+
+            balance_stmt = select(StockBalance).where(
+                StockBalance.product_id == product_id,
+                StockBalance.location_id == order.stock_location_id,
+            )
+            if lock:
+                balance_stmt = balance_stmt.with_for_update()
+            balance = await self._session.scalar(balance_stmt)
+
+            if balance is None:
+                issues.append(
+                    ReadinessIssue(
+                        code=ProductionReadinessCode.PREPARED_STOCK_MISSING,
+                        prepared_product_id=product_id,
+                        prepared_product_name=producto.name,
+                        required_quantity=total,
+                        available_quantity=Decimal(0),
+                        uom=producto.base_uom_code,
+                    )
+                )
+                continue
+            if balance.quantity < total:
+                issues.append(
+                    ReadinessIssue(
+                        code=ProductionReadinessCode.INSUFFICIENT_STOCK,
+                        prepared_product_id=product_id,
+                        prepared_product_name=producto.name,
+                        required_quantity=total,
+                        available_quantity=balance.quantity,
+                        uom=producto.base_uom_code,
+                    )
+                )
+                continue
+
+            requirements.append(
+                MaterialRequirement(
+                    prepared_product_id=product_id,
+                    quantity=total,
+                    uom_code=producto.base_uom_code,
+                    line_ids=tuple(linea.id for linea in lineas if linea.product_id == product_id),
                 )
             )
 
@@ -785,8 +1067,16 @@ class ProductionOrderService:
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotStartableError()
 
-        await self._require_paid_quotation(order)
-        await self._require_approved_prototypes(order)
+        # Fase 009K.4. Los dos guardias son de la rama de COTIZACION.
+        #
+        # El de pago porque una orden de muestra nace ya cobrada —se crea
+        # dentro del propio cobro— y su comprobacion vive en la evaluacion. El
+        # de aprobacion porque exigirle a una muestra estar aprobada para
+        # poder fabricarla seria pedirle que se apruebe antes de existir: se
+        # aprueba DESPUES, mirandola.
+        if order.prototype_id is None:
+            await self._require_paid_quotation(order)
+            await self._require_approved_prototypes(order)
 
         issues, requirements = await self._evaluate(order, lock=True)
         if issues:
@@ -796,19 +1086,65 @@ class ProductionOrderService:
 
         location = await self._session.get(StockLocation, order.stock_location_id)
         assert location is not None
+        prototype = (
+            await self._session.get(Prototype, order.prototype_id)
+            if order.prototype_id is not None
+            else None
+        )
         for requirement in requirements:
             prepared = await self._session.get(Product, requirement.prepared_product_id)
             assert prepared is not None
-            await self._inventory.apply_movement(
-                product=prepared,
-                location=location,
-                quantity=-requirement.quantity,
-                movement_type=MovementType.PRODUCTION_OUT,
-                reason=f"Orden de produccion {order.code}",
-                user_id=user.id,
-                user_name=user.display_name,
-                production_order_id=order.id,
-            )
+            if prototype is not None:
+                # Fase 009K.4. Una muestra sigue saliendo del almacen como
+                # `PROTOTYPE_OUT`. Cambiarlo a `PRODUCTION_OUT` porque ahora se
+                # arranca desde una orden habria reescrito el significado de
+                # todo el historico de inventario: los movimientos anteriores
+                # dirian una cosa y los nuevos otra, para el mismo hecho.
+                await self._inventory.apply_movement(
+                    product=prepared,
+                    location=location,
+                    quantity=-requirement.quantity,
+                    movement_type=MovementType.PROTOTYPE_OUT,
+                    reason=f"Prototipo {prototype.code} · orden {order.code}",
+                    user_id=user.id,
+                    user_name=user.display_name,
+                    prototype_id=prototype.id,
+                )
+            else:
+                await self._inventory.apply_movement(
+                    product=prepared,
+                    location=location,
+                    quantity=-requirement.quantity,
+                    movement_type=MovementType.PRODUCTION_OUT,
+                    reason=f"Orden de produccion {order.code}",
+                    user_id=user.id,
+                    user_name=user.display_name,
+                    production_order_id=order.id,
+                )
+
+        if prototype is not None:
+            # Lo REAL se escribe aqui, en la misma transaccion que lo
+            # descuenta, igual que hacia el arranque propio de la muestra. Si
+            # algo falla despues, la transaccion se deshace entera y la columna
+            # se queda nula: no puede haber consumo registrado sin movimiento
+            # que lo respalde.
+            for linea in await self._prototype_lines(prototype.id):
+                linea.quantity_actual = linea.quantity_planned
+            # El estado fisico de la muestra acompana al de su orden. No son
+            # dos verdades: es la misma, y la orden es quien la manda.
+            #
+            # Y de paso la muestra anota de que almacen salio su material. El
+            # CHECK `started_requires_origin` (0024) lo exige desde antes de
+            # esta fase, y con razon: una muestra arrancada que no sabe de
+            # donde salio el barro no puede explicar su propio consumo. Ahora
+            # ese dato lo decide quien cobra y vive en la orden; copiarlo aqui
+            # no es duplicar autoridad, es dejar el hecho escrito donde ya
+            # vive `quantity_actual`.
+            if prototype.stock_location_id is None:
+                prototype.stock_location_id = order.stock_location_id
+            if prototype.status is PrototypeStatus.CREATED:
+                prototype.status = PrototypeStatus.STARTED
+                prototype.started_at = datetime.now(UTC)
 
         moment = datetime.now(UTC)
         order.status = ProductionOrderStatus.STARTED
@@ -867,6 +1203,9 @@ class ProductionOrderService:
         order.status = ProductionOrderStatus.COMPLETED
         order.completed_at = moment
         order.updated_at = moment
+        await self._mirror_prototype_status(
+            order, PrototypeStatus.STARTED, PrototypeStatus.COMPLETED, moment, user=user
+        )
         await self._session.flush()
         self._audit.record_changes(
             entity_type=PRODUCTION_ENTITY,
@@ -901,6 +1240,9 @@ class ProductionOrderService:
         order.status = ProductionOrderStatus.CANCELLED
         order.cancelled_at = moment
         order.updated_at = moment
+        await self._mirror_prototype_status(
+            order, PrototypeStatus.CREATED, PrototypeStatus.CANCELLED, moment, user=user
+        )
         await self._session.flush()
         self._audit.record_changes(
             entity_type=PRODUCTION_ENTITY,
@@ -914,7 +1256,147 @@ class ProductionOrderService:
         )
         return order, True
 
+    async def _mirror_prototype_status(
+        self,
+        order: ProductionOrder,
+        desde: PrototypeStatus,
+        hasta: PrototypeStatus,
+        momento: datetime,
+        *,
+        user: AuthenticatedUser,
+    ) -> None:
+        """Lleva a la muestra el estado fisico que acaba de tomar su orden.
+
+        Fase 009K.4. La orden es quien manda sobre lo fisico, pero la muestra
+        no puede quedarse contando otra cosa. Y no es cosmetico: aprobar o
+        rechazar una muestra exige que este COMPLETED, asi que una orden
+        terminada con la muestra todavia en STARTED la dejaria imposible de
+        evaluar; y una orden anulada con la muestra viva la dejaria sin forma
+        de fabricarse nunca, porque el UNIQUE de `prototype_id` impide crearle
+        una segunda orden.
+
+        Solo mueve lo FISICO. La aprobacion es otro eje y no se toca aqui:
+        terminar de fabricar algo no es haberlo dado por bueno.
+        """
+        if order.prototype_id is None:
+            return
+        prototype = await self._session.get(Prototype, order.prototype_id)
+        if prototype is None or prototype.status is not desde:
+            # Una muestra que ya esta donde toca —o que llego por su propio
+            # camino heredado— no se reescribe.
+            return
+
+        prototype.status = hasta
+        if hasta is PrototypeStatus.COMPLETED:
+            prototype.completed_at = momento
+        elif hasta is PrototypeStatus.CANCELLED:
+            prototype.cancelled_at = momento
+        prototype.updated_at = momento
+        self._audit.record_changes(
+            entity_type=PROTOTYPE_ENTITY,
+            entity_id=str(prototype.id),
+            changes={"status": (desde.value, hasta.value)},
+            user_id=user.id,
+            user_display_name=user.display_name,
+        )
+
     # -- presentacion -------------------------------------------------------
+    @staticmethod
+    def _origin_fields(
+        order: ProductionOrder,
+        *,
+        quotation: Quotation | None,
+        prototype: Prototype | None,
+        prototype_quotation: PrototypeQuotation | None,
+    ) -> dict[str, object]:
+        """Los campos de origen de una orden. UN solo sitio que los arma.
+
+        Detalle y listado salen de aqui a proposito: dos lugares decidiendo de
+        donde viene una orden son dos respuestas que algun dia se separan, y la
+        que se vea primero sera la que mande.
+
+        Lo que si difiere entre los dos es COMO se traen los datos —uno a uno
+        para una ficha, en bloque para una pagina—, y por eso la busqueda esta
+        fuera de esta funcion y no dentro.
+        """
+        if order.prototype_id is not None:
+            return {
+                "origin_type": ProductionOrderOrigin.PROTOTYPE,
+                "quotation_id": None,
+                "quotation_code": None,
+                "prototype_id": order.prototype_id,
+                "prototype_code": prototype.code if prototype else None,
+                "prototype_quotation_id": (prototype_quotation.id if prototype_quotation else None),
+                "prototype_quotation_code": (
+                    prototype_quotation.code if prototype_quotation else None
+                ),
+            }
+        return {
+            "origin_type": ProductionOrderOrigin.QUOTATION,
+            "quotation_id": order.quotation_id,
+            "quotation_code": quotation.code if quotation else None,
+            "prototype_id": None,
+            "prototype_code": None,
+            "prototype_quotation_id": None,
+            "prototype_quotation_code": None,
+        }
+
+    async def _origin(self, order: ProductionOrder) -> dict[str, object]:
+        """El origen de UNA orden, para la ficha."""
+        muestra = (
+            await self._session.get(Prototype, order.prototype_id)
+            if order.prototype_id is not None
+            else None
+        )
+        cpr = (
+            await self._session.get(PrototypeQuotation, muestra.prototype_quotation_id)
+            if muestra is not None and muestra.prototype_quotation_id is not None
+            else None
+        )
+        ctz = (
+            await self._session.get(Quotation, order.quotation_id)
+            if order.prototype_id is None and order.quotation_id is not None
+            else None
+        )
+        return self._origin_fields(order, quotation=ctz, prototype=muestra, prototype_quotation=cpr)
+
+    async def _origins_for(self, orders: Sequence[ProductionOrder]) -> dict[int, dict[str, object]]:
+        """El origen de TODA una pagina, en tres consultas y no en N.
+
+        El listado es lo que se abre por costumbre; resolverlo orden por orden
+        multiplicaba las idas a la base por el tamano de la pagina.
+        """
+        quotations = await self._quotations_for(orders)
+        prototypes = await self._prototypes_for(orders)
+        cpr_ids = {
+            muestra.prototype_quotation_id
+            for muestra in prototypes.values()
+            if muestra.prototype_quotation_id is not None
+        }
+        cprs: dict[int, PrototypeQuotation] = {}
+        if cpr_ids:
+            filas = await self._session.execute(
+                select(PrototypeQuotation).where(PrototypeQuotation.id.in_(cpr_ids))
+            )
+            cprs = {fila.id: fila for fila in filas.scalars().all()}
+
+        resultado: dict[int, dict[str, object]] = {}
+        for order in orders:
+            muestra = prototypes.get(order.prototype_id) if order.prototype_id is not None else None
+            resultado[order.id] = self._origin_fields(
+                order,
+                quotation=(
+                    quotations.get(order.quotation_id) if order.quotation_id is not None else None
+                ),
+                prototype=muestra,
+                prototype_quotation=(
+                    cprs.get(muestra.prototype_quotation_id)
+                    if muestra is not None and muestra.prototype_quotation_id is not None
+                    else None
+                ),
+            )
+        return resultado
+
     async def present(self, order: ProductionOrder) -> ProductionOrderOut:
         """Arma la respuesta completa, con disponibilidad recalculada.
 
@@ -923,7 +1405,11 @@ class ProductionOrderService:
         una segunda implementacion de la regla es una segunda regla, y el dia
         que discrepen ganara la que no consume material.
         """
-        quotation = await self._session.get(Quotation, order.quotation_id)
+        quotation = (
+            await self._session.get(Quotation, order.quotation_id)
+            if order.quotation_id is not None
+            else None
+        )
         location = await self._session.get(StockLocation, order.stock_location_id)
         prepared = await self._prepared_products(order)
         readiness = await self.evaluate_readiness(order)
@@ -932,8 +1418,7 @@ class ProductionOrderService:
             id=order.id,
             code=order.code,
             status=order.status,
-            quotation_id=order.quotation_id,
-            quotation_code=quotation.code if quotation else "",
+            **await self._origin(order),  # type: ignore[arg-type]
             quotation_customer_name=quotation.customer_name_snapshot if quotation else None,
             quotation_payment_status=quotation.payment_status if quotation else None,
             stock_location_id=order.stock_location_id,
@@ -990,20 +1475,18 @@ class ProductionOrderService:
         listado dice estado, origen y fechas, que es lo que se mira de un
         vistazo.
         """
-        quotations = await self._quotations_for(orders)
         locations = await self._location_names(orders)
+        # Fase 009K.4: el origen se arma con el mismo ayudante que usa la
+        # ficha. Que la lista dijera una cosa y el detalle otra sobre la misma
+        # orden seria peor que no decirlo.
+        origins = await self._origins_for(orders)
         return ProductionOrderPage(
             items=[
                 ProductionOrderSummaryOut(
                     id=order.id,
                     code=order.code,
                     status=order.status,
-                    quotation_id=order.quotation_id,
-                    quotation_code=(
-                        quotations[order.quotation_id].code
-                        if order.quotation_id in quotations
-                        else ""
-                    ),
+                    **origins[order.id],  # type: ignore[arg-type]
                     stock_location_id=order.stock_location_id,
                     stock_location_name=locations.get(order.stock_location_id, ""),
                     line_count=len(order.lines),
@@ -1020,10 +1503,17 @@ class ProductionOrderService:
         )
 
     async def _quotations_for(self, orders: Iterable[ProductionOrder]) -> dict[int, Quotation]:
-        ids = {order.quotation_id for order in orders}
+        ids = {order.quotation_id for order in orders if order.quotation_id is not None}
         if not ids:
             return {}
         rows = await self._session.execute(select(Quotation).where(Quotation.id.in_(ids)))
+        return {row.id: row for row in rows.scalars().all()}
+
+    async def _prototypes_for(self, orders: Iterable[ProductionOrder]) -> dict[int, Prototype]:
+        ids = {order.prototype_id for order in orders if order.prototype_id is not None}
+        if not ids:
+            return {}
+        rows = await self._session.execute(select(Prototype).where(Prototype.id.in_(ids)))
         return {row.id: row for row in rows.scalars().all()}
 
     async def _location_names(self, orders: Iterable[ProductionOrder]) -> dict[int, str]:
@@ -1051,6 +1541,7 @@ __all__ = [
     "ProductionOrderNotFoundError",
     "ProductionOrderNotReadyError",
     "ProductionOrderNotStartableError",
+    "ProductionOrderPrototypeNotProducibleError",
     "ProductionOrderQuotationNotConfirmedError",
     "ProductionOrderService",
     "ProductionReadiness",

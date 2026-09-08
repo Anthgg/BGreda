@@ -17,6 +17,7 @@ import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -37,6 +38,36 @@ from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_quotation_builder_api import head
 
 COTIZADOR = "/api/v1/prototype-quotations"
+
+
+async def cobrar(
+    api: httpx.AsyncClient,
+    csrf: str,
+    quotation_id: int,
+    *,
+    stock_location_id: int | None = None,
+) -> httpx.Response:
+    """Cobra una cotizacion de prototipo diciendo de que almacen sale.
+
+    Fase 009K.4: el almacen es obligatorio y explicito. Se crea uno propio
+    cuando la prueba no trae el suyo, porque el punto de estas pruebas es el
+    cobro, no de donde sale el barro; las que SI comprueban el almacen lo pasan
+    a mano.
+    """
+    if stock_location_id is None:
+        creada = await api.post(
+            "/api/v1/inventory/locations",
+            json={"name": f"Almacen cobro {quotation_id}-{uuid4().hex[:8]}"},
+            headers=head(csrf),
+        )
+        assert creada.status_code == 201, creada.text
+        stock_location_id = int(creada.json()["id"])
+    return await api.post(
+        f"{COTIZADOR}/{quotation_id}/mark-paid",
+        json={"stock_location_id": stock_location_id},
+        headers=head(csrf),
+    )
+
 
 #: Se miran al importar, no dentro de una prueba asincrona: tocar el disco
 #: desde una corrutina bloquearia el bucle de eventos.
@@ -548,12 +579,12 @@ async def test_cobrar_no_mueve_inventario_y_deja_una_sola_muestra(
     db_session.expire_all()
     movimientos_antes = await db_session.scalar(select(func.count()).select_from(StockMovement))
 
-    primera = await api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", headers=head(admin_csrf))
+    primera = await cobrar(api, admin_csrf, documento["id"])
     assert primera.status_code == 200, primera.text
     assert primera.json()["payment_status"] == "PAID"
     assert primera.json()["prototype_id"] is not None
 
-    segunda = await api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", headers=head(admin_csrf))
+    segunda = await cobrar(api, admin_csrf, documento["id"])
     assert segunda.status_code == 200, segunda.text
     assert segunda.json()["prototype_id"] == primera.json()["prototype_id"]
 
@@ -575,7 +606,7 @@ async def test_la_muestra_hereda_lo_tecnico_y_nada_del_dinero(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
     documento = await _confirmada(api, admin_csrf, db_session, "_tecnico")
-    pagada = await api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", headers=head(admin_csrf))
+    pagada = await cobrar(api, admin_csrf, documento["id"])
     db_session.expire_all()
     muestra = await db_session.get(Prototype, pagada.json()["prototype_id"])
     assert muestra is not None
@@ -593,7 +624,7 @@ async def test_una_pagada_no_se_anula(
 ) -> None:
     """Deshacer un cobro exige devolucion o nota de credito, y no existen."""
     documento = await _confirmada(api, admin_csrf, db_session, "_anula")
-    await api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", headers=head(admin_csrf))
+    await cobrar(api, admin_csrf, documento["id"])
     respuesta = await api.post(f"{COTIZADOR}/{documento['id']}/cancel", headers=head(admin_csrf))
     assert respuesta.status_code == 409, respuesta.text
 
@@ -720,7 +751,7 @@ async def test_sin_cobrar_la_muestra_no_arranca_y_al_cobrar_si(
     la readiness deja de quejarse por el pago una vez cobrada.
     """
     documento = await _confirmada(api, admin_csrf, db_session, "_ready")
-    pagada = await api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", headers=head(admin_csrf))
+    pagada = await cobrar(api, admin_csrf, documento["id"])
     muestra_id = pagada.json()["prototype_id"]
 
     detalle = await api.get(f"/api/v1/prototypes/{muestra_id}", headers=head(admin_csrf))
@@ -737,7 +768,7 @@ async def test_una_muestra_vinculada_a_una_cpr_impagada_no_arranca(
 ) -> None:
     """La via CPR manda: sin cobrar, bloquea."""
     documento = await _confirmada(api, admin_csrf, db_session, "_impaga")
-    pagada = await api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", headers=head(admin_csrf))
+    pagada = await cobrar(api, admin_csrf, documento["id"])
     muestra_id = pagada.json()["prototype_id"]
 
     # Se deshace el cobro por la base para poder observar la via bloqueada:
@@ -1092,9 +1123,7 @@ async def test_cobrar_un_concepto_nuevo_crea_el_producto_con_el_codigo_de_la_cas
     documento = await _confirmada(api, admin_csrf, db_session, "_prod_paid")
     antes = await _contar_productos(db_session)
 
-    cobrada = await api.post(
-        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
-    )
+    cobrada = await cobrar(api, admin_csrf, documento["id"])
     assert cobrada.status_code == 200, cobrada.text
     cuerpo = cobrada.json()
 
@@ -1133,16 +1162,12 @@ async def test_cobrar_dos_veces_no_crea_un_segundo_producto(
 ) -> None:
     """PRODUCT_CREATION_ON_PAYMENT_IDEMPOTENT: PASS."""
     documento = await _confirmada(api, admin_csrf, db_session, "_prod_retry")
-    primera = await api.post(
-        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
-    )
+    primera = await cobrar(api, admin_csrf, documento["id"])
     assert primera.status_code == 200, primera.text
     db_session.expire_all()
     antes = await _contar_productos(db_session)
 
-    segunda = await api.post(
-        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
-    )
+    segunda = await cobrar(api, admin_csrf, documento["id"])
     assert segunda.status_code == 200, segunda.text
 
     db_session.expire_all()
@@ -1190,9 +1215,7 @@ async def test_cobrar_un_prototipo_de_un_producto_existente_no_duplica_el_maestr
 
     db_session.expire_all()
     antes = await _contar_productos(db_session)
-    cobrada = await api.post(
-        f"{COTIZADOR}/{creada.json()['id']}/mark-paid", json={}, headers=head(admin_csrf)
-    )
+    cobrada = await cobrar(api, admin_csrf, creada.json()["id"])
     assert cobrada.status_code == 200, cobrada.text
 
     db_session.expire_all()
@@ -1218,10 +1241,23 @@ async def test_veinte_cobros_simultaneos_dan_un_producto_y_una_muestra(
     documento = await _confirmada(api, admin_csrf, db_session, "_prod_conc")
     db_session.expire_all()
     antes = await _contar_productos(db_session)
+    # El MISMO almacen en los veinte: la concurrencia que se prueba es la del
+    # cobro, no la de dos personas eligiendo sitios distintos.
+    almacen = await api.post(
+        "/api/v1/inventory/locations",
+        json={"name": "Almacen cobro concurrente"},
+        headers=head(admin_csrf),
+    )
+    assert almacen.status_code == 201, almacen.text
+    location_id = int(almacen.json()["id"])
 
     respuestas = await asyncio.gather(
         *(
-            api.post(f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf))
+            api.post(
+                f"{COTIZADOR}/{documento['id']}/mark-paid",
+                json={"stock_location_id": location_id},
+                headers=head(admin_csrf),
+            )
             for _ in range(20)
         ),
         return_exceptions=True,
@@ -1257,9 +1293,7 @@ async def test_materializar_el_producto_no_mueve_inventario(
     documento = await _confirmada(api, admin_csrf, db_session, "_prod_stock")
     antes = await db_session.scalar(select(func.count()).select_from(StockMovement))
 
-    cobrada = await api.post(
-        f"{COTIZADOR}/{documento['id']}/mark-paid", json={}, headers=head(admin_csrf)
-    )
+    cobrada = await cobrar(api, admin_csrf, documento["id"])
     assert cobrada.status_code == 200, cobrada.text
     assert cobrada.json()["product_id"] is not None
 

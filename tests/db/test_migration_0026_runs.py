@@ -302,11 +302,16 @@ async def test_la_vuelta_a_0025_retira_las_columnas_y_deja_los_datos(
 
 
 @pytest.mark.asyncio
-async def test_subir_hasta_la_cabeza_pasa_por_0026_y_deja_una_sola(
-    migration_engine: AsyncEngine,
-) -> None:
+async def test_subir_hasta_la_cabeza_pasa_por_0026(migration_engine: AsyncEngine) -> None:
+    """Subir del todo deja las columnas de 009K.3 puestas.
+
+    Ya NO se afirma aqui que la cabeza sea la 0026: dejo de serlo con la 0027,
+    y una prueba que fije el numero de la cabeza obliga a editarla en cada
+    fase, que es como se acaba editando sin mirar. Que haya UNA sola cabeza se
+    comprueba en la prueba de la migracion mas reciente.
+    """
     _upgrade("head")
-    assert await _current(migration_engine) == "0026"
-    heads = _alembic("heads")
-    assert heads.returncode == 0, heads.stderr
-    assert heads.stdout.count("(head)") == 1, heads.stdout
+    assert await _current(migration_engine) != "0025"
+    for tabla, columnas in COLUMNAS_NUEVAS.items():
+        for columna in columnas:
+            assert await _columna(migration_engine, tabla, columna) == "YES", (tabla, columna)

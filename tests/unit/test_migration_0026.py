@@ -109,17 +109,6 @@ def test_el_modo_de_horno_no_admite_un_tercer_valor() -> None:
     assert "'TOGETHER', 'PER_PRODUCT'" in _contenido()
 
 
-def test_alembic_una_sola_cabeza_y_es_0026() -> None:
-    """Una sola cabeza, y es la nueva.
-
-    Esta afirmacion acompana siempre a la ultima revision: fijarla en una
-    concreta obliga a reescribir la prueba anterior cada vez, y entonces deja
-    de comprobar nada.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0026"], script.get_heads()
-
-
 def test_la_cadena_no_se_rompe() -> None:
     """0026 cuelga de 0025, y 0025 sigue existiendo."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))

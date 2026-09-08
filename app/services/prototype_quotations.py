@@ -39,7 +39,9 @@ from app.core.prototype_pricing import (
     price_prototype,
 )
 from app.models.audit import AuditAction
+from app.models.inventory import StockLocation
 from app.models.masters import Partner, Product, ProductType
+from app.models.production import ProductionOrder
 from app.models.prototype_quotations import (
     PrototypeQuotation,
     PrototypeQuotationMaterial,
@@ -50,6 +52,7 @@ from app.models.prototypes import (
     Prototype,
     PrototypeApproval,
     PrototypeMaterialLine,
+    PrototypeMaterialRole,
     PrototypeStatus,
 )
 from app.models.sequence import SequenceType
@@ -63,6 +66,7 @@ from app.schemas.prototype_quotations import (
 )
 from app.services.audit import AuditRecorder
 from app.services.masters import MasterDataService
+from app.services.production import ProductionOrderService
 from app.services.sequences import SequenceService
 
 ZERO = Decimal(0)
@@ -101,6 +105,38 @@ class PrototypeQuotationNotConfirmableError(APIError):
     status_code = 409
     code = "PROTOTYPE_QUOTATION_NOT_CONFIRMABLE"
     message = "Solo se puede emitir una cotizacion de prototipo en borrador"
+
+
+class PrototypeQuotationStockLocationInvalidError(APIError):
+    """Fase 009K.4. Cobrar exige decir de que almacen saldra el material.
+
+    No hay ubicacion por defecto ni aunque hoy solo exista una: el dia que
+    haya dos, un default silencioso descontaria del almacen equivocado sin
+    avisar. Por eso ausente, inexistente e inactivo dan todos el mismo no.
+    """
+
+    status_code = 422
+    code = "PROTOTYPE_QUOTATION_STOCK_LOCATION_INVALID"
+    message = "Indica un almacen activo del que saldra el material de la muestra"
+
+
+class PrototypeQuotationMultipleRootsError(APIError):
+    """Dos muestras raiz para la misma cotizacion. Fase 009K.4.
+
+    No es un caso de negocio: es corrupcion. Una cotizacion materializa UNA
+    muestra —y `mark_paid` lo hace con la fila del documento bloqueada—, de
+    modo que la cadena tiene una sola raiz y las demas cuelgan de ella por
+    `supersedes_prototype_id`.
+
+    Se para en vez de elegir. Devolver cualquiera de las dos daria una
+    respuesta plausible sobre un dato roto, y el cobro contestaria con una
+    orden de produccion que no es la suya. El detalle lleva los identificadores
+    para que alguien pueda mirar cual sobra.
+    """
+
+    status_code = 409
+    code = "PROTOTYPE_QUOTATION_MULTIPLE_ROOT_PROTOTYPES"
+    message = "La cotizacion tiene mas de una muestra raiz y no se puede resolver sola"
 
 
 class PrototypeQuotationNotPayableError(APIError):
@@ -165,10 +201,16 @@ class PrototypeQuotationService:
         session: AsyncSession,
         audit: AuditRecorder,
         sequences: SequenceService,
+        ordenes: ProductionOrderService | None = None,
     ) -> None:
         self._session = session
         self._audit = audit
         self._sequences = sequences
+        # Fase 009K.4. Cobrar materializa tambien la orden de produccion, y se
+        # hace con EL servicio de ordenes, no con una copia: el correlativo, la
+        # unicidad por muestra y la auditoria son suyos, y un segundo camino
+        # que insertara ordenes acabaria divergiendo del primero.
+        self._ordenes = ordenes or ProductionOrderService(session, audit, sequences)
 
     # -- Lectura -----------------------------------------------------------
     def _base_query(self) -> Select[tuple[PrototypeQuotation]]:
@@ -385,11 +427,15 @@ class PrototypeQuotationService:
 
         # Una fila de previsualizacion no existe en la base todavia: buscarle
         # muestra asociada seria una consulta por un id que no es de nadie.
-        muestra = (
+        muestra = await self._muestra_original(fila.id) if fila.id else None
+        # Fase 009K.4. La orden que fabrica esa muestra, si existe. Se lee
+        # aqui —no se deduce ni se busca por codigo— porque su identificador
+        # es lo unico que lleva a la orden correcta.
+        orden = (
             await self._session.scalar(
-                select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
+                select(ProductionOrder).where(ProductionOrder.prototype_id == muestra.id).limit(1)
             )
-            if fila.id
+            if muestra is not None
             else None
         )
         por_producto = {linea.product_id: linea for linea in fila.lines}
@@ -498,6 +544,8 @@ class PrototypeQuotationService:
             ),
             prototype_id=muestra.id if muestra else None,
             prototype_code=muestra.code if muestra else None,
+            production_order_id=orden.id if orden else None,
+            production_order_code=orden.code if orden else None,
             updated_at=fila.updated_at,
         )
 
@@ -727,26 +775,49 @@ class PrototypeQuotationService:
         return fila
 
     async def mark_paid(
-        self, quotation_id: int, *, user: AuthenticatedUser
-    ) -> tuple[PrototypeQuotation, Prototype]:
-        """Registra el cobro y habilita la muestra para el taller.
+        self,
+        quotation_id: int,
+        *,
+        stock_location_id: int,
+        user: AuthenticatedUser,
+    ) -> tuple[PrototypeQuotation, Prototype, ProductionOrder]:
+        """Registra el cobro y deja la muestra lista para el taller.
 
-        Cobrar NO gasta material. Lo unico que hace es abrir la puerta: la
-        muestra fisica queda creada y arrancable, y el consumo ocurre al
-        arrancarla, que es cuando el barro sale de verdad del almacen.
+        Cobrar NO gasta material. Lo unico que hace es abrir la puerta: quedan
+        creados el producto, la muestra fisica y su ORDEN DE PRODUCCION, y el
+        consumo ocurre al arrancarla, que es cuando el barro sale de verdad
+        del almacen.
 
-        Es idempotente porque un reintento del navegador no puede duplicar ni
-        el cobro ni la muestra.
+        Fase 009K.4: el almacen llega de fuera y es OBLIGATORIO. No se deduce,
+        no se hereda y no se toma «el unico que hay»: el proyecto decidio hace
+        tiempo que no existe ubicacion por defecto ni aunque hoy solo exista
+        una, porque el dia que haya dos un default silencioso descontaria del
+        almacen equivocado sin avisar. Quien cobra decide de donde va a salir
+        el material, igual que quien crea una orden de cotizacion.
+
+        Es idempotente: un reintento del navegador no puede duplicar el cobro,
+        ni la muestra, ni el producto, ni la orden. Y un segundo cobro con OTRO
+        almacen no mueve el de la orden que ya existe —eso cambiaria en
+        silencio de donde sale el material de algo ya decidido—: devuelve la
+        orden tal como esta.
         """
         fila = await self.get(quotation_id, for_update=True)
         if fila.status is not PrototypeQuotationStatus.CONFIRMED:
             raise PrototypeQuotationNotPayableError()
 
-        muestra = await self._session.scalar(
-            select(Prototype).where(Prototype.prototype_quotation_id == fila.id).limit(1)
-        )
+        # El almacen se valida ANTES de tocar nada. Un cobro que va a
+        # rechazarse no tiene por que dejar a medias un producto ni una
+        # muestra.
+        location = await self._session.get(StockLocation, stock_location_id)
+        if location is None or not location.active:
+            raise PrototypeQuotationStockLocationInvalidError()
+
+        muestra = await self._muestra_original(fila.id)
         if fila.payment_status is PrototypeQuotationPaymentStatus.PAID and muestra is not None:
-            return fila, muestra
+            orden, _ = await self._ordenes.create_for_prototype(
+                prototype=muestra, stock_location_id=stock_location_id, user=user
+            )
+            return fila, muestra, orden
 
         if fila.payment_status is not PrototypeQuotationPaymentStatus.PAID:
             fila.payment_status = PrototypeQuotationPaymentStatus.PAID
@@ -762,6 +833,14 @@ class PrototypeQuotationService:
         if muestra is None:
             muestra = await self._crear_muestra(fila, user=user)
 
+        # La orden nace DESPUES del producto y la muestra, porque necesita a
+        # los dos, y dentro de la misma transaccion: si crearla fallara, el
+        # cobro entero se deshace y no queda una muestra pagada sin forma de
+        # fabricarla.
+        orden, _ = await self._ordenes.create_for_prototype(
+            prototype=muestra, stock_location_id=stock_location_id, user=user
+        )
+
         fila.updated_at = datetime.now(UTC)
         await self._session.flush()
         self._audit.record_action(
@@ -770,9 +849,14 @@ class PrototypeQuotationService:
             action=AuditAction.UPDATE,
             user_id=user.id,
             user_display_name=user.display_name,
-            metadata={"event": "PAID", "prototype_id": muestra.id},
+            metadata={
+                "event": "PAID",
+                "prototype_id": muestra.id,
+                "production_order_id": orden.id,
+                "stock_location_id": stock_location_id,
+            },
         )
-        return fila, muestra
+        return fila, muestra, orden
 
     async def _materializar_producto(
         self, fila: PrototypeQuotation, *, user: AuthenticatedUser
@@ -826,6 +910,52 @@ class PrototypeQuotationService:
         )
         return producto
 
+    async def _muestra_original(self, quotation_id: int) -> Prototype | None:
+        """La muestra que ESTE cobro materializo: la RAIZ de su cadena.
+
+        Desde el addendum de 009K.4 una cotizacion de prototipo puede tener
+        varias muestras colgando, porque la sucesora hereda el
+        `prototype_quotation_id` del padre para no perder de que encargo viene.
+        De esta lectura depende la idempotencia del cobro, asi que elegir mal
+        devolveria un `production_order_id` que no es el suyo.
+
+        **La raiz se identifica por la CADENA, no por el identificador.** El
+        modelo ya dice quien es: `supersedes_prototype_id IS NULL` significa
+        «no sustituye a ninguna», y eso es exactamente lo que materializa el
+        cobro —`_crear_muestra` no lo rellena nunca, y `create_successor`
+        siempre lo rellena—. Ordenar por id daba hoy la misma respuesta, pero
+        por coincidencia: es un correlativo de inserción, no una declaracion de
+        parentesco, y bastaria una carga de datos o una muestra creada fuera de
+        orden para que dejara de coincidir.
+
+        El `ORDER BY id` se queda como DESEMPATE defensivo, no como definicion.
+
+        Si aparecieran dos raices para la misma cotizacion, no se elige una: se
+        para. Ese estado no lo puede producir este servicio —`mark_paid` toma
+        la fila del documento con cerrojo antes de mirar si ya hay muestra—,
+        asi que si existe es corrupcion historica, y contestar con cualquiera
+        de las dos convertiria un dato roto en una respuesta plausible.
+        """
+        filas = list(
+            (
+                await self._session.execute(
+                    select(Prototype)
+                    .where(
+                        Prototype.prototype_quotation_id == quotation_id,
+                        Prototype.supersedes_prototype_id.is_(None),
+                    )
+                    .order_by(Prototype.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(filas) > 1:
+            raise PrototypeQuotationMultipleRootsError(
+                details=[{"prototype_id": fila.id, "code": fila.code} for fila in filas]
+            )
+        return filas[0] if filas else None
+
     async def _crear_muestra(
         self, fila: PrototypeQuotation, *, user: AuthenticatedUser
     ) -> Prototype:
@@ -865,6 +995,19 @@ class PrototypeQuotationService:
                     product_internal_reference_snapshot=(
                         producto.internal_reference if producto else ""
                     ),
+                    # Lo que la cotizacion DECLARO como cuerpo llega como rol.
+                    # Es el mismo dato dicho dos veces en dos vocabularios, y
+                    # perderlo por el camino dejaba a la muestra sin saber cual
+                    # de sus materiales es el barro de la pieza —que es el
+                    # unico que puede viajar despues al Cotizador como material
+                    # base—.
+                    #
+                    # Solo se traduce el SI. Un `false` significa «no es el
+                    # cuerpo», no «es otra cosa»: la cotizacion no declara
+                    # esmaltes ni etapas, y ponerle GLAZE u OTHER seria
+                    # inventarle al taller una clasificacion que nadie hizo.
+                    # Por lo mismo `stage` se queda en nulo: no hay fuente.
+                    material_role=(PrototypeMaterialRole.BODY if linea.is_body_material else None),
                 )
             )
         self._session.add(muestra)

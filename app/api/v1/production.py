@@ -57,18 +57,32 @@ async def create_production_order(
     session: DbSessionDep,
     response: Response,
 ) -> ProductionOrderOut:
-    """Crea la orden de una cotizacion confirmada. **No consume material.**
+    """Crea la orden de una cotizacion confirmada, o la de una muestra.
 
-    Pedirla dos veces para la misma cotizacion no crea una segunda: devuelve la
-    que ya hay, con 200 en vez de 201, para que el cliente sepa que no acaba de
+    **No consume material** en ninguno de los dos casos.
+
+    Pedirla dos veces para el mismo origen no crea una segunda: devuelve la que
+    ya hay, con 200 en vez de 201, para que el cliente sepa que no acaba de
     crear nada.
+
+    El origen de muestra esta aqui por las ITERACIONES. Lo normal es que la
+    orden de una muestra nazca sola al cobrar su cotizacion de prototipo; una
+    sucesora, en cambio, no tiene cotizacion propia que cobrar.
     """
-    order, created = await service.create(
-        quotation_id=payload.quotation_id,
-        stock_location_id=payload.stock_location_id,
-        idempotency_key=payload.idempotency_key,
-        user=actor,
-    )
+    if payload.prototype_id is not None:
+        order, created = await service.create_for_prototype_id(
+            payload.prototype_id,
+            stock_location_id=payload.stock_location_id,
+            user=actor,
+        )
+    else:
+        assert payload.quotation_id is not None  # lo garantiza el esquema
+        order, created = await service.create(
+            quotation_id=payload.quotation_id,
+            stock_location_id=payload.stock_location_id,
+            idempotency_key=payload.idempotency_key,
+            user=actor,
+        )
     result = await service.present(order)
     await session.commit()
     if not created:
