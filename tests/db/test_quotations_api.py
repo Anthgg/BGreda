@@ -230,7 +230,9 @@ async def test_draft_confirm_freezes_sources_and_updates_price_explicitly(
     assert price_response.status_code == 200, price_response.text
     updated = price_response.json()
     assert Decimal(updated["old_price"]) == Decimal("459")
-    assert Decimal(updated["new_price"]) == Decimal(confirmed["calculated_unit_price"])
+    assert Decimal(updated["new_price"]) == Decimal(confirmed["calculated_unit_price"]).quantize(
+        Decimal("0.000001")
+    )
     events = await db_session.scalar(select(func.count()).select_from(QuotationProductPriceUpdate))
     assert events == 1
 

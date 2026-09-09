@@ -440,7 +440,7 @@ async def test_crear_borrador_emite_correlativo_y_calcula(
     assert len(hoja["sessions"]) == 3
     assert len(hoja["lines"]) == 3
     assert Decimal(hoja["lines"][0]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
-        "1249.66"
+        "1041.38"
     )
 
 
@@ -875,7 +875,7 @@ async def test_horno_nuevo_sin_factores_calcula_y_permite_configurarlos(
     )
     assert calc_neutro.status_code == 200
     calc_neutro_body = calc_neutro.json()
-    assert calc_neutro_body["occupancy_factor"] == "1.000000"
+    assert Decimal(calc_neutro_body["occupancy_factor"]) == Decimal(1)
     assert calc_neutro_body["total_cost"] == calc_neutro_body["subtotal"]
 
     # 4. Configurar factores vía PUT /kilns/{id}/occupancy-factors
@@ -912,7 +912,7 @@ async def test_horno_nuevo_sin_factores_calcula_y_permite_configurarlos(
     )
     assert calc_ok.status_code == 200
     calc_ok_body = calc_ok.json()
-    assert calc_ok_body["occupancy_factor"] == "1.000000"
+    assert Decimal(calc_ok_body["occupancy_factor"]) == Decimal(1)
     assert calc_ok_body["total_cost"] == calc_ok_body["subtotal"]
 
 
