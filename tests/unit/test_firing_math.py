@@ -151,6 +151,38 @@ def test_factor_por_horno_difiere_en_el_mismo_tramo() -> None:
     assert resolve_factor(FACTORES_GRANDE, 80) == Decimal("1.4")
 
 
+@pytest.mark.parametrize(
+    "capacity,expected_percentage,expected_bracket,expected_factor",
+    [
+        ("20000", Decimal("5"), 10, Decimal("2.0")),
+        ("6666.666666666666666666666667", Decimal("15"), 20, Decimal("1.9")),
+        ("2000", Decimal("50"), 50, Decimal("1.6")),
+        ("1250", Decimal("80"), 80, Decimal("1.2")),
+        ("1052.631578947368421052631579", Decimal("95"), 100, Decimal("1.0")),
+    ],
+)
+def test_ocupacion_y_factor_no_cambian_el_precio_canonico(
+    capacity: str,
+    expected_percentage: Decimal,
+    expected_bracket: int,
+    expected_factor: Decimal,
+) -> None:
+    """El tramo de ocupacion se conserva como dato fisico, no como multiplicador."""
+    resultado = compute_firing(
+        [SessionInput("1:LOW", CHICO, "LOW", Decimal("500"), Decimal(capacity))],
+        [LineInput(1, Decimal(10), Decimal(10), Decimal(10), ("1:LOW",), CHICO)],
+        TABLAS,
+    )
+    linea = resultado.lines[0]
+
+    assert linea.occupancy_percentage.quantize(Decimal("0.0001")) == expected_percentage
+    assert linea.occupancy_bracket == expected_bracket
+    assert linea.occupancy_factor == expected_factor
+    assert linea.base_cost == Decimal("500")
+    assert linea.allocated_cost == Decimal("500")
+    assert resultado.total_cost == Decimal("500")
+
+
 # ---------------------------------------------------------------------------
 # Reparto
 # ---------------------------------------------------------------------------
