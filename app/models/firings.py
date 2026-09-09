@@ -177,10 +177,10 @@ class KilnRate(Base, TimestampMixin):
 
 
 class KilnOccupancyFactor(Base, TimestampMixin):
-    """Tramo de ocupacion y su multiplicador, por horno.
+    """Tramo informativo de ocupacion y su factor historico, por horno.
 
     Es la tabla T15:V25 del documento funcional. Vive en base de datos y no en
-    codigo porque el negocio la ajusta sin desplegar.
+    codigo porque el negocio puede conservarla y consultarla sin desplegar.
     """
 
     __tablename__ = "kiln_occupancy_factors"

@@ -255,7 +255,7 @@ class FiringLineOut(_Out):
     volume_share: Decimal
     #: Ocupacion fisica exacta contra la capacidad del horno del factor.
     occupancy_percentage: Decimal
-    #: Tramo comercial en decenas. Los valores posibles son ``ALLOWED_BRACKETS``.
+    #: Tramo informativo en decenas. Los valores posibles son ``ALLOWED_BRACKETS``.
     occupancy_bracket: int
     occupancy_factor: Decimal
     base_cost: Decimal

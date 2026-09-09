@@ -113,7 +113,7 @@ def physical_occupancy_percentage(volume_cm3: Decimal, capacity_cm3: Decimal) ->
 
 
 def occupancy_bracket(percentage: Decimal) -> int:
-    """Tramo comercial de un porcentaje fisico.
+    """Tramo informativo de un porcentaje fisico.
 
     El documento define los tramos como intervalos cerrados de diez en diez
     (``1-10``, ``11-20``...), asi que el tramo es el multiplo de diez
