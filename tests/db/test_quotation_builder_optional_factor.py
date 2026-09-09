@@ -9,7 +9,8 @@ UNO —el neutro de una multiplicacion—, no cero.
 Lo que estas pruebas vigilan, por orden de importancia:
 
 1. que el factor NAZCA apagado, que es el cambio de negocio;
-2. que encendido tome el valor de Configuracion y no uno inventado;
+2. que encendido pueda tomar el valor manual de la cotizacion o, si falta,
+   el valor de Configuracion;
 3. que apagado el precio sea exactamente el de un factor uno, ni redondeado
    distinto ni con los costos fijos repartidos de otra manera;
 4. que una cotizacion CONFIRMADA no cambie de importe porque alguien mueva la
@@ -124,6 +125,25 @@ async def test_encendido_toma_el_factor_de_configuracion(
     assert Decimal(body["production_factor"]) == TRES
     for item in body["items"]:
         assert Decimal(item["factored_cost"]) == Decimal(item["technical_cost"]) * TRES
+
+
+@pytest.mark.asyncio
+async def test_encendido_permite_factor_manual_por_cotizacion(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    """009K.4.2. El valor manual de la cotizacion gana al default."""
+    payload, _ = await _complete_payload(api, admin_csrf, db_session)
+
+    body = await _preview(
+        api,
+        admin_csrf,
+        {**payload, "production_factor_enabled": True, "production_factor": "1.5"},
+    )
+
+    assert body["production_factor_enabled"] is True
+    assert Decimal(body["production_factor"]) == Decimal("1.5")
+    for item in body["items"]:
+        assert Decimal(item["factored_cost"]) == Decimal(item["technical_cost"]) * Decimal("1.5")
 
 
 @pytest.mark.asyncio

@@ -10,9 +10,9 @@ Hoja                         Aqui
 ``G / G19``                  participacion por volumen
 ``H = G/G19*U$8``            :func:`allocate_session_cost`
 ``L = G/$C$7*100``           :func:`physical_occupancy_percentage`
-``T16:T25`` (tramos)         :func:`occupancy_bracket`
-``Q = H + K``                :func:`FiringMath.base_cost`
-``R = Q * V23``              :func:`FiringMath.allocated_cost`
+``T16:T25`` (tramos)         :func:`occupancy_bracket` (informativo)
+``Q = H + K``                costo real de quema
+``R = Q * V23``              ejemplo historico; no entra al pricing canonico
 ===========================  ==========================================
 
 Nada de ``float``: todo el camino es ``Decimal``.
@@ -136,16 +136,16 @@ def resolve_factor(
     brackets: Sequence[tuple[int, int, Decimal]],
     bracket: int,
 ) -> Decimal:
-    """Busca el multiplicador del tramo en la tabla de un horno.
+    """Busca el factor informativo del tramo en la tabla de un horno.
 
-    ``brackets`` es una secuencia de ``(min, max, factor)``.
+    ``brackets`` es una secuencia de ``(min, max, factor)``. Si no hay tramo
+    configurado, el costeo canonico usa el factor neutro: la tabla historica de
+    ocupacion ya no multiplica el costo de quema.
     """
     for minimum, maximum, factor in brackets:
         if minimum <= bracket <= maximum:
             return factor
-    raise OccupancyFactorMissingError(
-        f"No hay factor configurado para el tramo de {bracket} % de ocupacion"
-    )
+    return Decimal(1)
 
 
 def volume_share(line_volume_cm3: Decimal, total_volume_cm3: Decimal) -> Decimal:
@@ -378,7 +378,7 @@ def compute_firing(
                 occupancy_bracket=bracket,
                 occupancy_factor=factor,
                 base_cost=base_cost,
-                allocated_cost=base_cost * factor,
+                allocated_cost=base_cost,
                 capacity_exceeded=line_exceeded,
             )
         )
@@ -414,9 +414,9 @@ def compute_firing(
 
     subtotal = sum((line.base_cost for line in line_results), Decimal(0))
     total_cost = sum((line.allocated_cost for line in line_results), Decimal(0))
-    # Factor efectivo de la hoja. Cada linea tiene el suyo; este es el resumen
-    # ponderado que aparece en la cabecera.
-    effective_factor = total_cost / subtotal if subtotal > 0 else Decimal(1)
+    # El factor de ocupacion queda como dato informativo. Desde 009K.4.2 no
+    # multiplica el costo de quema: el pricing usa el costo real.
+    effective_factor = Decimal(1)
 
     return FiringMath(
         total_volume_cm3=total_volume,

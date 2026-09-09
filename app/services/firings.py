@@ -1,6 +1,6 @@
 """Servicios de hornos, tarifas y hojas de quema.
 
-El backend es la autoridad: capacidades, tarifas, factores, volumenes, reparto,
+El backend es la autoridad: capacidades, tarifas, volumenes, reparto,
 costos, estados y correlativos se resuelven aqui. Lo que llegue del cliente en
 esos campos se ignora; solo se aceptan los datos de captura (que horno, que
 piezas, que dimensiones).
@@ -8,13 +8,12 @@ piezas, que dimensiones).
 ## Capacidad y ocupacion
 
 El documento funcional mide la ocupacion **por pieza contra la capacidad del
-horno elegido** (``volumen_linea / capacidad``), no por sesion. Es lo que da
-sentido economico al factor: quien mete una pieza que solo ocupa el 5 % del
-horno paga x3, porque la quema se paga entera. Por eso el bloqueo por capacidad
-se aplica cuando una **linea** supera el 100 % del horno que la valora, y la
-ocupacion agregada de cada sesion se calcula y se informa, pero no bloquea: en
-la propia hoja de referencia las tres piezas suman mas que el horno pequeno
-porque describen varias hornadas, no una sola carga.
+horno elegido** (``volumen_linea / capacidad``), no por sesion. Desde 009K.4.2
+esa ocupacion es referencia operativa y no multiplica el costo de quema. El
+bloqueo por capacidad se aplica cuando una **linea** supera el 100 % del horno
+que la valora, y la ocupacion agregada de cada sesion se calcula y se informa,
+pero no bloquea: en la propia hoja de referencia las tres piezas suman mas que
+el horno pequeno porque describen varias hornadas, no una sola carga.
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ from app.core.firings import (
     FiringRateMissingError,
     KilnCapacityExceededError,
     LineInput,
-    OccupancyFactorMissingError,
     SessionInput,
     compute_firing,
 )
@@ -509,10 +507,6 @@ class FiringService:
     ) -> dict[int, list[tuple[int, int, Decimal]]]:
         tables: dict[int, list[tuple[int, int, Decimal]]] = {}
         for kiln_id, kiln in kilns.items():
-            if not kiln.occupancy_factors:
-                raise OccupancyFactorMissingError(
-                    f"El horno «{kiln.name}» no tiene configurada su tabla de factores de ocupación"
-                )
             tables[kiln_id] = [
                 (factor.min_percentage, factor.max_percentage, factor.factor)
                 for factor in sorted(kiln.occupancy_factors, key=lambda f: f.min_percentage)
