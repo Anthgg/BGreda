@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -227,7 +228,15 @@ class V2MaterialService:
                 code="V2_MATERIAL_QUANTITY_INVALID",
             )
 
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            # Dos primeras valorizaciones simultaneas del mismo material: no hay
+            # fila que bloquear todavia, asi que las dos pasan la lectura y una
+            # choca contra el UNIQUE. Es el mismo conflicto de concurrencia que
+            # cubre la version, y merece la misma respuesta y no un 500.
+            raise V2MaterialVersionConflictError() from exc
+
         # Dos motivos para releer, no uno:
         #
         # - `effective_cost_per_unit` es una columna GENERADA: la calcula la
@@ -611,20 +620,29 @@ class V2MaterialService:
             V2MaterialKind.BODY,
             elegido_ahora=data.get("body_material_id") is not None,
         )
-        line.body_material_name_snapshot = material.product.name
-        line.body_uom_snapshot = material.product.base_uom_code
-        costo, es_override = self._costo_congelado(
-            data,
-            "body_cost_per_unit_override",
-            derivado=material.effective_cost_per_unit,
-            actual=line.body_cost_per_unit_snapshot,
-            era_override=line.body_cost_is_override,
-            cambio_de_material="body_material_id" in data,
-        )
-        line.body_cost_is_override = es_override
-        line.body_cost_per_unit_snapshot = costo
+        # Si el material ya no sirve para este uso, se conserva lo congelado y
+        # NO se recalcula contra su valorizacion actual: seguir cobrando una
+        # pasta con el precio de un esmalte —porque alguien corrigio el tipo en
+        # el maestro— daria un importe falso que el aviso no arregla. Se
+        # recalculan pesos e importes, que dependen de la linea y no del
+        # maestro, y el costo por unidad se queda donde estaba.
+        if not avisos:
+            line.body_material_name_snapshot = material.product.name
+            line.body_uom_snapshot = material.product.base_uom_code
+            costo, es_override = self._costo_congelado(
+                data,
+                "body_cost_per_unit_override",
+                derivado=material.effective_cost_per_unit,
+                actual=line.body_cost_per_unit_snapshot,
+                era_override=line.body_cost_is_override,
+                cambio_de_material="body_material_id" in data,
+            )
+            line.body_cost_is_override = es_override
+            line.body_cost_per_unit_snapshot = costo
         line.body_total_weight = body_total_weight(line.body_unit_weight or ZERO, line.quantity)
-        line.body_cost = material_cost(line.body_total_weight, line.body_cost_per_unit_snapshot)
+        line.body_cost = material_cost(
+            line.body_total_weight, line.body_cost_per_unit_snapshot or ZERO
+        )
 
         # Elegir la pasta sin decir cuanta lleva la pieza deja la linea en cero.
         # Es un estado legitimo de un borrador a medio llenar, asi que avisa en
@@ -691,17 +709,21 @@ class V2MaterialService:
             line.glaze_cost = ZERO
             return ["V2_GLAZE_NO_ACTIVE_MATERIAL"]
 
-        line.glaze_material_name_snapshot = material.product.name
-        costo, es_override = self._costo_congelado(
-            data,
-            "glaze_cost_per_unit_override",
-            derivado=material.effective_cost_per_unit,
-            actual=line.glaze_cost_per_unit_snapshot,
-            era_override=line.glaze_cost_is_override,
-            cambio_de_material="glaze_material_id" in data,
-        )
-        line.glaze_cost_is_override = es_override
-        line.glaze_cost_per_unit_snapshot = costo
+        # Mismo criterio que la pasta: un esmalte que dejo de serlo conserva lo
+        # que la linea congelo en vez de recalcular con una valorizacion que ya
+        # no corresponde a este uso.
+        if not avisos:
+            line.glaze_material_name_snapshot = material.product.name
+            costo, es_override = self._costo_congelado(
+                data,
+                "glaze_cost_per_unit_override",
+                derivado=material.effective_cost_per_unit,
+                actual=line.glaze_cost_per_unit_snapshot,
+                era_override=line.glaze_cost_is_override,
+                cambio_de_material="glaze_material_id" in data,
+            )
+            line.glaze_cost_is_override = es_override
+            line.glaze_cost_per_unit_snapshot = costo
         # Se congela como porcentaje —15, no 0,15— igual que el resto de
         # porcentajes del proyecto.
         line.glaze_percent_snapshot = GLAZE_WEIGHT_RATIO * Decimal(100)
@@ -715,7 +737,9 @@ class V2MaterialService:
         line.glaze_conversion_is_fallback = es_fallback
         line.glaze_ml_per_gram_snapshot = conversion
 
-        line.glaze_cost = material_cost(line.glaze_total_weight, line.glaze_cost_per_unit_snapshot)
+        line.glaze_cost = material_cost(
+            line.glaze_total_weight, line.glaze_cost_per_unit_snapshot or ZERO
+        )
 
         if await self.stock_for(material.product_id) <= ZERO:
             # Aviso, NUNCA bloqueo: la regla aprobada permite cotizar con un

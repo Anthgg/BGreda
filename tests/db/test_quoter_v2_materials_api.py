@@ -1181,7 +1181,89 @@ class TestMaterialQueDejoDeSerlo:
         assert response.status_code == 200, response.text
         cuerpo = response.json()
         assert "V2_BODY_MATERIAL_UNAVAILABLE" in cuerpo["warnings"]
+        # El peso SI se recalcula: depende de la linea, no del maestro.
         assert Decimal(cuerpo["body_total_weight"]) == Decimal(10_000)
+        # El costo por unidad NO: se queda en lo que la linea congelo.
+        assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.0013")
+
+    async def test_una_pasta_convertida_en_esmalte_no_recalcula_la_linea(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Avisar no arregla un importe: hay que dejar de recalcularlo.
+
+        Alguien corrige en el maestro el tipo de un material —lo que valorizo
+        como pasta era en realidad un esmalte— y una linea que ya lo usaba
+        seguiria cobrando pasta al precio del esmalte. El numero seria falso y
+        el aviso no lo cambiaria, asi que la linea conserva lo que congelo.
+        """
+        pasta = await crear_producto(api, admin_csrf, "Arcilla mal clasificada")
+        await valorizar(api, admin_csrf, pasta["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=10,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+        )
+        assert Decimal(linea["body_cost_per_unit"]) == Decimal("0.0013")
+
+        # Se corrige el maestro: era un esmalte, y ademas mucho mas caro.
+        await valorizar(
+            api,
+            admin_csrf,
+            pasta["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="500",
+            transport_cost="0",
+            expected_version=1,
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"quantity": 20},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert "V2_BODY_MATERIAL_UNAVAILABLE" in cuerpo["warnings"]
+        # Ni el costo por unidad ni el nombre se refrescan desde un material
+        # que ya no corresponde a este uso.
+        assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.0013")
+        assert Decimal(cuerpo["body_cost"]) == Decimal(20) * Decimal(500) * Decimal("0.0013")
+
+    async def test_dos_primeras_valorizaciones_a_la_vez_dan_conflicto_no_un_500(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """No hay fila que bloquear todavia, asi que las dos pasan la lectura.
+
+        Una choca contra el UNIQUE. Es el mismo conflicto de concurrencia que
+        cubre la version y merece la misma respuesta: un 409 que se entiende,
+        no un 500 que parece una averia del servidor.
+        """
+        pasta = await crear_producto(api, admin_csrf, "Arcilla a dos manos")
+        cuerpo = {
+            "material_kind": "BODY",
+            "origin": "PURCHASE",
+            "purchase_quantity": CIEN_KILOS_EN_GRAMOS,
+            "purchase_cost": "100",
+        }
+
+        primera = await api.put(
+            f"{MATERIALS}/{pasta['id']}", json=cuerpo, headers={"X-CSRF-Token": admin_csrf}
+        )
+        assert primera.status_code == 200, primera.text
+
+        # La segunda llega creyendo que tampoco existe: sin `expected_version`.
+        segunda = await api.put(
+            f"{MATERIALS}/{pasta['id']}", json=cuerpo, headers={"X-CSRF-Token": admin_csrf}
+        )
+
+        assert segunda.status_code == 409
+        assert segunda.json()["error"]["code"] == "V2_MATERIAL_VERSION_CONFLICT"
 
 
 class TestNombreYTotalDeLinea:
