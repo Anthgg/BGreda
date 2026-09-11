@@ -198,6 +198,7 @@ async def reset_database(
                 "production_order_lines, production_orders, "
                 "quotation_product_price_updates, quotation_other_costs, "
                 "quotation_additionals, quotation_techniques, quotations, "
+                "v2_quotations, "
                 "other_costs, additionals, techniques, "
                 "document_sequences, commercial_settings, company_settings, profiles, "
                 "recipe_lines, recipe_versions, recipes, "
@@ -235,6 +236,10 @@ async def reset_database(
             # Fase 009K.1.1: cotizaciones de prototipo, CPR-2026-000001. Misma
             # razon: la 0023 la siembra en produccion y aqui no corre.
             ("PROTOTYPE_QUOTE", "CPR", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 010A: cotizaciones del Cotizador V2, CTZ-V2-2026-000001.
+            # Talonario propio y prefijo distinto: un codigo dice a simple
+            # vista con que motor nacio. La 0028 la siembra en produccion.
+            ("QUOTE_V2", "CTZ-V2", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(

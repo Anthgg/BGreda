@@ -60,6 +60,12 @@ class SequenceType(StrEnum):
     #: propio: agotar cotizaciones de producto no puede mover el de muestras,
     #: y son documentos distintos con destinatario distinto.
     PROTOTYPE_QUOTE = "PROTOTYPE_QUOTE"
+    #: Fase 010A. Cotizaciones del Cotizador V2 (CTZ-V2-2026-000001). Talonario
+    #: separado del de Legacy a proposito: el prefijo distinto hace que un
+    #: codigo diga a simple vista con que motor nacio, y que los dos contadores
+    #: sean independientes evita que retirar Legacy mas adelante deje huecos o
+    #: colisiones en la numeracion de V2.
+    QUOTE_V2 = "QUOTE_V2"
 
 
 class ResetPolicy(StrEnum):
@@ -114,7 +120,8 @@ class DocumentSequence(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', "
-            "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE', 'PROTOTYPE_QUOTE')",
+            "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE', 'PROTOTYPE_QUOTE', "
+            "'QUOTE_V2')",
             name="type_allowed",
         ),
         CheckConstraint(

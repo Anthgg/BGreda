@@ -46,6 +46,7 @@ from app.services.prototypes import PrototypeService
 from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
+from app.services.quoter_v2 import V2QuotationService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -356,6 +357,28 @@ async def get_quotation_builder_service(
 QuotationBuilderServiceDep = Annotated[
     QuotationBuilderService, Depends(get_quotation_builder_service)
 ]
+
+
+# ---------------------------------------------------------------------------
+# Fase 010A: Cotizador V2
+# ---------------------------------------------------------------------------
+async def get_v2_quotation_service(
+    session: DbSessionDep,
+    sequences: SequenceServiceDep,
+    audit: AuditRecorderDep,
+) -> V2QuotationService:
+    """Servicio del motor V2.
+
+    Recibe la sesion, el talonario y la auditoria, y **nada mas**. En
+    particular no recibe `QuotationService` ni `QuotationBuilderService`: si
+    los recibiera, bastaria un `self._legacy.algo(...)` para que el motor viejo
+    volviera a decidir un precio del motor nuevo sin que nadie lo notara al
+    leer el diff.
+    """
+    return V2QuotationService(session, sequences, audit)
+
+
+V2QuotationServiceDep = Annotated[V2QuotationService, Depends(get_v2_quotation_service)]
 
 
 # ---------------------------------------------------------------------------
