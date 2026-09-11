@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -277,7 +277,12 @@ class V2SettingsService:
                 index_elements=["kiln_id", "firing_type"],
                 # Solo lo que vino: omitir un campo lo deja como estaba, no lo
                 # pone en cero.
-                set_=campos or {"kiln_id": kiln_id},
+                #
+                # `updated_at` va explicito porque esta es una sentencia Core:
+                # el `onupdate` del modelo es un gancho del ORM y no se dispara
+                # aqui. Sin el, la fila se modificaria dejando una fecha de
+                # actualizacion que ya no corresponde a nada.
+                set_={**campos, "updated_at": func.now()},
             )
         )
         # La sesion no conoce la fila que escribio la sentencia: se relee.
