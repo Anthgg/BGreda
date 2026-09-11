@@ -448,11 +448,27 @@ async def test_la_vuelta_a_0026_pasa_cuando_no_hay_ordenes_de_muestra(
 
 
 @pytest.mark.asyncio
-async def test_subir_hasta_la_cabeza_pasa_por_0027_y_deja_una_sola(
+async def test_subir_hasta_la_cabeza_conserva_lo_de_0027_y_deja_una_sola(
     migration_engine: AsyncEngine,
 ) -> None:
+    """Llegar al final de la cadena no deshace lo que anadio 0027.
+
+    Antes esta prueba fijaba que la cabeza ERA 0027. Esa afirmacion acompana
+    siempre a la ULTIMA revision y se retira de la anterior —vive ahora en
+    `tests/unit/test_migration_0028.py`—; dejarla aqui obligaba a reescribir la
+    prueba en cada fase y, mientras tanto, no comprobaba nada de 0027.
+
+    Lo que si importa de 0027 al llegar a la cabeza es que sus artefactos
+    sobrevivan: la columna del segundo origen y las tres restricciones que
+    garantizan que una orden tiene exactamente un origen y que una muestra no
+    genera dos.
+    """
     _upgrade("head")
-    assert await _current(migration_engine) == "0027"
+
     heads = _alembic("heads")
     assert heads.returncode == 0, heads.stderr
     assert heads.stdout.count("(head)") == 1, heads.stdout
+
+    assert await _columna(migration_engine, "production_orders", "prototype_id") == "YES"
+    for nombre in (CK_ORIGEN, FK_PROTOTIPO, UQ_PROTOTIPO):
+        assert await _restriccion(migration_engine, nombre) == nombre, nombre
