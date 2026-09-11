@@ -118,17 +118,6 @@ def test_el_downgrade_deshace_exactamente_lo_que_anadio() -> None:
     assert "DELETE FROM document_sequences" in downgrade
 
 
-def test_alembic_una_sola_cabeza_y_es_0028() -> None:
-    """Una sola cabeza, y es la nueva.
-
-    Esta afirmacion acompana siempre a la ultima revision y se retira de la
-    anterior: fijarla en una concreta obliga a reescribir la prueba vieja cada
-    fase, y entonces deja de comprobar nada.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0028"], script.get_heads()
-
-
 def test_la_cadena_no_se_rompe() -> None:
     """0028 cuelga de 0027, y 0027 sigue existiendo."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))

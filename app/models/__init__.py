@@ -79,9 +79,14 @@ from app.models.quotations import (
     TechniqueFormulaType,
 )
 from app.models.quoter_v2 import (
+    V2CustomerKind,
     V2ProductionType,
     V2Quotation,
     V2QuotationStatus,
+)
+from app.models.quoter_v2_settings import (
+    V2CommercialSettings,
+    V2KilnRate,
 )
 from app.models.recipes import (
     Recipe,
@@ -180,6 +185,9 @@ __all__ = [
     "UnitOfMeasure",
     "UomDimension",
     "UserRole",
+    "V2CommercialSettings",
+    "V2CustomerKind",
+    "V2KilnRate",
     "V2ProductionType",
     "V2Quotation",
     "V2QuotationStatus",

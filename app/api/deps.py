@@ -47,6 +47,7 @@ from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
+from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -362,10 +363,22 @@ QuotationBuilderServiceDep = Annotated[
 # ---------------------------------------------------------------------------
 # Fase 010A: Cotizador V2
 # ---------------------------------------------------------------------------
+async def get_v2_settings_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2SettingsService:
+    """Configuracion comercial de V2. Lee el IGV canonico, no uno propio."""
+    return V2SettingsService(session, audit)
+
+
+V2SettingsServiceDep = Annotated[V2SettingsService, Depends(get_v2_settings_service)]
+
+
 async def get_v2_quotation_service(
     session: DbSessionDep,
     sequences: SequenceServiceDep,
     audit: AuditRecorderDep,
+    settings: V2SettingsServiceDep,
 ) -> V2QuotationService:
     """Servicio del motor V2.
 
@@ -375,7 +388,7 @@ async def get_v2_quotation_service(
     volviera a decidir un precio del motor nuevo sin que nadie lo notara al
     leer el diff.
     """
-    return V2QuotationService(session, sequences, audit)
+    return V2QuotationService(session, sequences, audit, settings)
 
 
 V2QuotationServiceDep = Annotated[V2QuotationService, Depends(get_v2_quotation_service)]

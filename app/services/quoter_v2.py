@@ -30,10 +30,11 @@ from app.core.errors import APIError
 from app.core.pricing_engine import PricingEngineVersion
 from app.models.audit import AuditAction
 from app.models.masters import Partner, PartnerRole
-from app.models.quoter_v2 import V2ProductionType, V2Quotation, V2QuotationStatus
+from app.models.quoter_v2 import V2Quotation, V2QuotationStatus
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_settings import V2SettingsService
 from app.services.sequences import SequenceService
 
 #: Tope de pagina del listado. El mismo criterio que el resto de la API: una
@@ -74,11 +75,16 @@ class V2QuotationService:
     """Alta y consulta de cotizaciones del motor V2."""
 
     def __init__(
-        self, session: AsyncSession, sequences: SequenceService, audit: AuditRecorder
+        self,
+        session: AsyncSession,
+        sequences: SequenceService,
+        audit: AuditRecorder,
+        settings: V2SettingsService,
     ) -> None:
         self._session = session
         self._sequences = sequences
         self._audit = audit
+        self._settings = settings
 
     # ------------------------------------------------------------------
     # Escritura
@@ -93,24 +99,33 @@ class V2QuotationService:
         """
         customer = await self._customer(data.get("customer_id"))
 
+        # Fase 010B. La configuracion se COPIA aqui, una vez. A partir de este
+        # instante la cotizacion vive de su copia: mover un default manana no
+        # reescribe lo que hoy se presupuesto, y corregir un numero dentro de
+        # esta cotizacion no cambia el default de la casa.
+        snapshot = await self._settings.capture_snapshot(
+            currency_code=data.get("currency_code"),
+            exchange_rate=data.get("exchange_rate"),
+            commercial_factor=data.get("commercial_factor"),
+            customer_kind=data.get("customer_kind"),
+            production_type=data.get("production_type"),
+        )
+
         fila = V2Quotation(
             code=await self._sequences.issue(SequenceType.QUOTE_V2, user_id=user.id),
             # Explicito aunque el default del modelo diga lo mismo: es la linea
             # que hace verdadera la frase «V2 tiene identidad persistida».
             pricing_engine_version=PricingEngineVersion.V2,
             status=V2QuotationStatus.DRAFT,
-            # `or` y no un default de `.get`: una llamada interna que pase
-            # `production_type=None` explicito caeria en `V2ProductionType(None)`
-            # y reventaria con un ValueError sin dueno.
-            production_type=V2ProductionType(
-                data.get("production_type") or V2ProductionType.RETAIL
-            ),
             customer_id=customer.id if customer else None,
             customer_name_snapshot=customer.name if customer else None,
             name=data.get("name"),
             notes=data.get("notes"),
             created_by=user.id,
             created_by_name=user.display_name,
+            # `production_type` sale del snapshot: si el alta no lo dice, lo
+            # pone la configuracion. Nunca se deduce de la cantidad.
+            **snapshot,
         )
         self._session.add(fila)
         await self._session.flush()

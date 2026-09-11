@@ -38,9 +38,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: Los ficheros que forman el dominio V2. Ninguno puede tocar Legacy.
 V2_MODULES = (
     "app/models/quoter_v2.py",
+    "app/models/quoter_v2_settings.py",
     "app/schemas/quoter_v2.py",
+    "app/schemas/quoter_v2_settings.py",
     "app/services/quoter_v2.py",
+    "app/services/quoter_v2_settings.py",
     "app/api/v1/quoter_v2.py",
+    "app/api/v1/quoter_v2_settings.py",
+    "app/core/quoter_v2_config.py",
 )
 
 #: Modulos del motor historico. Que V2 importe cualquiera de estos significa
