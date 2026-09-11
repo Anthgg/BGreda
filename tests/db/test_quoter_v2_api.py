@@ -43,6 +43,14 @@ LEGACY_INSERT = (
 )
 
 
+async def crear_tercero(api: httpx.AsyncClient, csrf: str, nombre: str, rol: str) -> dict[str, Any]:
+    response = await api.post(
+        PARTNERS, json={"name": nombre, "role": rol}, headers={"X-CSRF-Token": csrf}
+    )
+    assert response.status_code == 201, response.text
+    return dict(response.json())
+
+
 async def crear(api: httpx.AsyncClient, csrf: str, **overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"name": "Pedido demo V2"}
     payload.update(overrides)
@@ -87,6 +95,22 @@ class TestIdentidad:
         creada = await crear(api, admin_csrf)
         assert creada["code"].startswith("CTZ-V2-")
 
+    async def test_la_respuesta_del_alta_trae_las_marcas_de_tiempo(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """`created_at` y `updated_at` los pone el servidor, y llegan en el 201.
+
+        Los dos son `server_default=now()`, asi que el valor no existe en
+        Python hasta que la base lo devuelve. Esta prueba fija que el alta NO
+        necesita un `refresh()` explicito —SQLAlchemy 2 los recupera con
+        RETURNING en el propio INSERT— y que por tanto la respuesta nunca sale
+        con nulos ni dispara una carga perezosa fuera del contexto asincrono.
+        """
+        creada = await crear(api, admin_csrf)
+
+        assert creada["created_at"], "el alta devolvio created_at vacio"
+        assert creada["updated_at"], "el alta devolvio updated_at vacio"
+
     async def test_el_talonario_v2_no_mueve_el_de_legacy(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
     ) -> None:
@@ -127,16 +151,79 @@ class TestIdentidad:
     async def test_el_cliente_se_congela_al_crear(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        alta = await api.post(
-            PARTNERS,
-            json={"name": "Cliente V2", "role": "CLIENT"},
-            headers={"X-CSRF-Token": admin_csrf},
-        )
-        assert alta.status_code == 201, alta.text
-        cliente = alta.json()
+        cliente = await crear_tercero(api, admin_csrf, "Cliente V2", "CLIENT")
 
         creada = await crear(api, admin_csrf, customer_id=cliente["id"])
         assert creada["customer_name"] == "Cliente V2"
+
+    async def test_un_proveedor_no_puede_ser_el_cliente(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La misma exigencia que el Cotizador historico, no una mas laxa.
+
+        Un proveedor puro colado como cliente termina impreso en el PDF que se
+        envia al cliente. Que V2 sea un motor nuevo no lo autoriza a aceptar lo
+        que el viejo rechaza.
+        """
+        proveedor = await crear_tercero(api, admin_csrf, "Proveedor V2", "SUPPLIER")
+
+        response = await api.post(
+            V2,
+            json={"customer_id": proveedor["id"]},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "V2_CUSTOMER_ROLE_REQUIRED"
+
+    async def test_un_tercero_con_rol_mixto_si_puede_ser_el_cliente(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        mixto = await crear_tercero(api, admin_csrf, "Cliente y proveedor", "BOTH")
+
+        creada = await crear(api, admin_csrf, customer_id=mixto["id"])
+        assert creada["customer_name"] == "Cliente y proveedor"
+
+    async def test_un_cliente_archivado_no_revive_por_la_puerta_de_atras(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        cliente = await crear_tercero(api, admin_csrf, "Cliente archivado", "CLIENT")
+        baja = await api.put(
+            f"{PARTNERS}/{cliente['id']}",
+            json={"name": "Cliente archivado", "role": "CLIENT", "active": False},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert baja.status_code == 200, baja.text
+
+        response = await api.post(
+            V2,
+            json={"customer_id": cliente["id"]},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["error"]["code"] == "V2_CUSTOMER_NOT_FOUND"
+
+    async def test_el_alta_queda_auditada(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """Un documento comercial sin rastro de quien lo creo no es auditable.
+
+        La entidad es propia —`v2_quotation`, no `quotation`—: son documentos
+        de motores distintos y mezclarlas haria que el historial de uno
+        apareciera dentro del otro.
+        """
+        creada = await crear(api, admin_csrf)
+
+        fila = (
+            await db_session.execute(
+                text(
+                    "SELECT entity_type, action, user_display_name FROM audit_events "
+                    "WHERE entity_type = 'v2_quotation' AND entity_id = :id"
+                ),
+                {"id": str(creada["id"])},
+            )
+        ).one()
+        assert fila.action == "CREATE"
+        assert fila.user_display_name
 
     async def test_un_cliente_inexistente_da_404(
         self, api: httpx.AsyncClient, admin_csrf: str

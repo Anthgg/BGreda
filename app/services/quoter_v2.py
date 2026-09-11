@@ -28,15 +28,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
 from app.core.pricing_engine import PricingEngineVersion
-from app.models.masters import Partner
+from app.models.audit import AuditAction
+from app.models.masters import Partner, PartnerRole
 from app.models.quoter_v2 import V2ProductionType, V2Quotation, V2QuotationStatus
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
+from app.services.audit import AuditRecorder
 from app.services.sequences import SequenceService
 
 #: Tope de pagina del listado. El mismo criterio que el resto de la API: una
 #: peticion sin limite es una peticion que un dia devuelve la tabla entera.
 MAX_PAGE_SIZE = 200
+
+#: Entidad con la que se audita una cotizacion V2. Distinta de la de Legacy
+#: —"quotation"— porque son documentos de motores distintos: mezclarlas haria
+#: que el historial de uno apareciera dentro del otro.
+V2_QUOTATION_ENTITY = "v2_quotation"
+
+#: Roles de tercero que pueden ser el cliente de una cotizacion. El mismo
+#: criterio que aplica el Cotizador historico. Se repite aqui en vez de
+#: importarlo de alli: el dato compartido es el maestro `partners`, no el
+#: servicio Legacy.
+CUSTOMER_ROLES = (PartnerRole.CLIENT, PartnerRole.BOTH)
 
 
 class V2QuotationNotFoundError(APIError):
@@ -48,15 +61,24 @@ class V2QuotationNotFoundError(APIError):
 class V2CustomerNotFoundError(APIError):
     status_code = 404
     code = "V2_CUSTOMER_NOT_FOUND"
-    message = "El cliente indicado no existe"
+    message = "El cliente indicado no existe o esta archivado"
+
+
+class V2CustomerRoleError(APIError):
+    status_code = 422
+    code = "V2_CUSTOMER_ROLE_REQUIRED"
+    message = "El tercero seleccionado no tiene rol de cliente"
 
 
 class V2QuotationService:
     """Alta y consulta de cotizaciones del motor V2."""
 
-    def __init__(self, session: AsyncSession, sequences: SequenceService) -> None:
+    def __init__(
+        self, session: AsyncSession, sequences: SequenceService, audit: AuditRecorder
+    ) -> None:
         self._session = session
         self._sequences = sequences
+        self._audit = audit
 
     # ------------------------------------------------------------------
     # Escritura
@@ -69,13 +91,7 @@ class V2QuotationService:
         ``commit`` es del llamador: correlativo y documento se confirman juntos
         o no se confirma ninguno.
         """
-        customer_id = data.get("customer_id")
-        customer_name: str | None = None
-        if customer_id is not None:
-            customer = await self._session.get(Partner, customer_id)
-            if customer is None:
-                raise V2CustomerNotFoundError()
-            customer_name = customer.name
+        customer = await self._customer(data.get("customer_id"))
 
         fila = V2Quotation(
             code=await self._sequences.issue(SequenceType.QUOTE_V2, user_id=user.id),
@@ -83,9 +99,14 @@ class V2QuotationService:
             # que hace verdadera la frase «V2 tiene identidad persistida».
             pricing_engine_version=PricingEngineVersion.V2,
             status=V2QuotationStatus.DRAFT,
-            production_type=V2ProductionType(data.get("production_type", V2ProductionType.RETAIL)),
-            customer_id=customer_id,
-            customer_name_snapshot=customer_name,
+            # `or` y no un default de `.get`: una llamada interna que pase
+            # `production_type=None` explicito caeria en `V2ProductionType(None)`
+            # y reventaria con un ValueError sin dueno.
+            production_type=V2ProductionType(
+                data.get("production_type") or V2ProductionType.RETAIL
+            ),
+            customer_id=customer.id if customer else None,
+            customer_name_snapshot=customer.name if customer else None,
             name=data.get("name"),
             notes=data.get("notes"),
             created_by=user.id,
@@ -93,7 +114,39 @@ class V2QuotationService:
         )
         self._session.add(fila)
         await self._session.flush()
+        self._audit.record_action(
+            entity_type=V2_QUOTATION_ENTITY,
+            entity_id=str(fila.id),
+            action=AuditAction.CREATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": fila.code,
+                "pricing_engine_version": PricingEngineVersion.V2.value,
+                "production_type": fila.production_type.value,
+            },
+        )
         return fila
+
+    async def _customer(self, customer_id: int | None) -> Partner | None:
+        """El tercero que puede ser cliente de esta cotizacion, o ninguno.
+
+        Las mismas dos condiciones que exige el Cotizador historico: que exista
+        y no este archivado, y que tenga rol de cliente. No se heredan de alli
+        —eso ataria los motores— pero tampoco se relajan: una superficie nueva
+        que acepte lo que la vieja rechaza no es un motor nuevo, es un agujero.
+
+        Un proveedor puro colado como cliente terminaria en el PDF que se envia
+        al cliente, y un tercero archivado revive por la puerta de atras.
+        """
+        if customer_id is None:
+            return None
+        customer = await self._session.get(Partner, customer_id)
+        if customer is None or not customer.active:
+            raise V2CustomerNotFoundError()
+        if customer.role not in CUSTOMER_ROLES:
+            raise V2CustomerRoleError()
+        return customer
 
     # ------------------------------------------------------------------
     # Lectura

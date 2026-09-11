@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Path, Query, status
 
 from app.api.deps import AdminUserDep, DbSessionDep, V2QuotationServiceDep
 from app.models.quoter_v2 import V2Quotation, V2QuotationStatus
@@ -88,7 +88,9 @@ async def create_v2_quotation(
 
 @router.get("/{quotation_id}", response_model=V2QuotationOut)
 async def read_v2_quotation(
-    quotation_id: int,
+    # `ge=1`: un id no positivo se rechaza en la capa HTTP, sin llegar a
+    # consultar la base para acabar en el mismo 404.
+    quotation_id: Annotated[int, Path(ge=1)],
     service: V2QuotationServiceDep,
     _: AdminUserDep,
 ) -> V2QuotationOut:

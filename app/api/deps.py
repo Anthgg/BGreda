@@ -365,15 +365,17 @@ QuotationBuilderServiceDep = Annotated[
 async def get_v2_quotation_service(
     session: DbSessionDep,
     sequences: SequenceServiceDep,
+    audit: AuditRecorderDep,
 ) -> V2QuotationService:
     """Servicio del motor V2.
 
-    Recibe la sesion y el talonario, y **nada mas**. En particular no recibe
-    `QuotationService` ni `QuotationBuilderService`: si los recibiera, bastaria
-    un `self._legacy.algo(...)` para que el motor viejo volviera a decidir un
-    precio del motor nuevo sin que nadie lo notara al leer el diff.
+    Recibe la sesion, el talonario y la auditoria, y **nada mas**. En
+    particular no recibe `QuotationService` ni `QuotationBuilderService`: si
+    los recibiera, bastaria un `self._legacy.algo(...)` para que el motor viejo
+    volviera a decidir un precio del motor nuevo sin que nadie lo notara al
+    leer el diff.
     """
-    return V2QuotationService(session, sequences)
+    return V2QuotationService(session, sequences, audit)
 
 
 V2QuotationServiceDep = Annotated[V2QuotationService, Depends(get_v2_quotation_service)]
