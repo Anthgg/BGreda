@@ -44,7 +44,13 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.precision import money_numeric, percentage_numeric, quantity_numeric
+from app.core.precision import (
+    calculation_numeric,
+    money_numeric,
+    percentage_numeric,
+    quantity_numeric,
+    unit_cost_numeric,
+)
 from app.core.pricing_engine import PRICING_ENGINE_VERSION_LENGTH, PricingEngineVersion
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
@@ -213,6 +219,19 @@ class V2Quotation(Base, TimestampMixin):
     created_by_name: Mapped[str | None] = mapped_column(String(200))
 
     customer: Mapped[Partner | None] = relationship("Partner", foreign_keys=[customer_id])
+    #: Fase 010C. Las lineas de la cotizacion. `selectin` porque el costo
+    #: de materiales de la cabecera se arma sumandolas: leerla sin ellas
+    #: daria un total menor sin que nada avisara.
+    products: Mapped[list[V2QuotationProduct]] = relationship(
+        "V2QuotationProduct",
+        back_populates="quotation",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            V2QuotationProduct.sort_order.asc(),
+            V2QuotationProduct.id.asc(),
+        ),
+        lazy="selectin",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -325,4 +344,138 @@ class V2Quotation(Base, TimestampMixin):
             name="customer_kind_allowed",
         ),
         Index("ix_v2_quotations_created_at", "created_at"),
+    )
+
+
+class V2QuotationProduct(Base, TimestampMixin):
+    """Una linea de la cotizacion V2: que pieza, cuantas, y de que esta hecha.
+
+    Fase 010C. Aqui vive el material —pasta y esmalte— con TODO lo que hizo
+    falta para calcular su costo, copiado en el momento de escribirlo. La linea
+    no consulta el maestro para explicarse: se explica sola.
+
+    Esa copia es la regla de la fase. Si el costo por gramo se leyera del
+    maestro al renderizar, subir el precio de la arcilla reescribiria el costo
+    de todo lo cotizado antes —incluido lo ya enviado— y nadie podria decir con
+    que numeros se acordo aquel precio.
+
+    Lo que NO hace esta tabla: descontar existencia. Cotizar consulta el stock
+    y puede avisar, pero no lo mueve. El consumo pertenece a produccion, y
+    mezclarlos haria que pedir un presupuesto vaciara el almacen.
+    """
+
+    __tablename__ = "v2_quotation_products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    v2_quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("v2_quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    #: La pieza que se cotiza. RESTRICT: borrar un producto no puede borrar la
+    #: linea que explica un precio ya dado.
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
+    product_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    # ---- Pasta -----------------------------------------------------------
+    body_material_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
+    body_material_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    #: Lo que lleva UNA pieza, en la unidad base del material.
+    body_unit_weight: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    body_uom_snapshot: Mapped[str | None] = mapped_column(String(32))
+    #: El costo por unidad con el que se calculo. Puede venir del maestro o de
+    #: una decision tomada dentro de esta cotizacion; `body_cost_is_override`
+    #: dice cual de las dos, porque el numero solo no lo distingue.
+    body_cost_per_unit_snapshot: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    body_cost_is_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    body_total_weight: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    body_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    # ---- Esmalte ---------------------------------------------------------
+    #: Apagado por defecto. Encenderlo es una decision, no un descuido.
+    requires_glaze: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    glaze_material_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
+    glaze_material_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    #: Si el esmalte lo eligio el sistema —el activo mas caro por gramo— en vez
+    #: de una persona. Importa mas alla de la trazabilidad: produccion usara
+    #: otro esmalte y el precio NO cambiara por eso, asi que conviene que quede
+    #: escrito que este era una referencia de costeo.
+    glaze_is_reference: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    glaze_cost_per_unit_snapshot: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    glaze_cost_is_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    #: La proporcion vigente al cotizar. Congelada: si manana la casa decide
+    #: estimar al 18 %, esta cotizacion sigue explicandose con el 15 % que uso.
+    glaze_percent_snapshot: Mapped[Decimal | None] = mapped_column(percentage_numeric())
+    #: Mililitros por gramo aplicados, y si fueron los de reserva. Un volumen
+    #: calculado con 1:1 y otro con la concentracion real se parecen demasiado
+    #: como para distinguirlos despues.
+    glaze_ml_per_gram_snapshot: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    glaze_conversion_is_fallback: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    glaze_total_weight: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    glaze_volume_ml: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    glaze_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    quotation: Mapped[V2Quotation] = relationship("V2Quotation", back_populates="products")
+
+    __table_args__ = (
+        CheckConstraint("quantity >= 0", name="quantity_non_negative"),
+        CheckConstraint(
+            "body_unit_weight IS NULL OR body_unit_weight >= 0",
+            name="body_unit_weight_non_negative",
+        ),
+        CheckConstraint(
+            "body_cost_per_unit_snapshot IS NULL OR body_cost_per_unit_snapshot >= 0",
+            name="body_cost_non_negative",
+        ),
+        CheckConstraint(
+            "glaze_cost_per_unit_snapshot IS NULL OR glaze_cost_per_unit_snapshot >= 0",
+            name="glaze_cost_non_negative",
+        ),
+        CheckConstraint("body_total_weight >= 0", name="body_total_weight_non_negative"),
+        CheckConstraint("glaze_total_weight >= 0", name="glaze_total_weight_non_negative"),
+        CheckConstraint("body_cost >= 0", name="body_cost_total_non_negative"),
+        CheckConstraint("glaze_cost >= 0", name="glaze_cost_total_non_negative"),
+        # Sin esmalte no hay nada de esmalte. El CHECK lo impone porque «peso
+        # cero pero costo distinto de cero» seria cobrar algo que se apago.
+        CheckConstraint(
+            "requires_glaze OR (glaze_total_weight = 0 AND glaze_cost = 0 AND glaze_volume_ml = 0)",
+            name="glaze_off_costs_nothing",
+        ),
+        CheckConstraint(
+            "glaze_percent_snapshot IS NULL"
+            " OR (glaze_percent_snapshot >= 0 AND glaze_percent_snapshot <= 100)",
+            name="glaze_percent_range",
+        ),
+        CheckConstraint(
+            "glaze_ml_per_gram_snapshot IS NULL OR glaze_ml_per_gram_snapshot > 0",
+            name="glaze_ml_per_gram_positive",
+        ),
+        Index("ix_v2_quotation_products_quotation", "v2_quotation_id", "sort_order"),
     )
