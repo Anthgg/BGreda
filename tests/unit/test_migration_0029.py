@@ -113,13 +113,38 @@ def test_las_tres_tarifas_de_horno_son_columnas_distintas() -> None:
         assert columna in tabla
 
 
+def test_el_snapshot_congela_tambien_el_redondeo() -> None:
+    """Decide el precio final de cualquier cotizacion, la calcule quien la calcule."""
+    assert "rounding_step_snapshot" in _contenido()
+
+
+def test_moneda_y_tipo_de_cambio_solo_admiten_combinaciones_posibles() -> None:
+    """Tres casos validos y ninguno mas.
+
+    Una tasa sin moneda, un tipo de cambio en moneda base o una cotizacion en
+    moneda extranjera SIN tipo de cambio son datos rotos, no historia.
+    """
+    contenido = _contenido()
+    assert "currency_and_exchange_rate_coherent" in contenido
+    # `upper()` porque la comparacion en SQL distingue mayusculas y un 'pen'
+    # minusculo se colaria como moneda extranjera.
+    assert "upper(currency_code_snapshot)" in contenido
+    assert "exchange_rate_snapshot IS NOT NULL" in contenido
+
+
+def test_el_downgrade_protege_las_tarifas_configuradas_a_mano() -> None:
+    """Se escriben horno por horno: borrarlas no se recupera con un upgrade."""
+    assert "SELECT count(*) FROM v2_kiln_rates" in _downgrade()
+
+
 def test_el_suelo_del_factor_esta_en_la_base() -> None:
     """x2 es regla cerrada: no puede depender de que el servicio la recuerde."""
     contenido = _contenido()
     # En la configuracion: el minimo no puede bajar de x2.
     assert "commercial_factor_min >= 2" in contenido
-    # Y en cada cotizacion: el factor congelado tampoco.
+    # Y en cada cotizacion: ni el factor congelado ni el minimo que copio.
     assert "commercial_factor IS NULL OR commercial_factor >= 2" in contenido
+    assert "commercial_factor_min_snapshot >= 2" in contenido
 
 
 # ---------------------------------------------------------------------------

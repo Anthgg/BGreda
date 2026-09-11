@@ -19,7 +19,7 @@ from fastapi import APIRouter, Path
 from app.api.deps import AdminUserDep, DbSessionDep, V2SettingsServiceDep
 from app.core.quoter_v2_config import V2_REFERENCE_KILN_RATES
 from app.models.firings import FiringType
-from app.models.quoter_v2_settings import V2CommercialSettings, V2KilnRate
+from app.models.quoter_v2_settings import V2CommercialSettings
 from app.schemas.quoter_v2_settings import (
     V2KilnRateIn,
     V2KilnRateOut,
@@ -27,20 +27,21 @@ from app.schemas.quoter_v2_settings import (
     V2SettingsPage,
     V2SettingsUpdateIn,
 )
-from app.services.quoter_v2_settings import V2SettingsService
+from app.services.quoter_v2_settings import V2KilnRateRow, V2SettingsService
 
 router = APIRouter(prefix="/quoter-v2/settings", tags=["cotizador-v2"])
 
 
-def _rate_out(fila: V2KilnRate) -> V2KilnRateOut:
+def _rate_out(fila: V2KilnRateRow) -> V2KilnRateOut:
     return V2KilnRateOut(
         kiln_id=fila.kiln_id,
-        kiln_code=fila.kiln.code,
-        kiln_name=fila.kiln.name,
+        kiln_code=fila.kiln_code,
+        kiln_name=fila.kiln_name,
         firing_type=fila.firing_type,
         gas_cost=fila.gas_cost,
         external_rate=fila.external_rate,
         student_rate=fila.student_rate,
+        configured=fila.configured,
     )
 
 
@@ -95,7 +96,7 @@ async def _page(service: V2SettingsService) -> V2SettingsPage:
         settings=_settings_out(
             fila, politica.tax_percent, politica.currency_code, politica.currency_symbol
         ),
-        kiln_rates=[_rate_out(rate) for rate in await service.kiln_rates()],
+        kiln_rates=[_rate_out(rate) for rate in await service.kiln_rate_grid()],
         reference_rates=V2_REFERENCE_KILN_RATES,
     )
 

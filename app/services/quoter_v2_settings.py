@@ -26,13 +26,14 @@ prueba de aislamiento lo comprueba.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
 
 from app.core.errors import APIError
 from app.core.quoter_v2_config import BASE_CURRENCY
@@ -55,6 +56,24 @@ V2_KILN_RATE_ENTITY = "v2_kiln_rate"
 #: simbolo es presentacion.
 CURRENCY_SYMBOLS: dict[str, str] = {"PEN": "S/", "USD": "US$"}
 
+#: Lo que vale una tarifa que nadie ha configurado todavia. Va acompanada
+#: de `configured=False` para que no se confunda con un cero elegido.
+ZERO = Decimal(0)
+
+
+@dataclass(frozen=True)
+class V2KilnRateRow:
+    """Una celda de la rejilla de tarifas: horno x tipo de quema."""
+
+    kiln_id: int
+    kiln_code: str
+    kiln_name: str
+    firing_type: FiringType
+    gas_cost: Decimal
+    external_rate: Decimal
+    student_rate: Decimal
+    configured: bool
+
 
 class V2SettingsNotFoundError(APIError):
     status_code = 404
@@ -74,6 +93,14 @@ class V2KilnNotFoundError(APIError):
     status_code = 404
     code = "V2_KILN_NOT_FOUND"
     message = "El horno indicado no existe"
+
+
+class V2FactorOutOfRangeError(APIError):
+    """El factor pedido no cabe en el rango vigente de la configuracion."""
+
+    status_code = 422
+    code = "V2_FACTOR_OUT_OF_RANGE"
+    message = "El factor comercial esta fuera del rango permitido"
 
 
 class V2SettingsService:
@@ -105,17 +132,43 @@ class V2SettingsService:
             )
         return fila
 
-    async def kiln_rates(self) -> list[V2KilnRate]:
-        # `joinedload` y no carga perezosa: la presentacion necesita el codigo
-        # y el nombre del horno, y en contexto asincrono una carga diferida no
-        # se queda lenta —revienta con MissingGreenlet—.
-        consulta = (
-            select(V2KilnRate)
-            .join(Kiln, Kiln.id == V2KilnRate.kiln_id)
-            .options(joinedload(V2KilnRate.kiln))
-            .order_by(Kiln.code.asc(), V2KilnRate.firing_type.asc())
+    async def kiln_rate_grid(self) -> list[V2KilnRateRow]:
+        """Todos los hornos activos por baja y por alta, tengan tarifa o no.
+
+        Devuelve la REJILLA COMPLETA y no solo las filas existentes. Las
+        tarifas V2 nacen vacias a proposito —el sistema no sabe cual horno es
+        el chico— y una pantalla que solo enseñara lo ya guardado no tendria
+        por donde crear la primera: el taller quedaria sin forma de configurar
+        sus hornos.
+
+        Los huecos salen en cero y marcados como no configurados, para que se
+        distinga «todavia nadie lo puso» de «vale cero».
+        """
+        hornos = list(
+            (await self._session.scalars(select(Kiln).where(Kiln.active).order_by(Kiln.code))).all()
         )
-        return list((await self._session.scalars(consulta)).all())
+        existentes = {
+            (fila.kiln_id, fila.firing_type): fila
+            for fila in (await self._session.scalars(select(V2KilnRate))).all()
+        }
+
+        rejilla: list[V2KilnRateRow] = []
+        for horno in hornos:
+            for tipo in (FiringType.LOW, FiringType.HIGH):
+                fila = existentes.get((horno.id, tipo))
+                rejilla.append(
+                    V2KilnRateRow(
+                        kiln_id=horno.id,
+                        kiln_code=horno.code,
+                        kiln_name=horno.name,
+                        firing_type=tipo,
+                        gas_cost=fila.gas_cost if fila else ZERO,
+                        external_rate=fila.external_rate if fila else ZERO,
+                        student_rate=fila.student_rate if fila else ZERO,
+                        configured=fila is not None,
+                    )
+                )
+        return rejilla
 
     # ------------------------------------------------------------------
     # Escritura
@@ -130,7 +183,20 @@ class V2SettingsService:
         personas editando a la vez dejarian la ultima escritura como ganadora
         sin que la primera se enterara de que su cambio desaparecio.
         """
-        fila = await self.get()
+        # `with_for_update`: comprobar la version leyendo sin bloquear no basta.
+        # Dos administradores que abran la pantalla a la vez leerian version 1
+        # los dos, los dos pasarian la comprobacion, y el ultimo en confirmar
+        # pisaria al primero sin que nadie viera un conflicto. El bloqueo hace
+        # que la segunda transaccion espere y lea la version ya incrementada.
+        fila = (
+            await self._session.scalars(
+                select(V2CommercialSettings)
+                .where(V2CommercialSettings.id == SINGLETON_ID)
+                .with_for_update()
+            )
+        ).one_or_none()
+        if fila is None:
+            raise V2SettingsNotFoundError()
         if fila.version != expected_version:
             raise V2SettingsConflictError()
 
@@ -139,9 +205,16 @@ class V2SettingsService:
             if valor is not None and await self._session.get(Kiln, valor) is None:
                 raise V2KilnNotFoundError()
 
+        # `None` significa «no lo mandes» en casi todo el contrato, pero en los
+        # dos hornos sugeridos significa «quitalo»: son anulables justamente
+        # para poder no tener ninguno, y sin esta excepcion, una vez elegido,
+        # no habria forma de deshacerlo desde la API.
+        anulables = {"retail_kiln_id", "wholesale_kiln_id"}
         cambios: dict[str, tuple[Any, Any]] = {}
         for campo, nuevo in data.items():
-            if nuevo is None or not hasattr(fila, campo):
+            if not hasattr(fila, campo):
+                continue
+            if nuevo is None and campo not in anulables:
                 continue
             anterior = getattr(fila, campo)
             if anterior != nuevo:
@@ -179,6 +252,36 @@ class V2SettingsService:
         if await self._session.get(Kiln, kiln_id) is None:
             raise V2KilnNotFoundError()
 
+        campos = {
+            campo: data[campo]
+            for campo in ("gas_cost", "external_rate", "student_rate")
+            if data.get(campo) is not None
+        }
+
+        existia = (
+            await self._session.scalar(
+                select(V2KilnRate.id).where(
+                    V2KilnRate.kiln_id == kiln_id,
+                    V2KilnRate.firing_type == firing_type,
+                )
+            )
+        ) is not None
+
+        # INSERT ... ON CONFLICT DO UPDATE, y no «mira si existe y decide»:
+        # entre la lectura y la escritura cabe otra peticion, y dos personas
+        # configurando el mismo horno a la vez acabarian con un 500 por
+        # violacion del UNIQUE. Aqui las serializa la base.
+        insercion = pg_insert(V2KilnRate).values(kiln_id=kiln_id, firing_type=firing_type, **campos)
+        await self._session.execute(
+            insercion.on_conflict_do_update(
+                index_elements=["kiln_id", "firing_type"],
+                # Solo lo que vino: omitir un campo lo deja como estaba, no lo
+                # pone en cero.
+                set_=campos or {"kiln_id": kiln_id},
+            )
+        )
+        # La sesion no conoce la fila que escribio la sentencia: se relee.
+        self._session.expire_all()
         fila = (
             await self._session.scalars(
                 select(V2KilnRate).where(
@@ -186,19 +289,8 @@ class V2SettingsService:
                     V2KilnRate.firing_type == firing_type,
                 )
             )
-        ).one_or_none()
-
-        accion = AuditAction.UPDATE
-        if fila is None:
-            fila = V2KilnRate(kiln_id=kiln_id, firing_type=firing_type)
-            self._session.add(fila)
-            accion = AuditAction.CREATE
-
-        for campo in ("gas_cost", "external_rate", "student_rate"):
-            if data.get(campo) is not None:
-                setattr(fila, campo, data[campo])
-
-        await self._session.flush()
+        ).one()
+        accion = AuditAction.UPDATE if existia else AuditAction.CREATE
         self._audit.record_action(
             entity_type=V2_KILN_RATE_ENTITY,
             entity_id=str(fila.id),
@@ -250,6 +342,14 @@ class V2SettingsService:
         factor = (
             commercial_factor if commercial_factor is not None else v2.commercial_factor_default
         )
+        # Contra el rango que ESTA cotizacion va a congelar. Sin esta
+        # comprobacion el valor llega al CHECK de la base y el cliente recibe
+        # un 500 en vez de un 422 que le diga entre que limites puede moverse.
+        if not (v2.commercial_factor_min <= factor <= v2.commercial_factor_max):
+            raise V2FactorOutOfRangeError(
+                "El factor comercial tiene que estar entre "
+                f"{v2.commercial_factor_min} y {v2.commercial_factor_max}"
+            )
 
         return {
             "tax_percent_snapshot": politica.tax_percent,
@@ -260,6 +360,7 @@ class V2SettingsService:
             "workday_hours_snapshot": v2.workday_hours,
             "space_service_cost_per_day_snapshot": v2.space_service_cost_per_day,
             "administrative_cost_snapshot": v2.administrative_cost_per_quote,
+            "rounding_step_snapshot": politica.rounding_step,
             "commercial_factor": factor,
             "commercial_factor_min_snapshot": v2.commercial_factor_min,
             "commercial_factor_max_snapshot": v2.commercial_factor_max,

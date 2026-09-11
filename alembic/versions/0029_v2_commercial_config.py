@@ -63,6 +63,7 @@ SNAPSHOT_COLUMNS: tuple[tuple[str, sa.types.TypeEngine[object]], ...] = (
     ("workday_hours_snapshot", sa.Numeric(18, 6)),
     ("space_service_cost_per_day_snapshot", sa.Numeric(18, 6)),
     ("administrative_cost_snapshot", sa.Numeric(18, 6)),
+    ("rounding_step_snapshot", sa.Numeric(9, 6)),
     ("commercial_factor", sa.Numeric(18, 6)),
     ("commercial_factor_min_snapshot", sa.Numeric(18, 6)),
     ("commercial_factor_max_snapshot", sa.Numeric(18, 6)),
@@ -88,18 +89,31 @@ SNAPSHOT_CHECKS: tuple[tuple[str, str], ...] = (
         "exchange_rate_snapshot IS NULL OR exchange_rate_snapshot > 0",
     ),
     (
-        "base_currency_has_no_exchange_rate",
-        "currency_code_snapshot IS NULL"
-        " OR currency_code_snapshot <> 'PEN'"
-        " OR exchange_rate_snapshot IS NULL",
+        # Las tres combinaciones validas, enumeradas. Lo que queda fuera no son
+        # casos raros: una tasa sin moneda, un tipo de cambio en moneda base, o
+        # una cotizacion en moneda extranjera sin tipo de cambio congelado —que
+        # obligaria al motor a leer el de hoy, justo lo que esta fase impide—.
+        "currency_and_exchange_rate_coherent",
+        "(currency_code_snapshot IS NULL AND exchange_rate_snapshot IS NULL)"
+        " OR (upper(currency_code_snapshot) = 'PEN' AND exchange_rate_snapshot IS NULL)"
+        " OR (upper(currency_code_snapshot) <> 'PEN' AND exchange_rate_snapshot IS NOT NULL)",
     ),
     (
         "validity_days_snapshot_positive",
         "validity_days_snapshot IS NULL OR validity_days_snapshot > 0",
     ),
     (
-        "workday_hours_snapshot_positive",
-        "workday_hours_snapshot IS NULL OR workday_hours_snapshot > 0",
+        "workday_hours_snapshot_range",
+        "workday_hours_snapshot IS NULL"
+        " OR (workday_hours_snapshot > 0 AND workday_hours_snapshot <= 24)",
+    ),
+    (
+        "rounding_step_snapshot_positive",
+        "rounding_step_snapshot IS NULL OR rounding_step_snapshot > 0",
+    ),
+    (
+        "settings_version_snapshot_positive",
+        "settings_version_snapshot IS NULL OR settings_version_snapshot > 0",
     ),
     (
         "space_cost_snapshot_non_negative",
@@ -112,6 +126,15 @@ SNAPSHOT_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "commercial_factor_floor",
         "commercial_factor IS NULL OR commercial_factor >= 2",
+    ),
+    (
+        "commercial_factor_min_snapshot_floor",
+        "commercial_factor_min_snapshot IS NULL OR commercial_factor_min_snapshot >= 2",
+    ),
+    (
+        "commercial_factor_snapshot_range_ordered",
+        "commercial_factor_min_snapshot IS NULL OR commercial_factor_max_snapshot IS NULL"
+        " OR commercial_factor_min_snapshot <= commercial_factor_max_snapshot",
     ),
     (
         "commercial_factor_within_min",
@@ -232,7 +255,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["wholesale_kiln_id"], ["kilns.id"], ondelete="RESTRICT"),
         sa.CheckConstraint(f"id = {SINGLETON_ID}", name="singleton"),
         sa.CheckConstraint("version > 0", name="version_positive"),
-        sa.CheckConstraint("workday_hours > 0", name="workday_hours_positive"),
+        sa.CheckConstraint("workday_hours > 0 AND workday_hours <= 24", name="workday_hours_range"),
         sa.CheckConstraint("space_service_cost_per_day >= 0", name="space_cost_non_negative"),
         sa.CheckConstraint("administrative_cost_per_quote >= 0", name="admin_cost_non_negative"),
         sa.CheckConstraint("commercial_factor_min >= 2", name="factor_min_floor"),
@@ -291,13 +314,12 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.ForeignKeyConstraint(["kiln_id"], ["kilns.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint("kiln_id", "firing_type", name="uq_v2_kiln_rates_kiln_id"),
+        sa.UniqueConstraint("kiln_id", "firing_type", name="uq_v2_kiln_rates_kiln_id_firing_type"),
         sa.CheckConstraint("firing_type IN ('LOW', 'HIGH')", name="firing_type_allowed"),
         sa.CheckConstraint("gas_cost >= 0", name="gas_cost_non_negative"),
         sa.CheckConstraint("external_rate >= 0", name="external_rate_non_negative"),
         sa.CheckConstraint("student_rate >= 0", name="student_rate_non_negative"),
     )
-    op.create_index("ix_v2_kiln_rates_kiln_id", "v2_kiln_rates", ["kiln_id"])
 
     # ------------------------------------------------------------------
     # 3. El snapshot en la cotizacion
@@ -323,11 +345,14 @@ def downgrade() -> None:
         )
         or 0
     )
-    if congeladas:
+    tarifas = conexion.scalar(sa.text("SELECT count(*) FROM v2_kiln_rates")) or 0
+    if congeladas or tarifas:
         raise RuntimeError(
             f"0029 no puede revertirse: hay {congeladas} cotizacion(es) V2 con la "
-            "configuracion ya congelada. Revertir las dejaria sin los numeros con "
-            "los que se calcularon."
+            f"configuracion ya congelada y {tarifas} tarifa(s) de horno cargadas. "
+            "Revertir dejaria a las primeras sin los numeros con los que se "
+            "calcularon, y borraria una parametrizacion que alguien escribio a mano "
+            "horno por horno."
         )
 
     for nombre, _ in SNAPSHOT_CHECKS:
@@ -335,6 +360,5 @@ def downgrade() -> None:
     for nombre, _ in SNAPSHOT_COLUMNS:
         op.drop_column("v2_quotations", nombre)
 
-    op.drop_index("ix_v2_kiln_rates_kiln_id", table_name="v2_kiln_rates")
     op.drop_table("v2_kiln_rates")
     op.drop_table("v2_commercial_settings")

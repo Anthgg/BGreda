@@ -43,7 +43,16 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.precision import money_numeric, quantity_numeric
 from app.core.quoter_v2_config import (
+    DEFAULT_ADMINISTRATIVE_COST_PER_QUOTE,
+    DEFAULT_COMMERCIAL_FACTOR,
+    DEFAULT_COMMERCIAL_FACTOR_MAX,
+    DEFAULT_COMMERCIAL_FACTOR_MIN,
+    DEFAULT_EXCHANGE_RATE,
+    DEFAULT_ILLUSTRATION_DAILY_RATE,
+    DEFAULT_ILLUSTRATION_PIECES_PER_WORKDAY,
     DEFAULT_QUOTATION_VALIDITY_DAYS,
+    DEFAULT_SPACE_SERVICE_COST_PER_DAY,
+    DEFAULT_WORKDAY_HOURS,
 )
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
@@ -59,13 +68,17 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
 
     # ---- Jornada y costos generales -------------------------------------
     workday_hours: Mapped[Decimal] = mapped_column(
-        quantity_numeric(), nullable=False, server_default=text("8")
+        quantity_numeric(), nullable=False, server_default=text(str(DEFAULT_WORKDAY_HOURS))
     )
     space_service_cost_per_day: Mapped[Decimal] = mapped_column(
-        money_numeric(), nullable=False, server_default=text("140")
+        money_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_SPACE_SERVICE_COST_PER_DAY)),
     )
     administrative_cost_per_quote: Mapped[Decimal] = mapped_column(
-        money_numeric(), nullable=False, server_default=text("200")
+        money_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_ADMINISTRATIVE_COST_PER_QUOTE)),
     )
 
     # ---- Factor comercial -----------------------------------------------
@@ -73,13 +86,19 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
     #: producto; el reparto entre productos es proporcional al costo y se
     #: implementa en 010F.
     commercial_factor_default: Mapped[Decimal] = mapped_column(
-        quantity_numeric(), nullable=False, server_default=text("3")
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_COMMERCIAL_FACTOR)),
     )
     commercial_factor_min: Mapped[Decimal] = mapped_column(
-        quantity_numeric(), nullable=False, server_default=text("2")
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_COMMERCIAL_FACTOR_MIN)),
     )
     commercial_factor_max: Mapped[Decimal] = mapped_column(
-        quantity_numeric(), nullable=False, server_default=text("3")
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_COMMERCIAL_FACTOR_MAX)),
     )
 
     # ---- Vigencia --------------------------------------------------------
@@ -94,7 +113,9 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
     #: MANUAL, como en Legacy: el proyecto no tiene proveedor automatico de FX
     #: y esta fase no inventa uno. La cotizacion se lleva su copia.
     default_exchange_rate: Mapped[Decimal] = mapped_column(
-        quantity_numeric(), nullable=False, server_default=text("3.5")
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_EXCHANGE_RATE)),
     )
 
     # ---- Defaults de produccion -----------------------------------------
@@ -132,10 +153,14 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
     #: `illustration_daily_rate / workday_hours`. Guardar las dos permitiria
     #: que se contradijeran, y entonces habria que decidir cual manda.
     illustration_daily_rate: Mapped[Decimal] = mapped_column(
-        money_numeric(), nullable=False, server_default=text("110")
+        money_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_ILLUSTRATION_DAILY_RATE)),
     )
     illustration_pieces_per_workday: Mapped[Decimal] = mapped_column(
-        quantity_numeric(), nullable=False, server_default=text("50")
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_ILLUSTRATION_PIECES_PER_WORKDAY)),
     )
 
     retail_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[retail_kiln_id])
@@ -146,7 +171,7 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         CheckConstraint("version > 0", name="version_positive"),
         # Una jornada de cero horas haria una division por cero en cuanto
         # alguien calcule una tarifa horaria.
-        CheckConstraint("workday_hours > 0", name="workday_hours_positive"),
+        CheckConstraint("workday_hours > 0 AND workday_hours <= 24", name="workday_hours_range"),
         CheckConstraint("space_service_cost_per_day >= 0", name="space_cost_non_negative"),
         CheckConstraint("administrative_cost_per_quote >= 0", name="admin_cost_non_negative"),
         # El suelo de x2 es una regla de negocio cerrada, no una preferencia.
@@ -203,7 +228,11 @@ class V2KilnRate(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     kiln_id: Mapped[int] = mapped_column(
-        ForeignKey("kilns.id", ondelete="CASCADE"), nullable=False, index=True
+        # Sin `index=True`: el UNIQUE de abajo empieza por `kiln_id` y ya
+        # sirve para buscar por horno. Un indice suelto seria almacenamiento
+        # y coste de escritura a cambio de nada.
+        ForeignKey("kilns.id", ondelete="CASCADE"),
+        nullable=False,
     )
     #: LOW o HIGH. Se reutiliza el enum del dominio de quemas porque describe
     #: una propiedad fisica del horno —se enciende en baja o en alta—, no una
@@ -223,7 +252,7 @@ class V2KilnRate(Base, TimestampMixin):
     kiln: Mapped[Kiln] = relationship("Kiln")
 
     __table_args__ = (
-        UniqueConstraint("kiln_id", "firing_type", name="uq_v2_kiln_rates_kiln_id"),
+        UniqueConstraint("kiln_id", "firing_type", name="uq_v2_kiln_rates_kiln_id_firing_type"),
         CheckConstraint("gas_cost >= 0", name="gas_cost_non_negative"),
         CheckConstraint("external_rate >= 0", name="external_rate_non_negative"),
         CheckConstraint("student_rate >= 0", name="student_rate_non_negative"),

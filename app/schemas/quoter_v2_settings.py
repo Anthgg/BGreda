@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.firings import FiringType
 from app.models.quoter_v2 import V2CustomerKind, V2ProductionType
@@ -35,6 +35,18 @@ class V2KilnRateIn(BaseModel):
     #: Lo que se cobra a un alumno.
     student_rate: Decimal | None = Field(default=None, ge=0, le=MAX_MONEY)
 
+    @model_validator(mode="after")
+    def _al_menos_uno(self) -> V2KilnRateIn:
+        """Los tres son opcionales, pero los tres a la vez no.
+
+        Se admite el envio parcial —corregir solo el gas es legitimo— y por eso
+        ninguno es obligatorio. Un cuerpo vacio, en cambio, crearia una fila de
+        ceros que nadie pidio y que luego parece una tarifa configurada.
+        """
+        if self.gas_cost is None and self.external_rate is None and self.student_rate is None:
+            raise ValueError("Indique al menos uno de los tres importes")
+        return self
+
 
 class V2KilnRateOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -46,6 +58,9 @@ class V2KilnRateOut(BaseModel):
     gas_cost: Decimal
     external_rate: Decimal
     student_rate: Decimal
+    #: Si alguien la puso. Un cero sin configurar no es un cero elegido, y la
+    #: pantalla tiene que poder distinguirlos.
+    configured: bool
 
 
 class V2SettingsUpdateIn(BaseModel):
@@ -133,6 +148,9 @@ class V2SettingsPage(BaseModel):
     """Configuracion y tarifas de horno en una sola lectura."""
 
     settings: V2SettingsOut
+    #: Los hornos activos por baja y por alta, tengan tarifa o no. La rejilla
+    #: viaja COMPLETA: las tarifas nacen vacias y una lista con solo lo ya
+    #: guardado no dejaria por donde crear la primera.
     kiln_rates: list[V2KilnRateOut]
     #: Los valores aprobados para un horno chico y uno grande.
     #:

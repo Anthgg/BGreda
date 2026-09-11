@@ -178,6 +178,12 @@ class V2Quotation(Base, TimestampMixin):
     workday_hours_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
     space_service_cost_per_day_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
     administrative_cost_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
+    #: El paso del redondeo comercial vigente al crear. Va con el grupo de
+    #: moneda e impuesto, no con el de mano de obra: decide el precio FINAL
+    #: de cualquier cotizacion, la calcule el motor que la calcule. Sin el,
+    #: cambiar el redondeo de 0,50 a 1,00 haria irreproducible el precio de
+    #: algo ya emitido. Es el mismo criterio que sigue `prototype_quotations`.
+    rounding_step_snapshot: Mapped[Decimal | None] = mapped_column(percentage_numeric())
 
     #: El factor elegido para ESTA cotizacion, y los limites que regian al
     #: crearla. Los limites viajan con la cotizacion porque autorizan lo que
@@ -234,21 +240,46 @@ class V2Quotation(Base, TimestampMixin):
             "exchange_rate_snapshot IS NULL OR exchange_rate_snapshot > 0",
             name="exchange_rate_snapshot_positive",
         ),
-        # En moneda base no hay conversion: un tipo de cambio ahi seria una
-        # cifra inventada que alguien acabaria multiplicando.
+        # Moneda y tipo de cambio solo tienen tres combinaciones validas, y las
+        # tres se enumeran en vez de prohibir una sola. Las que quedan fuera no
+        # son casos raros: son cotizaciones rotas.
+        #
+        # - sin moneda no puede haber tipo de cambio: seria una tasa huerfana,
+        #   sin decir de que a que;
+        # - en moneda base no hay nada que convertir, y un 1 ahi es una cifra
+        #   inventada que alguien acabaria multiplicando;
+        # - en moneda extranjera el tipo de cambio es OBLIGATORIO. Sin el, la
+        #   cotizacion nace sin poder convertirse y el motor tendria que leer
+        #   el de hoy, que es justo lo que esta fase impide.
+        #
+        # `upper()` porque la comparacion en SQL distingue mayusculas: sin el,
+        # un 'pen' minusculo se colaria como moneda extranjera.
         CheckConstraint(
-            "currency_code_snapshot IS NULL"
-            " OR currency_code_snapshot <> 'PEN'"
-            " OR exchange_rate_snapshot IS NULL",
-            name="base_currency_has_no_exchange_rate",
+            "(currency_code_snapshot IS NULL AND exchange_rate_snapshot IS NULL)"
+            " OR (upper(currency_code_snapshot) = 'PEN'"
+            "     AND exchange_rate_snapshot IS NULL)"
+            " OR (upper(currency_code_snapshot) <> 'PEN'"
+            "     AND exchange_rate_snapshot IS NOT NULL)",
+            name="currency_and_exchange_rate_coherent",
         ),
         CheckConstraint(
             "validity_days_snapshot IS NULL OR validity_days_snapshot > 0",
             name="validity_days_snapshot_positive",
         ),
+        # Con tope: un dia tiene 24 horas. Sin el, un 80 tecleado por un 8,0
+        # pasa y divide el jornal entre diez.
         CheckConstraint(
-            "workday_hours_snapshot IS NULL OR workday_hours_snapshot > 0",
-            name="workday_hours_snapshot_positive",
+            "workday_hours_snapshot IS NULL"
+            " OR (workday_hours_snapshot > 0 AND workday_hours_snapshot <= 24)",
+            name="workday_hours_snapshot_range",
+        ),
+        CheckConstraint(
+            "rounding_step_snapshot IS NULL OR rounding_step_snapshot > 0",
+            name="rounding_step_snapshot_positive",
+        ),
+        CheckConstraint(
+            "settings_version_snapshot IS NULL OR settings_version_snapshot > 0",
+            name="settings_version_snapshot_positive",
         ),
         CheckConstraint(
             "space_service_cost_per_day_snapshot IS NULL"
@@ -264,6 +295,20 @@ class V2Quotation(Base, TimestampMixin):
         CheckConstraint(
             "commercial_factor IS NULL OR commercial_factor >= 2",
             name="commercial_factor_floor",
+        ),
+        # El rango congelado tambien tiene que ser un rango posible. Un minimo
+        # de 1,5 contradiria la regla que el propio documento dice respetar, y
+        # un minimo mayor que el maximo dejaria la cotizacion en un estado en
+        # el que NINGUN factor es valido.
+        CheckConstraint(
+            "commercial_factor_min_snapshot IS NULL OR commercial_factor_min_snapshot >= 2",
+            name="commercial_factor_min_snapshot_floor",
+        ),
+        CheckConstraint(
+            "commercial_factor_min_snapshot IS NULL"
+            " OR commercial_factor_max_snapshot IS NULL"
+            " OR commercial_factor_min_snapshot <= commercial_factor_max_snapshot",
+            name="commercial_factor_snapshot_range_ordered",
         ),
         CheckConstraint(
             "commercial_factor IS NULL OR commercial_factor_min_snapshot IS NULL"

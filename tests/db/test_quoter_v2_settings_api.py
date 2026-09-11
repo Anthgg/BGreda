@@ -104,16 +104,43 @@ class TestDefaults:
         config = (await leer(api))["settings"]
         assert Decimal(config["illustration_hourly_rate"]) == Decimal("11")
 
-    async def test_las_tarifas_de_horno_nacen_vacias(
-        self, api: httpx.AsyncClient, admin_csrf: str
-    ) -> None:
-        """El sistema no sabe cual de los hornos del taller es «el chico».
-
-        Atribuirlo por capacidad pondria una tarifa de 200 soles en el horno
-        equivocado, y eso se descubre cuando ya se envio la cotizacion.
-        """
+    async def test_sin_hornos_no_hay_rejilla(self, api: httpx.AsyncClient, admin_csrf: str) -> None:
         pagina = await leer(api)
         assert pagina["kiln_rates"] == []
+
+    async def test_un_horno_nuevo_aparece_sin_configurar(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La rejilla llega COMPLETA aunque no haya ni una tarifa guardada.
+
+        Es lo que permite configurar la primera. Con una lista de solo lo ya
+        guardado, un taller recien instalado no tendria por donde empezar y los
+        hornos se quedarian sin tarifa para siempre.
+
+        Los huecos salen en cero pero marcados `configured: false`: un cero sin
+        configurar no es un cero elegido.
+        """
+        await _crear_horno(api, admin_csrf, "Horno recien dado de alta", 17000)
+
+        tarifas = (await leer(api))["kiln_rates"]
+
+        assert {r["firing_type"] for r in tarifas} == {"LOW", "HIGH"}
+        assert all(r["configured"] is False for r in tarifas)
+        assert all(Decimal(r["gas_cost"]) == Decimal(0) for r in tarifas)
+
+    async def test_configurar_una_marca_solo_esa(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        horno = await _crear_horno(api, admin_csrf, "Horno a medias", 17000)
+        await api.put(
+            f"{SETTINGS}/kiln-rates/{horno['id']}/LOW",
+            json={"gas_cost": "35"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        tarifas = {r["firing_type"]: r for r in (await leer(api))["kiln_rates"]}
+        assert tarifas["LOW"]["configured"] is True
+        assert tarifas["HIGH"]["configured"] is False
 
     async def test_los_valores_aprobados_se_ofrecen_como_referencia(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -206,6 +233,17 @@ class TestEdicion:
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "V2_KILN_NOT_FOUND"
 
+    async def test_un_horno_sugerido_se_puede_quitar(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Es anulable justamente para poder no tener ninguno."""
+        horno = await _crear_horno(api, admin_csrf, "Horno por menor", 17000)
+        assert (await editar(api, admin_csrf, retail_kiln_id=horno["id"])).status_code == 200
+        assert (await leer(api))["settings"]["retail_kiln_id"] == horno["id"]
+
+        assert (await editar(api, admin_csrf, retail_kiln_id=None)).status_code == 200
+        assert (await leer(api))["settings"]["retail_kiln_id"] is None
+
     async def test_la_edicion_queda_auditada(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
     ) -> None:
@@ -233,11 +271,11 @@ class TestTarifasDeHorno:
         )
         assert response.status_code == 200, response.text
 
-        tarifas = response.json()["kiln_rates"]
-        assert len(tarifas) == 1
-        assert Decimal(tarifas[0]["gas_cost"]) == Decimal(35)
-        assert Decimal(tarifas[0]["external_rate"]) == Decimal(200)
-        assert Decimal(tarifas[0]["student_rate"]) == Decimal(90)
+        baja = next(r for r in response.json()["kiln_rates"] if r["firing_type"] == "LOW")
+        assert Decimal(baja["gas_cost"]) == Decimal(35)
+        assert Decimal(baja["external_rate"]) == Decimal(200)
+        assert Decimal(baja["student_rate"]) == Decimal(90)
+        assert baja["configured"] is True
 
     async def test_baja_y_alta_son_filas_distintas(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -267,8 +305,8 @@ class TestTarifasDeHorno:
             ruta, json={"gas_cost": "40"}, headers={"X-CSRF-Token": admin_csrf}
         )
 
-        tarifas = response.json()["kiln_rates"]
-        assert len(tarifas) == 1
+        tarifas = [r for r in response.json()["kiln_rates"] if r["firing_type"] == "LOW"]
+        assert len(tarifas) == 1, "volver a fijarla duplico la fila"
         assert Decimal(tarifas[0]["gas_cost"]) == Decimal(40)
 
     async def test_las_tarifas_v2_no_tocan_las_de_legacy(
@@ -439,6 +477,58 @@ class TestSnapshot:
         assert Decimal(creada["commercial_factor"]) == Decimal("2.5")
         assert Decimal(creada["commercial_factor_min"]) == Decimal(2)
         assert Decimal(creada["commercial_factor_max"]) == Decimal(3)
+
+    async def test_el_redondeo_vigente_queda_congelado(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """Decide el precio FINAL, asi que tiene que viajar con la cotizacion.
+
+        Sin el, cambiar el paso de 0,50 a 1,00 haria irreproducible el precio
+        de algo que ya se envio.
+        """
+        await db_session.execute(text("UPDATE commercial_settings SET rounding_step = 0.50"))
+        await db_session.commit()
+        creada = await crear_cotizacion(api, admin_csrf)
+
+        await db_session.execute(text("UPDATE commercial_settings SET rounding_step = 1.00"))
+        await db_session.commit()
+
+        guardado = await db_session.scalar(
+            text("SELECT rounding_step_snapshot FROM v2_quotations WHERE id = :id"),
+            {"id": creada["id"]},
+        )
+        assert guardado == Decimal("0.50")
+
+    async def test_un_factor_por_encima_del_maximo_da_422_y_no_500(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El CHECK de la base es la red, no la puerta.
+
+        Dejar que el valor llegue hasta alli devuelve un 500 que no explica
+        nada; el servicio responde 422 diciendo entre que limites se puede
+        mover.
+        """
+        response = await api.post(
+            V2, json={"commercial_factor": "4"}, headers={"X-CSRF-Token": admin_csrf}
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "V2_FACTOR_OUT_OF_RANGE"
+
+    async def test_una_cotizacion_en_usd_nunca_nace_sin_tipo_de_cambio(
+        self, api: httpx.AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """Naceria rota: el motor tendria que leer el TC de hoy."""
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            await db_session.execute(
+                text(
+                    "INSERT INTO v2_quotations (code, pricing_engine_version,"
+                    " currency_code_snapshot) VALUES ('CTZ-V2-2026-008888', 'V2', 'USD')"
+                )
+            )
+            await db_session.commit()
+        await db_session.rollback()
 
     async def test_un_factor_por_debajo_del_suelo_no_entra(
         self, api: httpx.AsyncClient, admin_csrf: str

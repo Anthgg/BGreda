@@ -25,6 +25,12 @@ from app.models.quoter_v2 import (
     V2QuotationStatus,
 )
 
+#: Las mismas cotas que la configuracion. Sin tope, un numero disparatado no da
+#: un error claro: desborda la columna NUMERIC y el fallo llega desde la base,
+#: sin decir que campo lo causo.
+MAX_MONEY = Decimal("1000000")
+MAX_FACTOR = Decimal("100")
+
 
 def _blank_to_none(value: str | None) -> str | None:
     """Un campo vacio es ausencia, no una cadena vacia guardada para siempre."""
@@ -52,10 +58,10 @@ class V2QuotationCreateIn(BaseModel):
     #: manda y queda congelado en la cotizacion.
     currency_code: str | None = Field(default=None, min_length=3, max_length=3)
     #: Solo tiene sentido en moneda extranjera. MANUAL, como en Legacy.
-    exchange_rate: Decimal | None = Field(default=None, gt=0)
+    exchange_rate: Decimal | None = Field(default=None, gt=0, le=MAX_MONEY)
     #: Nunca por debajo del minimo vigente; el servicio lo comprueba contra la
     #: configuracion y la base lo vuelve a exigir.
-    commercial_factor: Decimal | None = Field(default=None, ge=2)
+    commercial_factor: Decimal | None = Field(default=None, ge=2, le=MAX_FACTOR)
     #: Acotado aunque la columna sea TEXT: un campo libre sin tope es un campo
     #: por el que cabe cualquier cosa, y 4000 caracteres son mas que de sobra
     #: para una nota interna.
