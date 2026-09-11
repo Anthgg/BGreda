@@ -365,7 +365,7 @@ class TestPasta:
         )
         assert Decimal(antes["body_cost_per_unit"]) == Decimal("0.0013")
 
-        await valorizar(api, admin_csrf, pasta["id"], purchase_cost="150")
+        await valorizar(api, admin_csrf, pasta["id"], purchase_cost="150", expected_version=1)
 
         lineas = (await api.get(f"{V2}/{cotizacion}/products")).json()["items"]
         assert Decimal(lineas[0]["body_cost_per_unit"]) == Decimal("0.0013")
@@ -740,6 +740,7 @@ class TestEsmalte:
             purchase_quantity="1000",
             purchase_cost="400",
             transport_cost="0",
+            expected_version=1,
         )
 
         lineas = (await api.get(f"{V2}/{cotizacion}/products")).json()["items"]
@@ -974,3 +975,555 @@ async def test_una_cantidad_cero_no_revienta(
     )
 
     assert Decimal(linea["body_total_weight"]) == Decimal(500 * cantidad)
+
+
+# ---------------------------------------------------------------------------
+# Lo que encontraron las auditorias de 010C
+# ---------------------------------------------------------------------------
+class TestConcurrencia:
+    """Valorizar es un formulario que se manda ENTERO.
+
+    Por eso la version importa aqui y no en las lineas, que se mandan por
+    partes: dos administradores con la pantalla abierta reescriben los siete
+    campos con lo que cada uno tenia delante, y sin version el segundo borra el
+    trabajo del primero sin conflicto, sin error y sin rastro.
+    """
+
+    async def test_cambiar_sin_declarar_la_version_se_rechaza(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        pasta = await crear_producto(api, admin_csrf, "Arcilla concurrente")
+        await valorizar(api, admin_csrf, pasta["id"])
+
+        segunda = await api.put(
+            f"{MATERIALS}/{pasta['id']}",
+            json={
+                "material_kind": "BODY",
+                "origin": "PURCHASE",
+                "purchase_quantity": CIEN_KILOS_EN_GRAMOS,
+                "purchase_cost": "150",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert segunda.status_code == 409
+        assert segunda.json()["error"]["code"] == "V2_MATERIAL_VERSION_CONFLICT"
+
+    async def test_una_version_vieja_no_pisa_a_quien_llego_antes(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El caso exacto: dos pantallas abiertas, las dos leyeron la version 1."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla disputada")
+        await valorizar(api, admin_csrf, pasta["id"])
+
+        primero = await valorizar(
+            api, admin_csrf, pasta["id"], purchase_cost="150", expected_version=1
+        )
+        assert primero["version"] == 2
+
+        segundo = await api.put(
+            f"{MATERIALS}/{pasta['id']}",
+            json={
+                "expected_version": 1,
+                "material_kind": "BODY",
+                "origin": "PURCHASE",
+                "purchase_quantity": CIEN_KILOS_EN_GRAMOS,
+                "purchase_cost": "100",
+                "notes": "vengo de un formulario viejo",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert segundo.status_code == 409
+        # Y la correccion del primero sigue ahi.
+        actual = (await api.get(MATERIALS)).json()["items"]
+        fila = next(m for m in actual if m["product_id"] == pasta["id"])
+        assert Decimal(fila["purchase_cost"]) == Decimal(150)
+
+    async def test_la_primera_valorizacion_no_tiene_version_que_declarar(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Exigirla al crear obligaria a inventarse un numero."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla estrenada")
+
+        material = await valorizar(api, admin_csrf, pasta["id"])
+
+        assert material["version"] == 1
+
+
+class TestMaterialQueDejoDeSerlo:
+    """El maestro es editable y la valorizacion se queda donde estaba.
+
+    Un producto valorizado como materia prima puede acabar convertido en
+    servicio, quedarse sin unidad base o darse de baja. La valorizacion
+    sobrevive a todo eso, intacta y ya sin sentido.
+    """
+
+    async def test_una_pasta_no_puede_elegirse_como_esmalte(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El costo "funcionaria" y el documento quedaria economicamente falso."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla que no es esmalte")
+        await valorizar(api, admin_csrf, pasta["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        response = await api.post(
+            f"{V2}/{cotizacion}/products",
+            json={
+                "quantity": 1,
+                "requires_glaze": True,
+                "glaze_material_id": pasta["id"],
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "V2_MATERIAL_KIND_MISMATCH"
+
+    async def test_un_esmalte_no_puede_elegirse_como_pasta(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        esmalte = await crear_producto(api, admin_csrf, "Esmalte que no es pasta")
+        await valorizar(
+            api,
+            admin_csrf,
+            esmalte["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="200",
+            transport_cost="0",
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        response = await api.post(
+            f"{V2}/{cotizacion}/products",
+            json={
+                "quantity": 20,
+                "body_material_id": esmalte["id"],
+                "body_unit_weight": "500",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "V2_MATERIAL_KIND_MISMATCH"
+
+    async def test_elegir_hoy_un_material_dado_de_baja_se_rechaza(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        pasta = await crear_producto(api, admin_csrf, "Arcilla retirada")
+        await valorizar(api, admin_csrf, pasta["id"])
+        baja = await api.put(
+            f"{PRODUCTS}/{pasta['id']}",
+            json={
+                "name": pasta["name"],
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": pasta["product_category_id"],
+                "base_uom_code": "g",
+                "active": False,
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert baja.status_code == 200, baja.text
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        response = await api.post(
+            f"{V2}/{cotizacion}/products",
+            json={
+                "quantity": 10,
+                "body_material_id": pasta["id"],
+                "body_unit_weight": "500",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "V2_MATERIAL_PRODUCT_INVALID"
+
+    async def test_si_ya_estaba_puesto_avisa_pero_deja_seguir(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Bloquear aqui encallaria un borrador por una decision de otra pantalla.
+
+        La distincion es toda la regla: elegirlo HOY se rechaza; seguir
+        editando una linea que ya lo tenia, se avisa.
+        """
+        pasta = await crear_producto(api, admin_csrf, "Arcilla que se retira despues")
+        await valorizar(api, admin_csrf, pasta["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=10,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+        )
+        baja = await api.put(
+            f"{PRODUCTS}/{pasta['id']}",
+            json={
+                "name": pasta["name"],
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": pasta["product_category_id"],
+                "base_uom_code": "g",
+                "active": False,
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert baja.status_code == 200, baja.text
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"quantity": 20},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert "V2_BODY_MATERIAL_UNAVAILABLE" in cuerpo["warnings"]
+        assert Decimal(cuerpo["body_total_weight"]) == Decimal(10_000)
+
+
+class TestNombreYTotalDeLinea:
+    async def test_una_pieza_de_encargo_puede_llamarse_por_su_nombre(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La mitad del trabajo del taller no existe en el catalogo."""
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        linea = await anadir_linea(
+            api, admin_csrf, cotizacion, product_name="Plato palta", quantity=20
+        )
+
+        assert linea["product_name"] == "Plato palta"
+
+    async def test_si_la_linea_cuelga_de_un_producto_manda_el_maestro(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Dos nombres para la misma linea serian dos verdades."""
+        pieza = await crear_producto(
+            api, admin_csrf, "Plato del catalogo", product_type="FINISHED_PRODUCT"
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            product_id=pieza["id"],
+            product_name="Como lo llamo yo",
+            quantity=5,
+        )
+
+        assert linea["product_name"] == "Plato del catalogo"
+
+    async def test_el_total_de_la_linea_lo_suma_el_backend(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Sumarlo en el navegador daria colas de decimales en coma flotante."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla sumada")
+        await valorizar(api, admin_csrf, pasta["id"])
+        esmalte = await crear_producto(api, admin_csrf, "Esmalte sumado")
+        await valorizar(
+            api,
+            admin_csrf,
+            esmalte["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="200",
+            transport_cost="0",
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=20,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            requires_glaze=True,
+        )
+
+        # El ejemplo aprobado: S/13 de pasta y S/300 de esmalte.
+        assert Decimal(linea["body_cost"]) == Decimal(13)
+        assert Decimal(linea["glaze_cost"]) == Decimal(300)
+        assert Decimal(linea["materials_cost"]) == Decimal(313)
+
+
+class TestLaEdicionParcialNoBorraDecisiones:
+    """Cambiar la cantidad no puede cambiar el precio pactado ni quien eligio.
+
+    Los dos fallos de esta familia son invisibles: no lanzan nada, no salen en
+    los registros y solo se notan al leer un importe que ya no es el que se
+    acordo. Por eso estan fijados aqui con el caso completo.
+    """
+
+    async def test_el_costo_pactado_sobrevive_a_cambiar_la_cantidad(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La pantalla manda solo lo que cambio, y eso no es «quita el pacto»."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla pactada")
+        await valorizar(api, admin_csrf, pasta["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=10,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            body_cost_per_unit_override="0.002",
+        )
+        assert linea["body_cost_is_override"] is True
+        assert Decimal(linea["body_cost_per_unit"]) == Decimal("0.002")
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"quantity": 20},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert cuerpo["body_cost_is_override"] is True
+        assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.002")
+        # Y el importe corresponde al costo pactado, no al del maestro.
+        assert Decimal(cuerpo["body_cost"]) == Decimal(20) * Decimal(500) * Decimal("0.002")
+
+    async def test_retirar_el_pacto_es_una_decision_explicita(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Mandarlo a nulo SI lo quita: es la otra mitad de la regla."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla despactada")
+        await valorizar(api, admin_csrf, pasta["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=10,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            body_cost_per_unit_override="0.002",
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"body_cost_per_unit_override": None},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert cuerpo["body_cost_is_override"] is False
+        assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.0013")
+
+    async def test_cambiar_de_material_no_hereda_el_pacto_del_anterior(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El acuerdo se tomo sobre otra arcilla; arrastrarlo seria inventarlo."""
+        primera = await crear_producto(api, admin_csrf, "Arcilla pactada A")
+        segunda = await crear_producto(api, admin_csrf, "Arcilla pactada B")
+        await valorizar(api, admin_csrf, primera["id"])
+        await valorizar(api, admin_csrf, segunda["id"], purchase_cost="200")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=10,
+            body_material_id=primera["id"],
+            body_unit_weight="500",
+            body_cost_per_unit_override="0.002",
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"body_material_id": segunda["id"]},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert cuerpo["body_cost_is_override"] is False
+        assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.0023")
+
+    async def test_el_esmalte_propuesto_sigue_siendo_una_referencia(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La seleccion automatica deja el id puesto, y eso no es haber elegido.
+
+        Si se perdiera la marca, la pantalla dejaria de avisar de que produccion
+        usara otro esmalte, y la linea quedaria clavada en ese sin volver a
+        proponer el mas caro.
+        """
+        pasta = await crear_producto(api, admin_csrf, "Arcilla con referencia")
+        await valorizar(api, admin_csrf, pasta["id"])
+        esmalte = await crear_producto(api, admin_csrf, "Esmalte propuesto")
+        await valorizar(
+            api,
+            admin_csrf,
+            esmalte["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="200",
+            transport_cost="0",
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=20,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            requires_glaze=True,
+        )
+        assert linea["glaze_is_reference"] is True
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"quantity": 30},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["glaze_is_reference"] is True
+
+    async def test_la_referencia_se_vuelve_a_elegir_si_aparece_uno_mas_caro(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Pecar por arriba es la regla, y solo se cumple si se reevalua."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla que reevalua")
+        await valorizar(api, admin_csrf, pasta["id"])
+        barato = await crear_producto(api, admin_csrf, "Esmalte barato")
+        await valorizar(
+            api,
+            admin_csrf,
+            barato["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="50",
+            transport_cost="0",
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=20,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            requires_glaze=True,
+        )
+        assert linea["glaze_material_id"] == barato["id"]
+
+        caro = await crear_producto(api, admin_csrf, "Esmalte caro")
+        await valorizar(
+            api,
+            admin_csrf,
+            caro["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="300",
+            transport_cost="0",
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"quantity": 20},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert cuerpo["glaze_material_id"] == caro["id"]
+        assert cuerpo["glaze_is_reference"] is True
+
+    async def test_un_esmalte_elegido_a_mano_no_lo_cambia_el_sistema(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La otra mitad: quien eligio manda, aunque aparezca uno mas caro."""
+        pasta = await crear_producto(api, admin_csrf, "Arcilla con esmalte a mano")
+        await valorizar(api, admin_csrf, pasta["id"])
+        elegido = await crear_producto(api, admin_csrf, "Esmalte elegido a mano")
+        await valorizar(
+            api,
+            admin_csrf,
+            elegido["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="50",
+            transport_cost="0",
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=20,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            requires_glaze=True,
+            glaze_material_id=elegido["id"],
+        )
+        assert linea["glaze_is_reference"] is False
+
+        carisimo = await crear_producto(api, admin_csrf, "Esmalte carisimo")
+        await valorizar(
+            api,
+            admin_csrf,
+            carisimo["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="900",
+            transport_cost="0",
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"quantity": 25},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert cuerpo["glaze_material_id"] == elegido["id"]
+        assert cuerpo["glaze_is_reference"] is False
+
+    async def test_soltar_el_esmalte_devuelve_la_decision_al_sistema(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        pasta = await crear_producto(api, admin_csrf, "Arcilla que suelta")
+        await valorizar(api, admin_csrf, pasta["id"])
+        elegido = await crear_producto(api, admin_csrf, "Esmalte que se suelta")
+        await valorizar(
+            api,
+            admin_csrf,
+            elegido["id"],
+            material_kind="GLAZE",
+            purchase_quantity="1000",
+            purchase_cost="50",
+            transport_cost="0",
+        )
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            quantity=20,
+            body_material_id=pasta["id"],
+            body_unit_weight="500",
+            requires_glaze=True,
+            glaze_material_id=elegido["id"],
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/products/{linea['id']}",
+            json={"glaze_material_id": None},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["glaze_is_reference"] is True

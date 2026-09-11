@@ -33,6 +33,11 @@ class V2MaterialUpsertIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: La version que el formulario leyo. Obligatoria para CAMBIAR una
+    #: valorizacion que ya existe; ausente al crear la primera, que no tiene
+    #: version previa que declarar.
+    expected_version: int | None = Field(default=None, ge=1)
+
     material_kind: V2MaterialKind
     origin: V2MaterialOrigin
     #: En la unidad base del producto, que sale del maestro. No se pide aqui
@@ -73,6 +78,8 @@ class V2MaterialOut(BaseModel):
     effective_cost_per_unit: Decimal
     ml_per_gram: Decimal | None
     notes: str | None
+    #: Se devuelve para que el formulario pueda declararla al guardar.
+    version: int
 
     #: Existencia total. Se muestra para avisar, NO para bloquear: un material
     #: sin stock se puede cotizar igual.
@@ -89,6 +96,10 @@ class V2QuotationProductIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_id: int | None = Field(default=None, ge=1)
+    #: Como se llama la pieza. Se acepta suelto porque un encargo no tiene por
+    #: que existir en el catalogo: sin esto, media cotizacion seria de piezas
+    #: sin nombre. Si viene `product_id`, manda el nombre del maestro.
+    product_name: str | None = Field(default=None, max_length=200)
     quantity: int = Field(default=0, ge=0, le=1_000_000)
 
     body_material_id: int | None = Field(default=None, ge=1)
@@ -139,6 +150,11 @@ class V2QuotationProductOut(BaseModel):
     glaze_total_weight: Decimal
     glaze_volume_ml: Decimal
     glaze_cost: Decimal
+
+    #: Pasta mas esmalte de ESTA linea. Lo suma el backend y no la pantalla:
+    #: sumar dos importes en coma flotante en el navegador produce colas de
+    #: decimales que no cuadran con el total del documento.
+    materials_cost: Decimal
 
     #: Lo que falta o conviene mirar. Avisos, no errores: un borrador a medias
     #: tiene que poder guardarse.

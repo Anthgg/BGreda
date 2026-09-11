@@ -67,6 +67,7 @@ def upgrade() -> None:
         sa.Column("costing_override_per_unit", sa.Numeric(24, 12), nullable=True),
         sa.Column("ml_per_gram", sa.Numeric(24, 12), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
+        sa.Column("version", sa.Integer(), nullable=False, server_default=sa.text("1")),
         sa.Column(
             "effective_cost_per_unit",
             sa.Numeric(24, 12),
@@ -87,6 +88,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["product_id"], ["products.id"], ondelete="RESTRICT"),
         sa.UniqueConstraint("product_id", name="uq_v2_material_costs_product_id"),
+        sa.CheckConstraint("version > 0", name="version_positive"),
         sa.CheckConstraint("purchase_quantity > 0", name="purchase_quantity_positive"),
         sa.CheckConstraint("purchase_cost >= 0", name="purchase_cost_non_negative"),
         sa.CheckConstraint("transport_cost >= 0", name="transport_cost_non_negative"),

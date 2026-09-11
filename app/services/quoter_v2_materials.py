@@ -95,6 +95,22 @@ class V2MaterialMathRejected(APIError):
     message = "Los datos del material no permiten calcular un costo"
 
 
+class V2MaterialVersionConflictError(APIError):
+    """Alguien mas guardo esta valorizacion mientras estaba abierta en pantalla."""
+
+    status_code = 409
+    code = "V2_MATERIAL_VERSION_CONFLICT"
+    message = "La valorizacion cambio desde que se abrio. Vuelva a cargarla y repita el cambio"
+
+
+class V2MaterialKindMismatchError(APIError):
+    """Una pasta no puede cobrarse como esmalte, ni al reves."""
+
+    status_code = 422
+    code = "V2_MATERIAL_KIND_MISMATCH"
+    message = "El material no esta valorizado para ese uso"
+
+
 class V2QuotationNotEditableError(APIError):
     """Una cotizacion que ya no es borrador no cambia de material."""
 
@@ -141,7 +157,12 @@ class V2MaterialService:
         return Decimal(total or 0)
 
     async def upsert_material(
-        self, product_id: int, data: dict[str, Any], *, user: AuthenticatedUser
+        self,
+        product_id: int,
+        data: dict[str, Any],
+        *,
+        expected_version: int | None = None,
+        user: AuthenticatedUser,
     ) -> V2MaterialCost:
         """Da de alta o actualiza la valorizacion de un material.
 
@@ -156,9 +177,19 @@ class V2MaterialService:
         if product.base_uom_code is None:
             raise V2MaterialUomMissingError()
 
+        # `with_for_update`: comprobar la version leyendo sin bloquear no basta.
+        # Dos administradores que abran la pantalla a la vez leerian version 1
+        # los dos, los dos pasarian la comprobacion y el ultimo en confirmar
+        # pisaria al primero sin que nadie viera un conflicto.
         fila = (
             await self._session.scalars(
-                select(V2MaterialCost).where(V2MaterialCost.product_id == product_id)
+                select(V2MaterialCost)
+                .where(V2MaterialCost.product_id == product_id)
+                # `of=`: la relacion con el producto se carga con un LEFT JOIN,
+                # y PostgreSQL no deja bloquear el lado anulable de un join.
+                # Se bloquea la fila que se va a escribir, que es la unica que
+                # hace falta: el maestro no se toca aqui.
+                .with_for_update(of=V2MaterialCost)
             )
         ).one_or_none()
 
@@ -167,6 +198,13 @@ class V2MaterialService:
             fila = V2MaterialCost(product_id=product_id)
             self._session.add(fila)
             accion = AuditAction.CREATE
+        else:
+            # La primera valorizacion no tiene version que declarar; cambiar
+            # una que ya existe, si. Omitirla seria exactamente el caso que
+            # este control existe para impedir.
+            if expected_version is None or fila.version != expected_version:
+                raise V2MaterialVersionConflictError()
+            fila.version += 1
 
         for campo in (
             "material_kind",
@@ -226,6 +264,54 @@ class V2MaterialService:
         if fila is None:
             raise V2MaterialNotFoundError()
         return fila
+
+    def _product_is_usable(self, product: Product) -> bool:
+        """Si el producto sigue pudiendo ser material HOY.
+
+        Se comprueba al usarlo y no solo al valorizarlo porque el maestro es
+        editable: un producto valorizado como materia prima puede acabar
+        convertido en servicio, quedarse sin unidad base o darse de baja, y la
+        valorizacion seguiria ahi, intacta y ya sin sentido.
+        """
+        return (
+            product.active
+            and product.product_type in ALLOWED_TYPES
+            and product.base_uom_code is not None
+        )
+
+    async def _material_for(
+        self, product_id: int, kind: V2MaterialKind, *, elegido_ahora: bool
+    ) -> tuple[V2MaterialCost, list[str]]:
+        """La valorizacion de un material, comprobando que sirve para ESE uso.
+
+        La dureza depende de quien pregunta, y la diferencia importa:
+
+        - si la peticion ESTA eligiendo el material, se rechaza. Elegir hoy una
+          pasta que ya no es pasta es un error que hay que decir en la cara;
+        - si el material ya estaba puesto en la linea y esta peticion solo
+          cambia la cantidad, se AVISA. Bloquear ahi dejaria un borrador
+          encallado por una decision que se tomo en otra pantalla, y la linea
+          conserva igualmente lo que congelo.
+        """
+        material = await self.get_material(product_id)
+        if material.material_kind is kind and self._product_is_usable(material.product):
+            return material, []
+        if elegido_ahora:
+            if material.material_kind is not kind:
+                raise V2MaterialKindMismatchError(
+                    f"«{material.product.name}» esta valorizado como"
+                    f" {material.material_kind.value}, no como {kind.value}"
+                )
+            raise V2MaterialProductInvalidError(
+                f"«{material.product.name}» ya no puede usarse como material:"
+                " esta inactivo, cambio de tipo o se quedo sin unidad base"
+            )
+        aviso = (
+            "V2_BODY_MATERIAL_UNAVAILABLE"
+            if kind is V2MaterialKind.BODY
+            else "V2_GLAZE_MATERIAL_UNAVAILABLE"
+        )
+        return material, [aviso]
 
     # ------------------------------------------------------------------
     # Eleccion del esmalte de referencia
@@ -401,10 +487,37 @@ class V2MaterialService:
                     linea.body_unit_weight = producto.grammage
             else:
                 linea.product_name_snapshot = None
+
+        # Un nombre suelto, para la pieza que no esta en el catalogo: la mitad
+        # del trabajo del taller son encargos que no existen como producto y
+        # que aun asi hay que poder nombrar en la cotizacion. Solo se usa si la
+        # linea no cuelga de un producto; si cuelga, manda el maestro y tener
+        # dos nombres seria tener dos verdades.
+        if "product_name" in data and linea.product_id is None:
+            nombre = (data["product_name"] or "").strip()
+            linea.product_name_snapshot = nombre or None
         return await self.apply_materials(linea, data)
 
     async def _draft(self, quotation_id: int) -> V2Quotation:
-        quotation = await self._session.get(V2Quotation, quotation_id)
+        """La cotizacion, bloqueada, si todavia admite cambios de material.
+
+        `with_for_update` sobre la CABECERA hace dos trabajos a la vez:
+
+        - convierte «esta en borrador» en una barrera de verdad. Leerlo sin
+          bloquear deja una ventana entre la comprobacion y el guardado por la
+          que una emision simultanea colaria material en una cotizacion ya
+          comprometida;
+        - serializa las escrituras de lineas de una misma cotizacion, que es
+          lo que necesita `add_line` para que dos altas a la vez no repitan el
+          mismo `sort_order`, y lo que hace que dos ediciones parciales de la
+          misma linea se apliquen una detras de otra en vez de recalcular las
+          dos sobre el mismo estado viejo.
+        """
+        quotation = (
+            await self._session.scalars(
+                select(V2Quotation).where(V2Quotation.id == quotation_id).with_for_update()
+            )
+        ).one_or_none()
         if quotation is None:
             raise V2MaterialNotFoundError("La cotizacion V2 no existe")
         if quotation.status is not V2QuotationStatus.DRAFT:
@@ -444,6 +557,40 @@ class V2MaterialService:
             raise V2MaterialMathRejected(str(error)) from error
         return avisos
 
+    @staticmethod
+    def _costo_congelado(
+        data: dict[str, Any],
+        campo: str,
+        *,
+        derivado: Decimal,
+        era_override: bool,
+        actual: Decimal | None,
+        cambio_de_material: bool,
+    ) -> tuple[Decimal, bool]:
+        """Que costo por unidad se congela, y si es una decision de la casa.
+
+        El caso que esto existe para evitar no lanza ningun error: la pantalla
+        manda solo lo que cambio —`{"quantity": 10}`—, y leer el override con
+        `data.get(...)` devolveria `None`, que es indistinguible de «quitalo».
+        Un precio pactado con el cliente volveria al del maestro en silencio,
+        al cambiar la cantidad.
+
+        Tres situaciones y tres respuestas:
+
+        - el override VIENE en la peticion: manda, sea un valor o un `None`
+          explicito que lo retira;
+        - no viene, pero la linea CAMBIA de material: la decision se tomo sobre
+          otro material y no se hereda;
+        - no viene y el material es el mismo: se conserva lo pactado, que es lo
+          que la linea ya tenia congelado.
+        """
+        if campo in data:
+            override = data[campo]
+            return effective_cost_per_unit(derivado, override), override is not None
+        if era_override and not cambio_de_material and actual is not None:
+            return actual, True
+        return derivado, False
+
     async def _apply_body(self, line: V2QuotationProduct, data: dict[str, Any]) -> list[str]:
         if "body_material_id" in data:
             line.body_material_id = data["body_material_id"]
@@ -459,15 +606,23 @@ class V2MaterialService:
             line.body_cost = ZERO
             return []
 
-        material = await self.get_material(line.body_material_id)
-        override = data.get("body_cost_per_unit_override")
-
+        material, avisos = await self._material_for(
+            line.body_material_id,
+            V2MaterialKind.BODY,
+            elegido_ahora=data.get("body_material_id") is not None,
+        )
         line.body_material_name_snapshot = material.product.name
         line.body_uom_snapshot = material.product.base_uom_code
-        line.body_cost_is_override = override is not None
-        line.body_cost_per_unit_snapshot = effective_cost_per_unit(
-            material.effective_cost_per_unit, override
+        costo, es_override = self._costo_congelado(
+            data,
+            "body_cost_per_unit_override",
+            derivado=material.effective_cost_per_unit,
+            actual=line.body_cost_per_unit_snapshot,
+            era_override=line.body_cost_is_override,
+            cambio_de_material="body_material_id" in data,
         )
+        line.body_cost_is_override = es_override
+        line.body_cost_per_unit_snapshot = costo
         line.body_total_weight = body_total_weight(line.body_unit_weight or ZERO, line.quantity)
         line.body_cost = material_cost(line.body_total_weight, line.body_cost_per_unit_snapshot)
 
@@ -475,14 +630,17 @@ class V2MaterialService:
         # Es un estado legitimo de un borrador a medio llenar, asi que avisa en
         # vez de bloquear: lo que no puede es pasar desapercibido.
         if line.body_unit_weight is None or line.body_unit_weight <= ZERO:
-            return ["V2_BODY_WEIGHT_REQUIRED"]
-        return []
+            return [*avisos, "V2_BODY_WEIGHT_REQUIRED"]
+        return avisos
 
     async def _apply_glaze(self, line: V2QuotationProduct, data: dict[str, Any]) -> list[str]:
         if "requires_glaze" in data:
             line.requires_glaze = bool(data["requires_glaze"])
         if "glaze_material_id" in data:
+            # Nombrarlo es decidir; mandarlo a nulo es devolver la decision al
+            # sistema, que volvera a proponer el activo mas caro por gramo.
             line.glaze_material_id = data["glaze_material_id"]
+            line.glaze_is_reference = False
 
         if not line.requires_glaze:
             # Apagado es apagado: sin peso, sin volumen y sin costo. El CHECK
@@ -502,14 +660,25 @@ class V2MaterialService:
 
         avisos: list[str] = []
         material: V2MaterialCost | None = None
-        if line.glaze_material_id is not None:
-            material = await self.get_material(line.glaze_material_id)
-            line.glaze_is_reference = False
+
+        # Quien eligio el esmalte se guarda en `glaze_is_reference`, y hay que
+        # mirarlo: la seleccion automatica DEJA el id puesto en la linea, asi
+        # que fiarse solo del id convertiria la referencia en eleccion manual
+        # en cuanto alguien cambiara la cantidad. La linea dejaria de avisar de
+        # que es una referencia, y ademas se quedaria clavada en ese esmalte
+        # aunque despues se valorizara otro mas caro.
+        elegido = line.glaze_material_id
+        if elegido is not None and not line.glaze_is_reference:
+            material, propios = await self._material_for(
+                elegido,
+                V2MaterialKind.GLAZE,
+                elegido_ahora="glaze_material_id" in data,
+            )
+            avisos += propios
         else:
             material = await self.most_expensive_glaze()
             line.glaze_is_reference = material is not None
-            if material is not None:
-                line.glaze_material_id = material.product_id
+            line.glaze_material_id = material.product_id if material is not None else None
 
         if material is None:
             # Sin ningun esmalte valorizado y activo no hay con que costear.
@@ -522,12 +691,17 @@ class V2MaterialService:
             line.glaze_cost = ZERO
             return ["V2_GLAZE_NO_ACTIVE_MATERIAL"]
 
-        override = data.get("glaze_cost_per_unit_override")
         line.glaze_material_name_snapshot = material.product.name
-        line.glaze_cost_is_override = override is not None
-        line.glaze_cost_per_unit_snapshot = effective_cost_per_unit(
-            material.effective_cost_per_unit, override
+        costo, es_override = self._costo_congelado(
+            data,
+            "glaze_cost_per_unit_override",
+            derivado=material.effective_cost_per_unit,
+            actual=line.glaze_cost_per_unit_snapshot,
+            era_override=line.glaze_cost_is_override,
+            cambio_de_material="glaze_material_id" in data,
         )
+        line.glaze_cost_is_override = es_override
+        line.glaze_cost_per_unit_snapshot = costo
         # Se congela como porcentaje —15, no 0,15— igual que el resto de
         # porcentajes del proyecto.
         line.glaze_percent_snapshot = GLAZE_WEIGHT_RATIO * Decimal(100)

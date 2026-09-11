@@ -53,6 +53,7 @@ def _material_out(fila: V2MaterialCost, stock: Decimal) -> V2MaterialOut:
         effective_cost_per_unit=fila.effective_cost_per_unit,
         ml_per_gram=fila.ml_per_gram,
         notes=fila.notes,
+        version=fila.version,
         stock=stock,
     )
 
@@ -84,6 +85,7 @@ def _line_out(fila: V2QuotationProduct, warnings: list[str]) -> V2QuotationProdu
         glaze_total_weight=fila.glaze_total_weight,
         glaze_volume_ml=fila.glaze_volume_ml,
         glaze_cost=fila.glaze_cost,
+        materials_cost=fila.body_cost + fila.glaze_cost,
         warnings=warnings,
     )
 
@@ -117,7 +119,10 @@ async def upsert_v2_material(
     session: DbSessionDep,
 ) -> V2MaterialOut:
     """Valoriza un material. Cambia lo que se cotice DESPUES, nunca lo ya emitido."""
-    fila = await service.upsert_material(product_id, payload.model_dump(), user=admin)
+    datos = payload.model_dump(exclude={"expected_version"})
+    fila = await service.upsert_material(
+        product_id, datos, expected_version=payload.expected_version, user=admin
+    )
     stock = await service.stock_for(product_id)
     resultado = _material_out(fila, stock)
     await session.commit()

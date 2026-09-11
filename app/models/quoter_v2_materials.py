@@ -48,6 +48,7 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -128,6 +129,14 @@ class V2MaterialCost(Base, TimestampMixin):
 
     notes: Mapped[str | None] = mapped_column(Text)
 
+    #: Concurrencia optimista, igual que la configuracion comercial de 010B.
+    #:
+    #: Valorizar es un formulario que se manda ENTERO: quien guarda reescribe
+    #: los siete campos con lo que tenia en pantalla. Sin version, dos
+    #: administradores con la pantalla abierta a la vez se pisan en silencio y
+    #: el costo corregido desaparece sin conflicto ni rastro.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+
     # ---- Lo que se deriva -----------------------------------------------
     #: Costo por unidad base con el que se cotiza.
     #:
@@ -151,6 +160,7 @@ class V2MaterialCost(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("product_id", name="uq_v2_material_costs_product_id"),
+        CheckConstraint("version > 0", name="version_positive"),
         CheckConstraint("purchase_quantity > 0", name="purchase_quantity_positive"),
         CheckConstraint("purchase_cost >= 0", name="purchase_cost_non_negative"),
         CheckConstraint("transport_cost >= 0", name="transport_cost_non_negative"),
