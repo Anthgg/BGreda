@@ -29,6 +29,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.precision import calculation_numeric, percentage_numeric, quantity_numeric
+from app.core.pricing_engine import PRICING_ENGINE_VERSION_LENGTH, PricingEngineVersion
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
 from app.models.settings import MAX_VALIDITY_DAYS
@@ -213,6 +214,21 @@ class Quotation(Base, TimestampMixin):
         default=QuotationWorkflow.LEGACY,
         server_default=text("'LEGACY'"),
         index=True,
+    )
+    #: Fase 010A. Motor de calculo. Esta tabla es el motor LEGACY entero y el
+    #: CHECK de abajo no admite otro valor, asi que la columna nunca varia.
+    #:
+    #: Que sea constante no la hace redundante: es lo que permite responder
+    #: «con que se calculo esto» leyendo la fila, sin saber en que tabla vive
+    #: ni de que ano es. Y no debe confundirse con `workflow`, que tambien usa
+    #: la palabra LEGACY para decir algo distinto —si la cotizacion se creo con
+    #: el formulario plano o con el Cotizador multiproducto—: ambos flujos son
+    #: LEGACY para este motor.
+    pricing_engine_version: Mapped[PricingEngineVersion] = mapped_column(
+        StrEnumType(PricingEngineVersion, PRICING_ENGINE_VERSION_LENGTH),
+        nullable=False,
+        default=PricingEngineVersion.LEGACY,
+        server_default=text("'LEGACY'"),
     )
     customer_id: Mapped[int | None] = mapped_column(
         ForeignKey("partners.id", ondelete="RESTRICT"), index=True
@@ -529,6 +545,14 @@ class Quotation(Base, TimestampMixin):
             " OR (payment_status IS NOT NULL AND payment_status = 'PAID'"
             " AND paid_at IS NOT NULL)",
             name="payment_coherence",
+        ),
+        # Fase 010A: esta tabla es el motor Legacy y solo el motor Legacy. Sin
+        # este CHECK, un INSERT a mano —o un servicio futuro escrito con prisa—
+        # podria declarar V2 una fila que se calculo con las formulas viejas, y
+        # a partir de ahi ningun informe volveria a cuadrar.
+        CheckConstraint(
+            f"pricing_engine_version = '{PricingEngineVersion.LEGACY}'",
+            name="engine_is_legacy",
         ),
         Index("ix_quotations_created_at", "created_at"),
     )

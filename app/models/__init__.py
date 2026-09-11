@@ -78,6 +78,11 @@ from app.models.quotations import (
     Technique,
     TechniqueFormulaType,
 )
+from app.models.quoter_v2 import (
+    V2ProductionType,
+    V2Quotation,
+    V2QuotationStatus,
+)
 from app.models.recipes import (
     Recipe,
     RecipeComponentType,
@@ -175,4 +180,7 @@ __all__ = [
     "UnitOfMeasure",
     "UomDimension",
     "UserRole",
+    "V2ProductionType",
+    "V2Quotation",
+    "V2QuotationStatus",
 ]

@@ -16,6 +16,7 @@ from app.api.v1 import (
     prototypes,
     quotation_builder,
     quotations,
+    quoter_v2,
     recipes,
     settings,
     tracking,
@@ -32,6 +33,10 @@ api_v1_router.include_router(recipes.router)
 api_v1_router.include_router(firings.router)
 api_v1_router.include_router(quotations.router)
 api_v1_router.include_router(quotation_builder.router)
+#: Fase 010A. Cotizador V2: motor nuevo, ruta propia. `/quotations-v2` no
+#: comparte ni un segmento con `/quotations`, asi que ninguna peticion V2
+#: puede terminar resuelta por un handler Legacy ni al reves.
+api_v1_router.include_router(quoter_v2.router)
 api_v1_router.include_router(production.router)
 #: Superficie PUBLICA de seguimiento (Fase 009I.1). Va aparte de
 #: `production.router` a proposito: no comparte esquemas, no exige sesion y
