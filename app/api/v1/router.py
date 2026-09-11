@@ -17,6 +17,7 @@ from app.api.v1 import (
     quotation_builder,
     quotations,
     quoter_v2,
+    quoter_v2_settings,
     recipes,
     settings,
     tracking,
@@ -37,6 +38,10 @@ api_v1_router.include_router(quotation_builder.router)
 #: comparte ni un segmento con `/quotations`, asi que ninguna peticion V2
 #: puede terminar resuelta por un handler Legacy ni al reves.
 api_v1_router.include_router(quoter_v2.router)
+#: Fase 010B. Configuracion comercial de V2. Ruta aparte de `/settings`:
+#: son dos configuraciones distintas y el IGV se sigue editando en la de
+#: la empresa, que es su unica fuente.
+api_v1_router.include_router(quoter_v2_settings.router)
 api_v1_router.include_router(production.router)
 #: Superficie PUBLICA de seguimiento (Fase 009I.1). Va aparte de
 #: `production.router` a proposito: no comparte esquemas, no exige sesion y

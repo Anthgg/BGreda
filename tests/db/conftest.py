@@ -198,7 +198,7 @@ async def reset_database(
                 "production_order_lines, production_orders, "
                 "quotation_product_price_updates, quotation_other_costs, "
                 "quotation_additionals, quotation_techniques, quotations, "
-                "v2_quotations, "
+                "v2_quotations, v2_kiln_rates, v2_commercial_settings, "
                 "other_costs, additionals, techniques, "
                 "document_sequences, commercial_settings, company_settings, profiles, "
                 "recipe_lines, recipe_versions, recipes, "
@@ -217,6 +217,12 @@ async def reset_database(
         )
         await session.execute(
             text("INSERT INTO commercial_settings (id) VALUES (:id)"), {"id": SINGLETON_ID}
+        )
+        # Fase 010B: la fila unica de configuracion del Cotizador V2. La 0029
+        # la siembra en produccion; aqui hay que repetirla porque la base de
+        # test se crea desde los modelos y ninguna migracion llega a correr.
+        await session.execute(
+            text("INSERT INTO v2_commercial_settings (id) VALUES (:id)"), {"id": SINGLETON_ID}
         )
         for sequence_type, prefix, pattern, padding, reset_policy in (
             ("QUOTE", "CTZ", DEFAULT_PATTERN, 6, "YEARLY"),
