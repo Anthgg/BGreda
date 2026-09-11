@@ -46,6 +46,11 @@ V2_MODULES = (
     "app/api/v1/quoter_v2.py",
     "app/api/v1/quoter_v2_settings.py",
     "app/core/quoter_v2_config.py",
+    "app/models/quoter_v2_materials.py",
+    "app/schemas/quoter_v2_materials.py",
+    "app/services/quoter_v2_materials.py",
+    "app/api/v1/quoter_v2_materials.py",
+    "app/core/quoter_v2_materials.py",
 )
 
 #: Modulos del motor historico. Que V2 importe cualquiera de estos significa

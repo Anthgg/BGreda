@@ -82,7 +82,13 @@ from app.models.quoter_v2 import (
     V2CustomerKind,
     V2ProductionType,
     V2Quotation,
+    V2QuotationProduct,
     V2QuotationStatus,
+)
+from app.models.quoter_v2_materials import (
+    V2MaterialCost,
+    V2MaterialKind,
+    V2MaterialOrigin,
 )
 from app.models.quoter_v2_settings import (
     V2CommercialSettings,
@@ -188,7 +194,11 @@ __all__ = [
     "V2CommercialSettings",
     "V2CustomerKind",
     "V2KilnRate",
+    "V2MaterialCost",
+    "V2MaterialKind",
+    "V2MaterialOrigin",
     "V2ProductionType",
     "V2Quotation",
+    "V2QuotationProduct",
     "V2QuotationStatus",
 ]

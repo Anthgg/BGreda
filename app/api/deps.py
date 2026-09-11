@@ -47,6 +47,7 @@ from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
+from app.services.quoter_v2_materials import V2MaterialService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
@@ -372,6 +373,22 @@ async def get_v2_settings_service(
 
 
 V2SettingsServiceDep = Annotated[V2SettingsService, Depends(get_v2_settings_service)]
+
+
+async def get_v2_material_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2MaterialService:
+    """Materiales de V2.
+
+    No recibe `InventoryService`: cotizar no mueve existencia, y no tener a
+    mano el unico camino de escritura del almacen hace que no pueda hacerlo
+    ni por descuido.
+    """
+    return V2MaterialService(session, audit)
+
+
+V2MaterialServiceDep = Annotated[V2MaterialService, Depends(get_v2_material_service)]
 
 
 async def get_v2_quotation_service(
