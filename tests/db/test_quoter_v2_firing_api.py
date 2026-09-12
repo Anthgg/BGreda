@@ -281,6 +281,7 @@ class TestHornadas:
         assert estado["firing_count"] == 0
         assert Decimal(estado["commercial_total"]) == Decimal(0)
         assert Decimal(estado["gas_total"]) == Decimal(0)
+        assert "V2_FIRING_NO_VOLUME" in estado["warnings"]
 
     async def test_una_linea_sin_medidas_no_ocupa_y_avisa(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -665,6 +666,46 @@ class TestRecomendaciones:
         assert "V2_FIRING_RATES_MISSING" in estado["warnings"]
         assert Decimal(estado["commercial_total"]) == Decimal(0)
         assert next(h for h in estado["kilns"] if h["kiln_id"] == horno["id"])["has_rates"] is False
+
+    async def test_un_horno_a_medias_depende_de_lo_que_pida_la_cotizacion(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Con SOLO la baja configurada, el mismo horno sirve o no segun el caso.
+
+        Sirve para una cotizacion que solo hace baja; no sirve para una que
+        ademas hace alta, porque la mitad del costeo saldria en cero. Un unico
+        «tiene tarifas» lo habria ofrecido igual en los dos casos.
+        """
+        respuesta = await api.post(
+            KILNS,
+            json={"name": "Solo con baja", "capacity_volume_cm3": str(CHICO)},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert respuesta.status_code == 201, respuesta.text
+        horno = dict(respuesta.json())
+        tarifa = await api.put(
+            f"{SETTINGS}/kiln-rates/{horno['id']}/LOW",
+            json={"gas_cost": "35", "external_rate": "200", "student_rate": "90"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert tarifa.status_code == 200, tarifa.text
+
+        async def marca(quotation_id: int) -> bool:
+            fila = next(
+                h for h in (await quema(api, quotation_id))["kilns"] if h["kiln_id"] == horno["id"]
+            )
+            return bool(fila["has_rates"])
+
+        con_alta = await crear_cotizacion(api, admin_csrf)
+        await poner_quema(api, admin_csrf, con_alta, kiln_id=horno["id"])
+        await con_ocupacion(api, admin_csrf, con_alta, CHICO, "50")
+
+        solo_baja = await crear_cotizacion(api, admin_csrf)
+        await poner_quema(api, admin_csrf, solo_baja, kiln_id=horno["id"], high_fire_enabled=False)
+        await con_ocupacion(api, admin_csrf, solo_baja, CHICO, "50")
+
+        assert await marca(con_alta) is False
+        assert await marca(solo_baja) is True
 
 
 # ---------------------------------------------------------------------------

@@ -135,6 +135,10 @@ class KilnOption:
     active: bool
     occupancy_percent: Decimal
     firing_count: int
+    #: Si tiene configuradas las tarifas que ESTA cotizacion necesita. Un horno
+    #: con solo la baja puesta sirve para una cotizacion que solo hace baja y
+    #: no sirve para una que ademas hace alta: decirlo con un unico «tiene
+    #: tarifas» ofreceria como elegible un horno que costearia a medias.
     has_rates: bool
 
 
@@ -460,14 +464,22 @@ class V2FiringService:
         if not hornos:
             return []
 
-        con_tarifa = {
-            fila.kiln_id
-            for fila in (
-                await self._session.scalars(
-                    select(V2KilnRate).where(V2KilnRate.kiln_id.in_([horno.id for horno in hornos]))
-                )
-            ).all()
-        }
+        # Que tipos de quema hay que poder costear en ESTA cotizacion. Si no
+        # hay ninguna encendida —un estado legitimo, que ya avisa por su
+        # cuenta— basta con tener alguna tarifa para no marcarlo todo en rojo.
+        necesarios: set[FiringType] = set()
+        if quotation.low_fire_enabled:
+            necesarios.add(FiringType.LOW)
+        if quotation.high_fire_enabled:
+            necesarios.add(FiringType.HIGH)
+
+        tarifas_por_horno: dict[int, set[FiringType]] = {}
+        for fila in (
+            await self._session.scalars(
+                select(V2KilnRate).where(V2KilnRate.kiln_id.in_([horno.id for horno in hornos]))
+            )
+        ).all():
+            tarifas_por_horno.setdefault(fila.kiln_id, set()).add(fila.firing_type)
         # `or ZERO`: el valor por defecto de la columna lo pone la base, asi
         # que una cotizacion recien creada y todavia no releida lo tiene en
         # NULL en memoria. Compararlo o dividirlo ahi seria un 500.
@@ -491,7 +503,11 @@ class V2FiringService:
                     active=horno.active,
                     occupancy_percent=occupancy_percent(volumen, capacidad),
                     firing_count=firing_count(volumen, capacidad),
-                    has_rates=horno.id in con_tarifa,
+                    has_rates=(
+                        necesarios <= tarifas_por_horno.get(horno.id, set())
+                        if necesarios
+                        else bool(tarifas_por_horno.get(horno.id))
+                    ),
                 )
             )
         return opciones

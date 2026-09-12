@@ -126,6 +126,20 @@ def test_un_centimetro_cubico_de_mas_ya_obliga_a_la_segunda() -> None:
     assert firing_count(Decimal("100.000001"), CAPACIDAD) == 2
 
 
+@pytest.mark.parametrize(
+    ("porcentaje", "hornadas"),
+    [("0.0001", 1), ("199.9999", 2), ("200.0001", 3)],
+)
+def test_los_bordes_finos_de_cada_hornada(porcentaje: str, hornadas: int) -> None:
+    """Los tres que caen justo al lado de un cambio de hornada.
+
+    Una milesima de ocupacion ya obliga a encender una vez; una diezmilesima
+    por debajo de 200 todavia cabe en dos; una por encima ya pide la tercera.
+    Con `float` estos tres son exactamente los que fallan.
+    """
+    assert firing_count(volumen_para(porcentaje), CAPACIDAD) == hornadas
+
+
 def test_una_millonesima_por_debajo_sigue_siendo_una_sola() -> None:
     assert firing_count(Decimal("99.999999"), CAPACIDAD) == 1
 
