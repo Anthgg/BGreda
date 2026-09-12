@@ -172,11 +172,7 @@ def downgrade() -> None:
         or 0
     )
     lineas_con_precio = (
-        conexion.scalar(
-            sa.text(
-                "SELECT count(*) FROM v2_quotation_products WHERE unit_price <> 0"
-            )
-        )
+        conexion.scalar(sa.text("SELECT count(*) FROM v2_quotation_products WHERE unit_price <> 0"))
         or 0
     )
     if con_precio or lineas_con_precio:

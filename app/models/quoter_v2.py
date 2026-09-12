@@ -348,8 +348,13 @@ class V2Quotation(Base, TimestampMixin):
     space_cost: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
-    #: Materiales + mano de obra + ilustracion. Lo que cuesta cada producto por
-    #: si mismo, antes de repartir nada.
+    #: Materiales mas la mano de obra ASIGNADA a un producto: lo que cuesta cada
+    #: pieza por si misma, antes de repartir nada.
+    #:
+    #: La ilustracion NO entra aqui. Es una sola por cotizacion —regla de
+    #: 010D— y por tanto un costo general, que se reparte junto con la
+    #: administracion. Tampoco entra el personal que apoya al pedido entero sin
+    #: producto asignado, por el mismo motivo.
     direct_cost_total: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )

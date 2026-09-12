@@ -185,6 +185,28 @@ async def _labor_by_line(
     return costos, horas, total
 
 
+def _pesos(preferidos: list[Decimal], cantidades: list[Decimal]) -> list[Decimal]:
+    """La base con la que repartir un costo general, con sus dos reservas.
+
+    Se prefiere la base propia —horas para el espacio, costo directo para lo
+    general—. Si no existe, la cantidad de piezas. Y si tampoco hay piezas, a
+    PARTES IGUALES.
+
+    La tercera reserva no es un detalle: sin ella, una cotizacion cuyas lineas
+    estan todas a cantidad cero —un borrador recien empezado con los dias ya
+    decididos— dejaba el espacio y la administracion en la cabecera sin llegar
+    a ninguna linea, y la suma de lo repartido dejaba de ser el total. El
+    importe es real y es de la cotizacion: sin una base que prefiera a una
+    linea sobre otra, repartirlo por igual es lo menos arbitrario que se puede
+    hacer, y lo unico que conserva la integridad.
+    """
+    if sum(preferidos, ZERO) > ZERO:
+        return preferidos
+    if sum(cantidades, ZERO) > ZERO:
+        return cantidades
+    return [Decimal(1) for _ in preferidos]
+
+
 def _reset_pricing(quotation: V2Quotation, lines: list[V2QuotationProduct]) -> None:
     """Deja el precio en cero. Sin factor no hay precio que valga."""
     for campo in (
@@ -276,16 +298,11 @@ async def _recalculate(
     quotation.real_cost_total = directo_total + gas_real + espacio + general_total
 
     # ---- 2. Repartir lo general entre las lineas ----------------------
-    # El espacio por HORAS y lo general por COSTO DIRECTO. Cuando esa base no
-    # existe se usa la cantidad de piezas: repartir mal es mejor que perder el
-    # importe, y es lo que hace el modelo aprobado.
+    # El espacio por HORAS y lo general por COSTO DIRECTO, con las bases de
+    # reserva que hacen falta para que NUNCA se pierda un importe.
     cantidades = [Decimal(linea.quantity) for linea in lineas]
-    pesos_horas = [horas_mo.get(linea.id, ZERO) for linea in lineas]
-    if sum(pesos_horas, ZERO) <= ZERO:
-        pesos_horas = cantidades
-    pesos_directo = [linea.direct_cost for linea in lineas]
-    if sum(pesos_directo, ZERO) <= ZERO:
-        pesos_directo = cantidades
+    pesos_horas = _pesos([horas_mo.get(linea.id, ZERO) for linea in lineas], cantidades)
+    pesos_directo = _pesos([linea.direct_cost for linea in lineas], cantidades)
 
     espacios = allocate_by_weight(espacio, pesos_horas)
     generales = allocate_by_weight(general_total, pesos_directo)
@@ -417,8 +434,19 @@ class V2PricingService:
         """
         quotation = await self._draft(quotation_id)
 
-        if "commercial_factor" in data and data["commercial_factor"] is not None:
-            self._apply_factor(quotation, data["commercial_factor"])
+        if "commercial_factor" in data:
+            factor = data["commercial_factor"]
+            if factor is None:
+                # En el resto de la familia un nulo explicito RETIRA un acuerdo.
+                # Aqui no hay nada que retirar: sin factor no hay precio, y una
+                # cotizacion no puede quedarse sin el. Se dice en vez de
+                # ignorarlo en silencio, que dejaria al usuario creyendo que
+                # cambio algo.
+                raise V2PricingInputInvalid(
+                    "El factor comercial no puede retirarse: sin el no hay precio",
+                    code="V2_PRICING_FACTOR_REQUIRED",
+                )
+            self._apply_factor(quotation, factor)
 
         estado = await self.pricing_state(quotation_id)
         await self._session.flush()

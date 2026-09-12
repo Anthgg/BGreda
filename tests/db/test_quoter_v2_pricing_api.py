@@ -345,6 +345,30 @@ class TestFactor:
 
         assert respuesta.status_code == 422
 
+    async def test_un_nulo_explicito_no_retira_el_factor_en_silencio(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """En el resto de la familia un nulo RETIRA un acuerdo; aqui no hay nada
+        que retirar: sin factor no hay precio. Se dice en vez de ignorarlo.
+        """
+        cotizacion, _ = await escenario(api, admin_csrf)
+        respuesta = await poner_precio(api, admin_csrf, cotizacion, commercial_factor=None)
+
+        assert respuesta.status_code == 422
+        assert respuesta.json()["error"]["code"] == "V2_PRICING_FACTOR_REQUIRED"
+        # Y el factor que ya tenia sigue ahi.
+        assert Decimal((await precio(api, cotizacion))["commercial_factor"]) == Decimal(3)
+
+    async def test_un_cuerpo_vacio_solo_recalcula(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Sin campos no se cambia nada: se devuelve el estado, recalculado."""
+        cotizacion, _ = await escenario(api, admin_csrf)
+        respuesta = await poner_precio(api, admin_csrf, cotizacion)
+
+        assert respuesta.status_code == 200, respuesta.text
+        assert Decimal(respuesta.json()["commercial_factor"]) == Decimal(3)
+
     async def test_el_factor_es_uno_por_cotizacion_y_no_por_producto(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
@@ -448,6 +472,52 @@ class TestReparto:
         assert generales == Decimal(datos["administration_cost"])
         assert espacios == Decimal(datos["space_cost"])
         assert quemas == Decimal(datos["firing_commercial_cost"])
+
+    async def test_una_linea_sin_piezas_tampoco_pierde_los_generales(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El caso que rompia la integridad del reparto.
+
+        Con la unica linea a cantidad cero no hay horas, ni costo directo, ni
+        piezas: ninguna de las dos bases habituales sirve. El espacio y la
+        administracion son reales y son de la cotizacion, asi que tienen que
+        llegar igualmente a la linea. Antes se quedaban en la cabecera y la
+        suma de lo repartido dejaba de ser el total.
+        """
+        cotizacion, _ = await escenario(api, admin_csrf, piezas=0)
+
+        datos = await precio(api, cotizacion)
+        repartido = sum(Decimal(linea["production_cost"]) for linea in datos["lines"])
+        real = sum(Decimal(linea["real_cost"]) for linea in datos["lines"])
+
+        assert Decimal(datos["production_cost"]) > 0
+        assert repartido == Decimal(datos["production_cost"])
+        assert real == Decimal(datos["real_cost"])
+
+    async def test_varias_lineas_sin_piezas_reparten_a_partes_iguales(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Sin ninguna base que prefiera una linea, se reparte por igual."""
+        await configurar_igv(api, admin_csrf)
+        horno = await crear_horno(api, admin_csrf, "Horno sin piezas")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        await api.put(
+            f"{V2}/{cotizacion}/firing",
+            json={"kiln_id": horno["id"]},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        for nombre in ("A", "B"):
+            await anadir_linea(api, admin_csrf, cotizacion, product_name=nombre, quantity=0)
+        await api.put(
+            f"{V2}/{cotizacion}/planning",
+            json={"effective_work_days": 2},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        datos = await precio(api, cotizacion)
+        partes = [Decimal(linea["production_cost"]) for linea in datos["lines"]]
+        assert sum(partes) == Decimal(datos["production_cost"])
+        assert partes[0] == partes[1]
 
     async def test_el_precio_asignado_es_el_costo_asignado_por_el_factor(
         self, api: httpx.AsyncClient, admin_csrf: str

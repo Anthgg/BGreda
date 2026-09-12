@@ -683,6 +683,17 @@ class V2LaborService:
             quotation.illustration_cost = ZERO
             await self._session.flush()
             await refresh_pricing(self._session, quotation)
+            # Apagarla tambien se audita. Sin esto, el rastro solo recogia
+            # quien la encendio: retirar un concepto que cuesta dinero no
+            # dejaba huella de quien lo hizo ni de cuando.
+            self._audit.record_action(
+                entity_type=V2_ILLUSTRATION_ENTITY,
+                entity_id=str(quotation.id),
+                action=AuditAction.UPDATE,
+                user_id=user.id,
+                user_display_name=user.display_name,
+                metadata={"enabled": "False", "hours": "0", "cost": "0"},
+            )
             return quotation
 
         ajustes = await self._settings()
