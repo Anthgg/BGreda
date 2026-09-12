@@ -417,6 +417,34 @@ class TestDowngrade:
         assert resultado.returncode != 0
         assert await _tabla(migration_engine, "v2_techniques") is not None
 
+    async def test_revertir_se_niega_si_solo_hay_dias_decididos(
+        self, migration_engine: AsyncEngine
+    ) -> None:
+        """El hueco que encontro la auditoria: ni tareas, ni maestros, ni
+        ilustracion, y aun asi hay algo que no se recupera.
+
+        Los dias efectivos son una DECISION de quien planifica. El sistema solo
+        sugiere un minimo, asi que borrar la columna perderia el dato sin forma
+        de recalcularlo.
+        """
+        _upgrade("0031")
+        identificador = await _cotizacion_v2(migration_engine, "CTZ-V2-2026-000028")
+        async with migration_engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE v2_quotations SET effective_work_days = 5 WHERE id = :id"),
+                {"id": identificador},
+            )
+
+        resultado = _alembic("downgrade", "0030")
+
+        assert resultado.returncode != 0
+        async with migration_engine.connect() as connection:
+            dias = await connection.scalar(
+                text("SELECT effective_work_days FROM v2_quotations WHERE id = :id"),
+                {"id": identificador},
+            )
+        assert dias == 5
+
     async def test_revertir_se_niega_si_hay_ilustracion_congelada(
         self, migration_engine: AsyncEngine
     ) -> None:
