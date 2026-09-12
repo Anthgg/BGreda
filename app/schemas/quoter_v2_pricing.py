@@ -43,10 +43,15 @@ class V2PricingIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    #: Factor, no porcentaje: 3 significa x3. El limite superior de 10 es una
-    #: barrera contra un cero de mas al teclear; el rango real lo impone el
-    #: snapshot de la cotizacion y lo valida el servicio.
-    commercial_factor: Decimal | None = Field(default=None, gt=0, le=10)
+    #: Factor, no porcentaje: 3 significa x3.
+    #:
+    #: El limite de aqui es solo una barrera contra un cero de mas al teclear, y
+    #: por eso es absurdamente alto. El rango REAL lo impone el snapshot de la
+    #: cotizacion y lo valida el servicio: el suelo de x2 es una regla cerrada
+    #: del negocio, pero el techo NO —x3 es el valor por defecto y la casa puede
+    #: subirlo desde Configuracion—. Poner aqui un 10 habria capado en silencio
+    #: un maximo que el propio taller acabara de habilitar.
+    commercial_factor: Decimal | None = Field(default=None, gt=0, le=1000)
 
 
 class V2PricingLineOut(BaseModel):

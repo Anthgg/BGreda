@@ -345,6 +345,40 @@ class TestFactor:
 
         assert respuesta.status_code == 422
 
+    async def test_el_techo_del_factor_es_configurable_y_el_suelo_no(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """x2 es una regla cerrada; x3 es solo el valor por defecto.
+
+        La casa puede subir el maximo a x10 desde Configuracion, y entonces una
+        cotizacion nueva puede usarlo. El suelo no se mueve: por debajo de x2
+        no se vende, y la configuracion misma lo rechaza.
+        """
+        actual = (await api.get(SETTINGS)).json()["settings"]
+        subir = await api.put(
+            SETTINGS,
+            json={"expected_version": actual["version"], "commercial_factor_max": "10"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert subir.status_code == 200, subir.text
+
+        cotizacion, _ = await escenario(api, admin_csrf)
+        respuesta = await poner_precio(api, admin_csrf, cotizacion, commercial_factor="10")
+
+        assert respuesta.status_code == 200, respuesta.text
+        datos = await precio(api, cotizacion)
+        assert Decimal(datos["factor_max"]) == Decimal(10)
+        assert Decimal(datos["negotiated_price"]) == Decimal(datos["production_cost"]) * 10
+
+        # Y el suelo sigue intacto: la configuracion no admite bajarlo de x2.
+        actual = (await api.get(SETTINGS)).json()["settings"]
+        bajar = await api.put(
+            SETTINGS,
+            json={"expected_version": actual["version"], "commercial_factor_min": "1.5"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert bajar.status_code == 422
+
     async def test_un_nulo_explicito_no_retira_el_factor_en_silencio(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
