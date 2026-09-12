@@ -30,7 +30,7 @@ from app.core.errors import APIError
 from app.core.pricing_engine import PricingEngineVersion
 from app.models.audit import AuditAction
 from app.models.masters import Partner, PartnerRole
-from app.models.quoter_v2 import V2Quotation, V2QuotationStatus
+from app.models.quoter_v2 import V2ProductionType, V2Quotation, V2QuotationStatus
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
@@ -69,6 +69,14 @@ class V2CustomerRoleError(APIError):
     status_code = 422
     code = "V2_CUSTOMER_ROLE_REQUIRED"
     message = "El tercero seleccionado no tiene rol de cliente"
+
+
+class V2QuotationNotEditableError(APIError):
+    """Una cotizacion que ya no es borrador no cambia de cabecera."""
+
+    status_code = 409
+    code = "V2_QUOTATION_NOT_EDITABLE"
+    message = "La cotizacion ya no es un borrador y sus datos no pueden cambiarse"
 
 
 class V2QuotationService:
@@ -142,6 +150,138 @@ class V2QuotationService:
             },
         )
         return fila
+
+    async def update_draft(
+        self, quotation_id: int, data: dict[str, Any], *, user: AuthenticatedUser
+    ) -> V2Quotation:
+        """Cambia la CABECERA de un borrador. Fase 010G.
+
+        Existe porque el flujo deja volver atras: quien esta eligiendo el horno
+        puede darse cuenta de que el cliente esta mal y regresar al primer paso.
+        Sin esta ruta el unico remedio era abrir otra cotizacion.
+
+        Lo que NO hace: tocar un maestro. Cambiar aqui el cliente o la moneda
+        afecta a ESTA cotizacion y a ninguna otra, ni a la configuracion.
+        """
+        quotation = await self._draft(quotation_id)
+
+        if "customer_id" in data:
+            customer = await self._customer(data["customer_id"])
+            quotation.customer_id = customer.id if customer else None
+            quotation.customer_name_snapshot = customer.name if customer else None
+        for campo in ("name", "notes"):
+            if campo in data:
+                setattr(quotation, campo, data[campo])
+        if "customer_kind" in data and data["customer_kind"] is not None:
+            # Cambiar a quien se cotiza reevalua lo que se COBRA, y solo eso: el
+            # gas no depende del cliente, porque un alumno y un externo queman
+            # el mismo. Los acuerdos de tarifa tampoco se heredan, porque se
+            # pactaron para el otro tipo de cliente.
+            #
+            # Es la misma regla que aplica 010E cuando el tipo de cliente se
+            # cambia desde el paso de la quema. Se repite aqui porque desde
+            # 010G hay DOS puertas al mismo campo, y una puerta que no aplique
+            # la regla deja una cotizacion de alumno cobrando tarifa de externo.
+            if data["customer_kind"] != quotation.customer_kind:
+                quotation.commercial_rate_low_snapshot = None
+                quotation.commercial_rate_high_snapshot = None
+                quotation.commercial_low_is_override = False
+                quotation.commercial_high_is_override = False
+            quotation.customer_kind = data["customer_kind"]
+
+        # La moneda se recongela entera: el simbolo y el tipo de cambio van con
+        # ella, y la base exige que las tres columnas sean coherentes.
+        if "currency_code" in data or "exchange_rate" in data:
+            moneda = await self._settings.currency_snapshot(
+                data.get("currency_code") or quotation.currency_code_snapshot,
+                data.get("exchange_rate") or quotation.exchange_rate_snapshot,
+            )
+            for campo, valor in moneda.items():
+                setattr(quotation, campo, valor)
+
+        if "production_type" in data and data["production_type"] is not None:
+            await self._apply_production_type(quotation, data["production_type"])
+
+        await self._session.flush()
+        self._audit.record_action(
+            entity_type=V2_QUOTATION_ENTITY,
+            entity_id=str(quotation.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "production_type": quotation.production_type.value,
+                "customer_id": str(quotation.customer_id),
+                "currency": str(quotation.currency_code_snapshot),
+            },
+        )
+        return quotation
+
+    async def _apply_production_type(
+        self, quotation: V2Quotation, production_type: V2ProductionType
+    ) -> None:
+        """Cambia por menor / por mayor y mueve el horno SOLO si nadie lo eligio.
+
+        El horno sugerido cuelga del tipo de produccion —chico para por menor,
+        grande para por mayor— asi que cambiar el tipo tiene que moverlo. Pero
+        si quien cotiza ya habia elegido OTRO horno a mano, esa decision manda:
+        pisarla seria justo lo que 010E prohibio, cambiar el horno sin que nadie
+        lo pidiera.
+
+        Por eso se compara con el horno que sugeria el tipo ANTERIOR: si coinciden
+        es que nadie lo toco, y entonces se mueve al del tipo nuevo.
+        """
+        anterior = quotation.production_type
+        quotation.production_type = production_type
+        if anterior is production_type:
+            return
+
+        sugerido_antes = await self._settings.suggested_kiln_for(anterior)
+        if quotation.kiln_id is not None and (
+            sugerido_antes is None or quotation.kiln_id != sugerido_antes.id
+        ):
+            return
+
+        sugerido_ahora = await self._settings.suggested_kiln_for(production_type)
+        quotation.kiln_id = sugerido_ahora.id if sugerido_ahora else None
+        quotation.kiln_name_snapshot = sugerido_ahora.name if sugerido_ahora else None
+        quotation.kiln_capacity_snapshot = (
+            sugerido_ahora.capacity_volume_cm3 if sugerido_ahora else None
+        )
+        # El horno cambia, y con el las tarifas: las pactadas se pactaron sobre
+        # el anterior. Mismo criterio que 010E al cambiar de horno a mano.
+        for campo in (
+            "gas_cost_low_snapshot",
+            "gas_cost_high_snapshot",
+            "commercial_rate_low_snapshot",
+            "commercial_rate_high_snapshot",
+        ):
+            setattr(quotation, campo, None)
+        for marca in (
+            "gas_low_is_override",
+            "gas_high_is_override",
+            "commercial_low_is_override",
+            "commercial_high_is_override",
+        ):
+            setattr(quotation, marca, False)
+
+    async def _draft(self, quotation_id: int) -> V2Quotation:
+        """La cotizacion, bloqueada, si todavia admite cambios de cabecera.
+
+        Mismo criterio que el resto de la familia: leer el estado sin bloquear
+        deja una ventana por la que una emision simultanea colaria otro cliente
+        en una cotizacion ya comprometida.
+        """
+        quotation = (
+            await self._session.scalars(
+                select(V2Quotation).where(V2Quotation.id == quotation_id).with_for_update()
+            )
+        ).one_or_none()
+        if quotation is None:
+            raise V2QuotationNotFoundError()
+        if quotation.status is not V2QuotationStatus.DRAFT:
+            raise V2QuotationNotEditableError()
+        return quotation
 
     async def _customer(self, customer_id: int | None) -> Partner | None:
         """El tercero que puede ser cliente de esta cotizacion, o ninguno.
