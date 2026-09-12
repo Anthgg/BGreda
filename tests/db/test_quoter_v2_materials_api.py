@@ -1644,3 +1644,96 @@ async def test_reenviar_el_mismo_material_no_borra_el_costo_pactado(
     cuerpo = response.json()
     assert cuerpo["body_cost_is_override"] is True
     assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.002")
+
+
+async def test_reenviar_un_material_retirado_avisa_en_vez_de_bloquear(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """La otra mitad del mismo error, encontrada en la segunda pasada de Codex.
+
+    `cambio_de_material` ya se calculaba bien para conservar el costo pactado,
+    pero la comprobacion de DISPONIBILIDAD seguia mirando la presencia de la
+    clave. Un cliente que reenvia el formulario entero con el mismo material
+    encallaba la linea si ese material se habia retirado despues, cuando 010C
+    decidio expresamente que ese caso avisa y deja seguir.
+    """
+    pasta = await crear_producto(api, admin_csrf, "Arcilla reenviada y retirada")
+    await valorizar(api, admin_csrf, pasta["id"])
+    cotizacion = await crear_cotizacion(api, admin_csrf)
+    linea = await anadir_linea(
+        api,
+        admin_csrf,
+        cotizacion,
+        quantity=10,
+        body_material_id=pasta["id"],
+        body_unit_weight="500",
+    )
+    baja = await api.put(
+        f"{PRODUCTS}/{pasta['id']}",
+        json={
+            "name": pasta["name"],
+            "product_type": "RAW_MATERIAL",
+            "product_category_id": pasta["product_category_id"],
+            "base_uom_code": "g",
+            "active": False,
+        },
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert baja.status_code == 200, baja.text
+
+    response = await api.put(
+        f"{V2}/{cotizacion}/products/{linea['id']}",
+        json={"body_material_id": pasta["id"], "quantity": 20},
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert response.status_code == 200, response.text
+    cuerpo = response.json()
+    assert "V2_BODY_MATERIAL_UNAVAILABLE" in cuerpo["warnings"]
+    # Y lo congelado se conserva.
+    assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.0013")
+
+
+async def test_elegir_hoy_un_material_retirado_se_sigue_rechazando(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """La correccion no puede abrir la puerta que 010C cerro.
+
+    Reenviar el mismo avisa; elegir HOY uno retirado se rechaza. Es la
+    distincion entera, y sin esta prueba el arreglo anterior podria haberla
+    borrado sin que nada fallara.
+    """
+    buena = await crear_producto(api, admin_csrf, "Arcilla buena")
+    retirada = await crear_producto(api, admin_csrf, "Arcilla ya retirada")
+    await valorizar(api, admin_csrf, buena["id"])
+    await valorizar(api, admin_csrf, retirada["id"])
+    cotizacion = await crear_cotizacion(api, admin_csrf)
+    linea = await anadir_linea(
+        api,
+        admin_csrf,
+        cotizacion,
+        quantity=10,
+        body_material_id=buena["id"],
+        body_unit_weight="500",
+    )
+    baja = await api.put(
+        f"{PRODUCTS}/{retirada['id']}",
+        json={
+            "name": retirada["name"],
+            "product_type": "RAW_MATERIAL",
+            "product_category_id": retirada["product_category_id"],
+            "base_uom_code": "g",
+            "active": False,
+        },
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert baja.status_code == 200, baja.text
+
+    response = await api.put(
+        f"{V2}/{cotizacion}/products/{linea['id']}",
+        json={"body_material_id": retirada["id"]},
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "V2_MATERIAL_PRODUCT_INVALID"
