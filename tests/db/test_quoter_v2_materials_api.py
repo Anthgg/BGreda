@@ -1609,3 +1609,38 @@ class TestLaEdicionParcialNoBorraDecisiones:
 
         assert response.status_code == 200, response.text
         assert response.json()["glaze_is_reference"] is True
+
+
+async def test_reenviar_el_mismo_material_no_borra_el_costo_pactado(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    """Encontrado auditando 010D: el mismo error estaba aqui.
+
+    «Que el material venga en la peticion» no es «que se haya cambiado». Un
+    cliente que reenvia el formulario entero manda el mismo id de siempre, y
+    tratarlo como un cambio retira el costo acordado con el cliente sin que
+    nadie lo pida.
+    """
+    pasta = await crear_producto(api, admin_csrf, "Arcilla reenviada")
+    await valorizar(api, admin_csrf, pasta["id"])
+    cotizacion = await crear_cotizacion(api, admin_csrf)
+    linea = await anadir_linea(
+        api,
+        admin_csrf,
+        cotizacion,
+        quantity=10,
+        body_material_id=pasta["id"],
+        body_unit_weight="500",
+        body_cost_per_unit_override="0.002",
+    )
+
+    response = await api.put(
+        f"{V2}/{cotizacion}/products/{linea['id']}",
+        json={"body_material_id": pasta["id"], "quantity": 20},
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert response.status_code == 200, response.text
+    cuerpo = response.json()
+    assert cuerpo["body_cost_is_override"] is True
+    assert Decimal(cuerpo["body_cost_per_unit"]) == Decimal("0.002")

@@ -601,6 +601,13 @@ class V2MaterialService:
         return derivado, False
 
     async def _apply_body(self, line: V2QuotationProduct, data: dict[str, Any]) -> list[str]:
+        # Que el material VENGA en la peticion no significa que se haya
+        # cambiado: un cliente que reenvia el formulario entero manda el mismo
+        # de siempre. Solo un cambio real retira el costo pactado, porque el
+        # pacto se tomo sobre ESE material.
+        cambio_de_material = (
+            "body_material_id" in data and data["body_material_id"] != line.body_material_id
+        )
         if "body_material_id" in data:
             line.body_material_id = data["body_material_id"]
         if "body_unit_weight" in data:
@@ -635,7 +642,7 @@ class V2MaterialService:
                 derivado=material.effective_cost_per_unit,
                 actual=line.body_cost_per_unit_snapshot,
                 era_override=line.body_cost_is_override,
-                cambio_de_material="body_material_id" in data,
+                cambio_de_material=cambio_de_material,
             )
             line.body_cost_is_override = es_override
             line.body_cost_per_unit_snapshot = costo
@@ -654,6 +661,9 @@ class V2MaterialService:
     async def _apply_glaze(self, line: V2QuotationProduct, data: dict[str, Any]) -> list[str]:
         if "requires_glaze" in data:
             line.requires_glaze = bool(data["requires_glaze"])
+        cambio_de_esmalte = (
+            "glaze_material_id" in data and data["glaze_material_id"] != line.glaze_material_id
+        )
         if "glaze_material_id" in data:
             # Nombrarlo es decidir; mandarlo a nulo es devolver la decision al
             # sistema, que volvera a proponer el activo mas caro por gramo.
@@ -720,7 +730,7 @@ class V2MaterialService:
                 derivado=material.effective_cost_per_unit,
                 actual=line.glaze_cost_per_unit_snapshot,
                 era_override=line.glaze_cost_is_override,
-                cambio_de_material="glaze_material_id" in data,
+                cambio_de_material=cambio_de_esmalte,
             )
             line.glaze_cost_is_override = es_override
             line.glaze_cost_per_unit_snapshot = costo

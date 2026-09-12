@@ -38,9 +38,39 @@ imprescindible para poder proponerlo, y nada mas: quien decide es una persona.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
+
+from app.core.precision import QUANTITY_SCALE, UNIT_COST_SCALE
 
 ZERO = Decimal(0)
+
+#: Pasos de redondeo, uno por columna donde se guarda cada cosa.
+_HOURS_STEP = Decimal(1).scaleb(-QUANTITY_SCALE)
+_RATE_STEP = Decimal(1).scaleb(-UNIT_COST_SCALE)
+
+
+def quantize_hours(value: Decimal) -> Decimal:
+    """Horas a la escala con la que se guardan.
+
+    Existe para que la fila pueda explicarse con sus propios numeros. Las horas
+    salen de una division —`cantidad x jornada / capacidad`— que no siempre es
+    exacta: una pieza con capacidad 3 da 2,666666666... y la columna guarda
+    2,666667. Si el costo se calculara con el numero largo, la fila diria
+    «2,666667 horas a S/15» junto a un importe que no es su producto, y nadie
+    podria comprobar el cobro sin recalcularlo por fuera.
+
+    Se redondea ANTES de multiplicar, no despues.
+    """
+    return value.quantize(_HOURS_STEP, rounding=ROUND_HALF_UP)
+
+
+def quantize_rate(value: Decimal) -> Decimal:
+    """Tarifa por hora a la escala con la que se congela.
+
+    Mismo motivo: S/100 entre una jornada de 3 horas son 33,333333333333... y
+    la columna guarda doce decimales. El costo tiene que salir de lo guardado.
+    """
+    return value.quantize(_RATE_STEP, rounding=ROUND_HALF_UP)
 
 
 class LaborMathError(ValueError):

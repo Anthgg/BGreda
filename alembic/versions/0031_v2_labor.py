@@ -280,22 +280,30 @@ def downgrade() -> None:
     tareas = conexion.scalar(sa.text("SELECT count(*) FROM v2_quotation_labor")) or 0
     trabajadores = conexion.scalar(sa.text("SELECT count(*) FROM v2_workers")) or 0
     tecnicas = conexion.scalar(sa.text("SELECT count(*) FROM v2_techniques")) or 0
-    ilustradas = (
+    # Los dias efectivos cuentan igual que la ilustracion, y por el mismo
+    # motivo: son una DECISION que alguien tomo mirando el trabajo asignado. No
+    # se recalculan —el sistema solo sugiere un minimo— asi que revertir sin
+    # mirarlos los borraria sin forma de recuperarlos, incluso en una base
+    # donde no haya ni una tarea registrada.
+    decididas = (
         conexion.scalar(
             sa.text(
                 "SELECT count(*) FROM v2_quotations"
-                " WHERE illustration_enabled OR illustration_daily_rate_snapshot IS NOT NULL"
+                " WHERE illustration_enabled"
+                "    OR illustration_daily_rate_snapshot IS NOT NULL"
+                "    OR illustration_notes IS NOT NULL"
+                "    OR effective_work_days IS NOT NULL"
             )
         )
         or 0
     )
-    if tareas or trabajadores or tecnicas or ilustradas:
+    if tareas or trabajadores or tecnicas or decididas:
         raise RuntimeError(
             f"0031 no puede revertirse: hay {tareas} tarea(s) de mano de obra, "
-            f"{trabajadores} trabajador(es), {tecnicas} tecnica(s) y {ilustradas} "
-            "cotizacion(es) con ilustracion. Revertir dejaria cotizaciones sin la "
-            "mano de obra con la que se calcularon y borraria configuracion "
-            "escrita a mano."
+            f"{trabajadores} trabajador(es), {tecnicas} tecnica(s) y {decididas} "
+            "cotizacion(es) con ilustracion o dias efectivos decididos. Revertir "
+            "dejaria cotizaciones sin la mano de obra con la que se calcularon y "
+            "borraria decisiones escritas a mano."
         )
 
     for nombre in (

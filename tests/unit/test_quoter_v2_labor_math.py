@@ -23,6 +23,8 @@ from app.core.quoter_v2_labor import (
     hours_required,
     labor_cost,
     minimum_work_days,
+    quantize_hours,
+    quantize_rate,
     units_per_hour,
 )
 
@@ -231,3 +233,45 @@ def test_la_sugerencia_no_decide_por_el_usuario() -> None:
     """
     assert minimum_work_days(Decimal(10), JORNADA) == 2
     # Y nada aqui impide que quien planifica decida 1.
+
+
+# ---------------------------------------------------------------------------
+# Redondeo a la escala en la que se guarda
+# ---------------------------------------------------------------------------
+def test_las_horas_se_redondean_a_la_escala_de_la_columna() -> None:
+    """Seis decimales, que es lo que guarda `quantity_numeric`."""
+    assert quantize_hours(Decimal("2.6666666666")) == Decimal("2.666667")
+
+
+def test_la_tarifa_se_redondea_a_su_propia_escala() -> None:
+    """Doce decimales, que es lo que guarda `unit_cost_numeric`."""
+    assert quantize_rate(Decimal("33.3333333333333333")) == Decimal("33.333333333333")
+
+
+def test_una_fila_puede_explicarse_con_sus_propios_numeros() -> None:
+    """El costo sale de las horas GUARDADAS, no de las de antes de redondear.
+
+    Sin esto, la cotizacion diria «2,666667 horas a S/15» junto a un importe que
+    no es su producto, y quien revisara el cobro no podria comprobarlo sin
+    recalcularlo por fuera. El error es pequeno y constante: aparece en cada
+    division que no es exacta.
+    """
+    # Una pieza de una tecnica que rinde 3 por jornada de 8 horas.
+    horas_exactas = hours_required(Decimal(1), Decimal(3), JORNADA)
+    horas_guardadas = quantize_hours(horas_exactas)
+    tarifa = quantize_rate(hourly_rate(Decimal(120), JORNADA))
+
+    costo = labor_cost(horas_guardadas, tarifa)
+
+    assert horas_guardadas == Decimal("2.666667")
+    assert costo == horas_guardadas * tarifa
+    # Y NO coincide con el que saldria de las horas sin redondear: esa es
+    # exactamente la discrepancia que este redondeo evita.
+    assert costo != labor_cost(horas_exactas, tarifa)
+
+
+def test_redondear_no_estropea_los_casos_exactos() -> None:
+    """Los numeros aprobados siguen saliendo redondos."""
+    assert quantize_hours(hours_required(Decimal(75), Decimal(50), JORNADA)) == Decimal(12)
+    assert quantize_rate(hourly_rate(Decimal(110), JORNADA)) == Decimal("13.75")
+    assert quantize_rate(hourly_rate(Decimal(120), JORNADA)) == Decimal(15)

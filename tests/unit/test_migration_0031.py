@@ -220,6 +220,8 @@ def test_el_downgrade_protege_lo_que_no_se_recupera() -> None:
     ):
         assert consulta in downgrade, consulta
     assert "illustration_enabled" in downgrade
+    # Y los dias efectivos, que son una decision humana y no se recalculan.
+    assert "effective_work_days IS NOT NULL" in downgrade
 
 
 def test_el_downgrade_no_borra_filas_de_nadie() -> None:

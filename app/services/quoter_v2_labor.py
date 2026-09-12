@@ -48,6 +48,8 @@ from app.core.quoter_v2_labor import (
     hours_required,
     labor_cost,
     minimum_work_days,
+    quantize_hours,
+    quantize_rate,
 )
 from app.models.audit import AuditAction
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
@@ -160,9 +162,16 @@ class V2LaborService:
         return await self.global_workday_hours()
 
     async def hourly_rate_for(self, worker: V2Worker) -> Decimal:
-        """Tarifa por hora, derivada siempre y guardada en ningun maestro."""
+        """Tarifa por hora, derivada siempre y guardada en ningun maestro.
+
+        Se redondea a la escala en la que se congelara. Devolver aqui un numero
+        mas largo del que cabe en la columna haria que el costo no coincidiera
+        con la tarifa que despues lee quien revisa la cotizacion.
+        """
         try:
-            return hourly_rate(worker.daily_rate, await self.resolve_workday_hours(worker))
+            return quantize_rate(
+                hourly_rate(worker.daily_rate, await self.resolve_workday_hours(worker))
+            )
         except LaborMathError as error:
             raise V2LaborInputInvalid(str(error)) from error
 
@@ -448,9 +457,16 @@ class V2LaborService:
     async def _apply_worker(
         self, tarea: V2QuotationLabor, data: dict[str, Any], *, creando: bool
     ) -> list[str]:
-        elegido_ahora = "worker_id" in data and data["worker_id"] is not None
-        if elegido_ahora:
-            tarea.worker_id = data["worker_id"]
+        # «Viene en la peticion» NO es «lo acaba de elegir». Un cliente que
+        # reenvia el formulario entero manda el mismo `worker_id` de siempre, y
+        # tomarlo por una eleccion nueva tendria dos consecuencias caras:
+        # encallaria el borrador si esa persona se dio de baja despues de
+        # asignarla, y borraria la tarifa acordada como si se hubiera cambiado
+        # de persona. Lo que importa es si CAMBIA.
+        propuesto = data.get("worker_id")
+        cambia = propuesto is not None and (creando or propuesto != tarea.worker_id)
+        if propuesto is not None:
+            tarea.worker_id = propuesto
         elif creando:
             raise V2LaborInputInvalid("Hay que indicar quien hace el trabajo")
 
@@ -460,7 +476,7 @@ class V2LaborService:
             # DESPUES de asignarlo solo avisa, y la tarea conserva lo congelado.
             # Bloquear ahi encallaria un borrador por una decision de otra
             # pantalla, y el costo ya calculado sigue siendo el que se acordo.
-            if elegido_ahora:
+            if cambia:
                 raise V2LaborResourceInactiveError(
                     f"«{worker.name}» esta dado de baja y no puede asignarse"
                 )
@@ -477,14 +493,14 @@ class V2LaborService:
         if tarifa_manual is not None:
             # Una tarifa acordada para ESTA cotizacion. No toca el maestro: la
             # siguiente cotizacion vuelve a la tarifa de la casa.
-            tarea.hourly_rate_snapshot = tarifa_manual
+            tarea.hourly_rate_snapshot = quantize_rate(tarifa_manual)
             tarea.rate_overridden = True
         elif "hourly_rate_override" in data:
             # Presente y en nulo: se retira el acuerdo y vuelve la tarifa real.
             tarea.hourly_rate_snapshot = await self.hourly_rate_for(worker)
             tarea.rate_overridden = False
-        elif not tarea.rate_overridden or elegido_ahora:
-            # Ausente y sin acuerdo previo —o con la persona cambiada, porque un
+        elif not tarea.rate_overridden or cambia:
+            # Ausente y sin acuerdo previo —o con la persona CAMBIADA, porque un
             # acuerdo se tomo sobre alguien concreto y no se hereda—.
             tarea.hourly_rate_snapshot = await self.hourly_rate_for(worker)
             tarea.rate_overridden = False
@@ -493,15 +509,19 @@ class V2LaborService:
     async def _apply_technique(
         self, tarea: V2QuotationLabor, data: dict[str, Any], *, creando: bool
     ) -> list[str]:
-        elegida_ahora = "technique_id" in data and data["technique_id"] is not None
-        if elegida_ahora:
-            tarea.technique_id = data["technique_id"]
+        # Mismo criterio que con el trabajador: reenviar la misma tecnica no es
+        # elegirla de nuevo, y tratarlo asi encallaria un borrador en cuanto
+        # alguien retirara del catalogo una tecnica ya asignada.
+        propuesta = data.get("technique_id")
+        cambia = propuesta is not None and (creando or propuesta != tarea.technique_id)
+        if propuesta is not None:
+            tarea.technique_id = propuesta
         elif creando:
             raise V2LaborInputInvalid("Hay que indicar que tecnica se aplica")
 
         tecnica = await self.get_technique(tarea.technique_id)
         if not tecnica.active:
-            if elegida_ahora:
+            if cambia:
                 raise V2LaborResourceInactiveError(
                     f"La tecnica «{tecnica.name}» esta retirada y no puede asignarse"
                 )
@@ -520,17 +540,19 @@ class V2LaborService:
         un jarron dificil no baja el rendimiento de manana.
         """
         try:
-            tarea.calculated_hours = hours_required(
-                tarea.quantity,
-                tarea.standard_capacity_snapshot,
-                tarea.workday_hours_snapshot,
+            tarea.calculated_hours = quantize_hours(
+                hours_required(
+                    tarea.quantity,
+                    tarea.standard_capacity_snapshot,
+                    tarea.workday_hours_snapshot,
+                )
             )
         except LaborMathError as error:
             raise V2LaborInputInvalid(str(error)) from error
 
         horas_manuales = self._explicit(data, "final_hours_override")
         if horas_manuales is not None:
-            tarea.final_hours = horas_manuales
+            tarea.final_hours = quantize_hours(horas_manuales)
             tarea.hours_overridden = True
         elif "final_hours_override" in data:
             tarea.final_hours = tarea.calculated_hours
@@ -664,21 +686,39 @@ class V2LaborService:
             quotation.illustration_workday_hours_snapshot = ajustes.workday_hours
             quotation.illustration_capacity_snapshot = ajustes.illustration_pieces_per_workday
             try:
-                quotation.illustration_hourly_rate_snapshot = hourly_rate(
-                    ajustes.illustration_daily_rate, ajustes.workday_hours
+                quotation.illustration_hourly_rate_snapshot = quantize_rate(
+                    hourly_rate(ajustes.illustration_daily_rate, ajustes.workday_hours)
                 )
             except LaborMathError as error:
                 raise V2LaborInputInvalid(str(error)) from error
 
-        tarifa = self._explicit(data, "illustration_hourly_rate_override")
-        if tarifa is not None:
-            quotation.illustration_hourly_rate_snapshot = tarifa
+        # Misma regla que en las tareas, y por el mismo motivo: ausente conserva
+        # el acuerdo, presente y en nulo lo retira. Distinguirlos importa porque
+        # confundirlos deja cobrando una tarifa que alguien creyo haber quitado.
+        if "illustration_hourly_rate_override" in data:
+            tarifa = data["illustration_hourly_rate_override"]
+            if tarifa is not None:
+                quotation.illustration_hourly_rate_snapshot = quantize_rate(tarifa)
+            else:
+                # Vuelve a la tarifa que ESTA cotizacion congelo, no a la de hoy:
+                # retirar un acuerdo no es motivo para recotizar con otro jornal.
+                try:
+                    quotation.illustration_hourly_rate_snapshot = quantize_rate(
+                        hourly_rate(
+                            _required(quotation.illustration_daily_rate_snapshot),
+                            _required(quotation.illustration_workday_hours_snapshot),
+                        )
+                    )
+                except LaborMathError as error:
+                    raise V2LaborInputInvalid(str(error)) from error
 
         try:
-            quotation.illustration_hours = hours_required(
-                quotation.illustration_quantity,
-                _required(quotation.illustration_capacity_snapshot),
-                _required(quotation.illustration_workday_hours_snapshot),
+            quotation.illustration_hours = quantize_hours(
+                hours_required(
+                    quotation.illustration_quantity,
+                    _required(quotation.illustration_capacity_snapshot),
+                    _required(quotation.illustration_workday_hours_snapshot),
+                )
             )
             quotation.illustration_cost = labor_cost(
                 quotation.illustration_hours,

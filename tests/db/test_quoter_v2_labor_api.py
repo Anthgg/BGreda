@@ -1108,3 +1108,232 @@ async def test_las_tareas_v2_no_tocan_el_catalogo_de_legacy(
     assert antes == despues
     legacy = await db_session.scalar(text("SELECT count(*) FROM quotation_techniques"))
     assert legacy == 0
+
+
+class TestLoQueEncontroLaAuditoria:
+    async def test_retirar_la_tarifa_de_ilustracion_vuelve_a_la_congelada(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Presente y en nulo retira el acuerdo. Ausente lo conserva.
+
+        Es el mismo fallo de 010C: `data.get(...)` devuelve `None` tanto si el
+        campo no vino como si vino en nulo. Confundirlos deja cobrando una
+        tarifa que alguien creyo haber quitado.
+
+        Y vuelve a la tarifa que ESTA cotizacion congelo —S/110 entre 8 h—, no a
+        la de hoy: retirar un acuerdo no es motivo para recotizar con otro
+        jornal.
+        """
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        con_acuerdo = await api.put(
+            f"{V2}/{cotizacion}/illustration",
+            json={
+                "illustration_enabled": True,
+                "illustration_quantity": "50",
+                "illustration_hourly_rate_override": "20",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert Decimal(con_acuerdo.json()["cost"]) == Decimal(160)
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/illustration",
+            json={"illustration_hourly_rate_override": None},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert Decimal(cuerpo["hourly_rate"]) == Decimal("13.75")
+        assert Decimal(cuerpo["cost"]) == Decimal(110)
+
+    async def test_cambiar_la_cantidad_conserva_la_tarifa_acordada(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La otra mitad de la regla: ausente no es lo mismo que nulo."""
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        await api.put(
+            f"{V2}/{cotizacion}/illustration",
+            json={
+                "illustration_enabled": True,
+                "illustration_quantity": "50",
+                "illustration_hourly_rate_override": "20",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/illustration",
+            json={"illustration_quantity": "75"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        cuerpo = response.json()
+        assert Decimal(cuerpo["hourly_rate"]) == Decimal(20)
+        assert Decimal(cuerpo["hours"]) == Decimal(12)
+        assert Decimal(cuerpo["cost"]) == Decimal(240)
+
+    async def test_una_division_inexacta_deja_la_fila_cuadrada(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Horas x tarifa tiene que dar el costo con los numeros GUARDADOS.
+
+        Una tecnica que rinde 3 piezas por jornada da 2,666666... horas para una
+        pieza. Si el costo se calculara con el numero largo y la columna
+        guardara el corto, la cotizacion mostraria un importe que no es el
+        producto de lo que ensena, y nadie podria comprobarlo.
+        """
+        worker = await crear_trabajador(api, admin_csrf, "Cuadrado")
+        tecnica = await crear_tecnica(api, admin_csrf, "inexacta", default_capacity_per_workday="3")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+
+        tarea = await anadir_tarea(
+            api,
+            admin_csrf,
+            cotizacion,
+            worker_id=worker["id"],
+            technique_id=tecnica["id"],
+            quantity="1",
+        )
+
+        horas = Decimal(tarea["final_hours"])
+        tarifa = Decimal(tarea["hourly_rate"])
+        assert horas == Decimal("2.666667")
+        assert Decimal(tarea["labor_cost"]) == horas * tarifa
+
+
+class TestReenviarNoEsElegir:
+    """Un cliente que manda el formulario entero reenvia los mismos ids.
+
+    Tomarlo por una eleccion nueva tiene dos consecuencias caras, y las dos son
+    silenciosas: encalla un borrador cuya persona se dio de baja despues, y
+    borra una tarifa acordada como si se hubiera cambiado de persona.
+    """
+
+    async def test_reenviar_el_mismo_trabajador_no_borra_la_tarifa_acordada(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        worker = await crear_trabajador(api, admin_csrf, "Reenviado")
+        tecnica = await crear_tecnica(api, admin_csrf, "reenvio")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        tarea = await anadir_tarea(
+            api,
+            admin_csrf,
+            cotizacion,
+            worker_id=worker["id"],
+            technique_id=tecnica["id"],
+            quantity="50",
+            hourly_rate_override="17.5",
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/labor/{tarea['id']}",
+            json={
+                "worker_id": worker["id"],
+                "technique_id": tecnica["id"],
+                "quantity": "100",
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert cuerpo["rate_overridden"] is True
+        assert Decimal(cuerpo["hourly_rate"]) == Decimal("17.5")
+
+    async def test_un_borrador_con_alguien_dado_de_baja_sigue_editandose(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Bloquearlo encallaria la cotizacion por una decision de otra pantalla.
+
+        La regla es: elegir HOY a alguien de baja se rechaza; seguir editando
+        una tarea que ya lo tenia, se avisa. Y eso vale tambien cuando el
+        cliente reenvia su id sin cambiarlo.
+        """
+        worker = await crear_trabajador(api, admin_csrf, "Se fue despues")
+        tecnica = await crear_tecnica(api, admin_csrf, "se-fue")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        tarea = await anadir_tarea(
+            api,
+            admin_csrf,
+            cotizacion,
+            worker_id=worker["id"],
+            technique_id=tecnica["id"],
+            quantity="50",
+        )
+        baja = await api.put(
+            f"{WORKERS}/{worker['id']}",
+            json={"expected_version": worker["version"], "active": False},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert baja.status_code == 200, baja.text
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/labor/{tarea['id']}",
+            json={"worker_id": worker["id"], "quantity": "100"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        cuerpo = response.json()
+        assert "V2_LABOR_WORKER_UNAVAILABLE" in cuerpo["warnings"]
+        # Y lo congelado se conserva: el costo sigue siendo el que se acordo.
+        assert Decimal(cuerpo["hourly_rate"]) == Decimal(15)
+
+    async def test_un_borrador_con_una_tecnica_retirada_sigue_editandose(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        worker = await crear_trabajador(api, admin_csrf, "Con tecnica retirada")
+        tecnica = await crear_tecnica(api, admin_csrf, "se-retira")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        tarea = await anadir_tarea(
+            api,
+            admin_csrf,
+            cotizacion,
+            worker_id=worker["id"],
+            technique_id=tecnica["id"],
+            quantity="50",
+        )
+        baja = await api.put(
+            f"{TECHNIQUES}/{tecnica['id']}",
+            json={"expected_version": tecnica["version"], "active": False},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert baja.status_code == 200, baja.text
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/labor/{tarea['id']}",
+            json={"technique_id": tecnica["id"], "quantity": "100"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        assert response.status_code == 200, response.text
+        assert "V2_LABOR_TECHNIQUE_UNAVAILABLE" in response.json()["warnings"]
+
+    async def test_cambiar_de_verdad_de_persona_si_retira_el_acuerdo(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La otra mitad: el acuerdo se tomo con alguien concreto."""
+        primero = await crear_trabajador(api, admin_csrf, "Pactante")
+        segundo = await crear_trabajador(api, admin_csrf, "Sustituto", daily_rate="160")
+        tecnica = await crear_tecnica(api, admin_csrf, "sustitucion")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        tarea = await anadir_tarea(
+            api,
+            admin_csrf,
+            cotizacion,
+            worker_id=primero["id"],
+            technique_id=tecnica["id"],
+            quantity="50",
+            hourly_rate_override="17.5",
+        )
+
+        response = await api.put(
+            f"{V2}/{cotizacion}/labor/{tarea['id']}",
+            json={"worker_id": segundo["id"]},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+
+        cuerpo = response.json()
+        assert cuerpo["rate_overridden"] is False
+        assert Decimal(cuerpo["hourly_rate"]) == Decimal(20)
