@@ -255,11 +255,15 @@ def test_la_cadena_no_se_rompe() -> None:
     assert script.get_revision("0030").down_revision == "0029"
 
 
-def test_0030_es_la_unica_cabeza() -> None:
-    """Dos cabezas son un despliegue que se detiene a mitad, en produccion.
+def test_0030_sigue_en_el_camino_a_la_cabeza() -> None:
+    """Lo que hay que proteger aqui es que la revision siga en la cadena.
 
-    Esta afirmacion acompana siempre a la ULTIMA revision y se retira de la
-    anterior cuando entra una nueva; por eso ya no vive en 0029.
+    La afirmacion de «cabeza unica» acompana siempre a la ULTIMA revision y se
+    mudo a `test_migration_0031.py` cuando entro. Dejarla aqui obligaria a
+    reescribir esta prueba en cada fase y, mientras tanto, no comprobaria nada
+    de 0030.
     """
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0030"]
+    heads = script.get_heads()
+    assert len(heads) == 1, heads
+    assert "0030" in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}

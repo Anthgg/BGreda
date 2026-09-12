@@ -47,6 +47,7 @@ from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
+from app.services.quoter_v2_labor import V2LaborService
 from app.services.quoter_v2_materials import V2MaterialService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
@@ -389,6 +390,21 @@ async def get_v2_material_service(
 
 
 V2MaterialServiceDep = Annotated[V2MaterialService, Depends(get_v2_material_service)]
+
+
+async def get_v2_labor_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2LaborService:
+    """Mano de obra de V2.
+
+    Tampoco recibe nada capaz de mover existencia ni de tocar la configuracion
+    comercial: lee la jornada global y no la escribe.
+    """
+    return V2LaborService(session, audit)
+
+
+V2LaborServiceDep = Annotated[V2LaborService, Depends(get_v2_labor_service)]
 
 
 async def get_v2_quotation_service(
