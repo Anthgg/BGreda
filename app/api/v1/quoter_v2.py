@@ -129,7 +129,13 @@ async def update_v2_quotation(
     # la deja expirada y leerla exige otra consulta. Se pide explicitamente:
     # dejar que el atributo se cargue solo revienta con `MissingGreenlet`,
     # porque una carga perezosa no puede esperar a nadie desde codigo sincrono.
-    await session.refresh(fila)
+    #
+    # Primero el flush, para que los recalculos de arriba esten escritos: un
+    # refresco sobre cambios sin consolidar los sustituye por lo que haya en la
+    # base. Y SOLO `updated_at`: un refresco a ciegas expira tambien el resto
+    # de la fila y obliga a releerla entera para nada.
+    await session.flush()
+    await session.refresh(fila, attribute_names=["updated_at"])
     resultado = _present(fila)
     await session.commit()
     return resultado

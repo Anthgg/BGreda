@@ -192,10 +192,22 @@ class V2QuotationService:
         # La moneda se recongela entera: el simbolo y el tipo de cambio van con
         # ella, y la base exige que las tres columnas sean coherentes.
         if "currency_code" in data or "exchange_rate" in data:
-            moneda = await self._settings.currency_snapshot(
-                data.get("currency_code") or quotation.currency_code_snapshot,
-                data.get("exchange_rate") or quotation.exchange_rate_snapshot,
+            # `in` y no `or`: presente y en nulo RETIRA el tipo de cambio
+            # pactado y devuelve el de la configuracion, que es lo que
+            # significa un nulo en toda la familia V2. Con `or`, un cero o un
+            # nulo explicitos se confundian con «no lo mandaron» y el acuerdo
+            # anterior se quedaba puesto para siempre.
+            tasa = (
+                data["exchange_rate"]
+                if "exchange_rate" in data
+                else quotation.exchange_rate_snapshot
             )
+            codigo = (
+                data["currency_code"]
+                if data.get("currency_code")
+                else quotation.currency_code_snapshot
+            )
+            moneda = await self._settings.currency_snapshot(codigo, tasa)
             for campo, valor in moneda.items():
                 setattr(quotation, campo, valor)
 
@@ -211,7 +223,13 @@ class V2QuotationService:
             user_display_name=user.display_name,
             metadata={
                 "production_type": quotation.production_type.value,
-                "customer_id": str(quotation.customer_id),
+                # Nulo y no la cadena "None": en el JSONB de auditoria
+                # `metadata->>'customer_id'` devolveria un identificador de
+                # texto valido con valor "None", y los informes contarian
+                # cotizaciones sin cliente como si tuvieran uno.
+                "customer_id": (
+                    str(quotation.customer_id) if quotation.customer_id is not None else None
+                ),
                 "currency": str(quotation.currency_code_snapshot),
             },
         )
@@ -243,11 +261,22 @@ class V2QuotationService:
             return
 
         sugerido_ahora = await self._settings.suggested_kiln_for(production_type)
-        quotation.kiln_id = sugerido_ahora.id if sugerido_ahora else None
-        quotation.kiln_name_snapshot = sugerido_ahora.name if sugerido_ahora else None
-        quotation.kiln_capacity_snapshot = (
-            sugerido_ahora.capacity_volume_cm3 if sugerido_ahora else None
-        )
+        # Sin horno sugerido para el tipo nuevo NO se retira el que habia. La
+        # configuracion puede no haber nombrado uno para por mayor, y dejar la
+        # cotizacion sin horno la costearia en cero: peor que conservar un
+        # default que al menos existe y que quien cotiza puede cambiar.
+        if sugerido_ahora is None:
+            return
+        # Y si el horno sugerido resulta ser el MISMO —una sola maquina en el
+        # taller, o la misma configurada para los dos tipos— aqui no ha pasado
+        # nada: reasignar lo mismo y de paso tirar las tarifas pactadas seria
+        # destruir un acuerdo sin que nadie lo pidiera.
+        if quotation.kiln_id == sugerido_ahora.id:
+            return
+
+        quotation.kiln_id = sugerido_ahora.id
+        quotation.kiln_name_snapshot = sugerido_ahora.name
+        quotation.kiln_capacity_snapshot = sugerido_ahora.capacity_volume_cm3
         # El horno cambia, y con el las tarifas: las pactadas se pactaron sobre
         # el anterior. Mismo criterio que 010E al cambiar de horno a mano.
         for campo in (

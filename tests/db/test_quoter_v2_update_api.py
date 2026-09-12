@@ -318,6 +318,54 @@ class TestTipoDeProduccion:
         quema = (await api.get(f"{V2}/{creada['id']}/firing")).json()
         assert "V2_FIRING_RETAIL_OVER_CAPACITY" in quema["warnings"]
 
+    async def test_un_solo_horno_no_pierde_las_tarifas_pactadas(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El taller con un horno cambia de tipo sin perder lo acordado.
+
+        Si la configuracion sugiere el MISMO horno para por menor y por mayor
+        —un taller con una sola maquina—, cambiar el tipo no mueve nada. Tirar
+        ahi las tarifas pactadas seria destruir un acuerdo sin que el horno
+        hubiera cambiado siquiera.
+        """
+        unico = await crear_horno(api, admin_csrf, "Unico 010G", CHICO)
+        await configurar_hornos(api, admin_csrf, retail=unico, wholesale=unico)
+        creada = await crear(api, admin_csrf, production_type="RETAIL")
+        pactada = await api.put(
+            f"{V2}/{creada['id']}/firing",
+            json={"commercial_rate_low_override": "333"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert pactada.status_code == 200, pactada.text
+        assert pactada.json()["commercial_low_is_override"] is True
+
+        await actualizar(api, admin_csrf, creada["id"], production_type="WHOLESALE")
+
+        quema = (await api.get(f"{V2}/{creada['id']}/firing")).json()
+        assert quema["kiln_id"] == unico
+        assert Decimal(quema["commercial_rate_low"]) == Decimal(333), (
+            "la tarifa pactada tiene que sobrevivir a un cambio que no movio el horno"
+        )
+        assert quema["commercial_low_is_override"] is True
+
+    async def test_sin_horno_sugerido_para_el_tipo_nuevo_se_conserva_el_que_habia(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Quedarse sin horno costearia la quema en cero.
+
+        Si la configuracion no nombra horno para por mayor, cambiar a por mayor
+        no puede dejar la cotizacion huerfana: es peor que conservar un default
+        que al menos existe y que quien cotiza puede cambiar a mano.
+        """
+        chico = await crear_horno(api, admin_csrf, "Chico 010G g", CHICO)
+        await configurar_hornos(api, admin_csrf, retail=chico)
+        creada = await crear(api, admin_csrf, production_type="RETAIL")
+        assert (await api.get(f"{V2}/{creada['id']}/firing")).json()["kiln_id"] == chico
+
+        await actualizar(api, admin_csrf, creada["id"], production_type="WHOLESALE")
+
+        assert (await api.get(f"{V2}/{creada['id']}/firing")).json()["kiln_id"] == chico
+
 
 # ---------------------------------------------------------------------------
 # Moneda
@@ -351,6 +399,42 @@ class TestMoneda:
         assert fila[0] == "USD"
         assert fila[1] is not None
         assert Decimal(fila[2]) == Decimal("3.75")
+
+    async def test_el_tipo_de_cambio_en_nulo_vuelve_al_de_la_casa(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Presente y en nulo RETIRA el acuerdo, como en toda la familia V2.
+
+        Sin esto no habia forma de deshacer un tipo de cambio pactado y volver
+        al de la configuracion: el `or` de Python confundia el nulo explicito
+        con «no lo mandaron» y el acuerdo se quedaba puesto para siempre.
+        """
+        creada = await crear(api, admin_csrf)
+        pactado = await actualizar(
+            api, admin_csrf, creada["id"], currency_code="USD", exchange_rate="4.20"
+        )
+        assert pactado.status_code == 200, pactado.text
+        assert Decimal(pactado.json()["exchange_rate"]) == Decimal("4.20")
+
+        retirado = await actualizar(api, admin_csrf, creada["id"], exchange_rate=None)
+
+        assert retirado.status_code == 200, retirado.text
+        tasa = retirado.json()["exchange_rate"]
+        assert tasa is not None, "en moneda extranjera siempre tiene que haber una tasa"
+        assert Decimal(tasa) != Decimal("4.20"), "el acuerdo tenia que retirarse"
+
+    async def test_no_mandar_el_tipo_de_cambio_lo_conserva(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Ausente conserva. La otra mitad de la regla, y la que evita que
+        cambiar el nombre borre una tasa pactada."""
+        creada = await crear(api, admin_csrf)
+        await actualizar(api, admin_csrf, creada["id"], currency_code="USD", exchange_rate="4.20")
+
+        respuesta = await actualizar(api, admin_csrf, creada["id"], name="otro nombre")
+
+        assert respuesta.status_code == 200, respuesta.text
+        assert Decimal(respuesta.json()["exchange_rate"]) == Decimal("4.20")
 
     async def test_un_tipo_de_cambio_no_positivo_se_rechaza(
         self, api: httpx.AsyncClient, admin_csrf: str
