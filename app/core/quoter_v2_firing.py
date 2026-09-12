@@ -42,14 +42,15 @@ modulo es su mitad comercial, que es justo la que esta fase elimina.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from app.core.firings import (
     line_volume,
     physical_occupancy_percentage,
     required_batches,
 )
-from app.core.precision import CALCULATION_SCALE, QUANTITY_SCALE
+from app.core.precision import QUANTITY_SCALE
+from app.core.quoter_v2_pricing import allocate_by_weight
 
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
@@ -57,7 +58,6 @@ HUNDRED = Decimal(100)
 #: Pasos de redondeo, uno por columna donde se guarda cada cosa.
 _VOLUME_STEP = Decimal(1).scaleb(-QUANTITY_SCALE)
 _PERCENT_STEP = Decimal(1).scaleb(-QUANTITY_SCALE)
-_ALLOCATION_STEP = Decimal(1).scaleb(-CALCULATION_SCALE)
 
 #: Tope de hornadas que se detallan una a una en la respuesta. El calculo no se
 #: limita —una produccion enorme sigue costando lo que cueste—; lo que se acota
@@ -197,32 +197,12 @@ def allocate_by_volume(total: Decimal, volumes: Sequence[Decimal]) -> list[Decim
 
     Sin volumen no hay reparto posible y se devuelven ceros. No es una perdida:
     sin volumen tampoco hay hornadas, y por tanto no hay nada que repartir.
+
+    El reparto en si —resto mayor, suma exacta, desempate determinista— vive en
+    `app.core.quoter_v2_pricing`: es el mismo de 010F y tener dos copias seria
+    tener dos formas de perder un centimo.
     """
-    if not volumes:
-        return []
-    suma = sum(volumes, ZERO)
-    if suma <= ZERO or total == ZERO:
-        return [ZERO for _ in volumes]
-
-    crudos = [total * volumen / suma if volumen > ZERO else ZERO for volumen in volumes]
-    partes = [valor.quantize(_ALLOCATION_STEP, rounding=ROUND_DOWN) for valor in crudos]
-
-    objetivo = total.quantize(_ALLOCATION_STEP, rounding=ROUND_HALF_UP)
-    faltante = objetivo - sum(partes, ZERO)
-    pasos = int((faltante / _ALLOCATION_STEP).to_integral_value(rounding=ROUND_HALF_UP))
-    if pasos > 0:
-        # Quien mas parte perdio al truncar cobra primero. El desempate por
-        # volumen y por posicion hace el resultado identico en cada ejecucion:
-        # sin el, dos lineas iguales podrian intercambiarse el ultimo paso y la
-        # cotizacion cambiaria sola al recalcularse.
-        orden = sorted(
-            range(len(partes)),
-            key=lambda indice: (crudos[indice] - partes[indice], volumes[indice], -indice),
-            reverse=True,
-        )
-        for indice in orden[:pasos]:
-            partes[indice] += _ALLOCATION_STEP
-    return partes
+    return allocate_by_weight(total, volumes)
 
 
 def volume_share_percent(line_volume_cm3: Decimal, total_volume_cm3: Decimal) -> Decimal:

@@ -331,6 +331,85 @@ class V2Quotation(Base, TimestampMixin):
         nullable=False,
     )
 
+    # ---- Fase 010F: el resultado economico -------------------------------
+    #: Los totales por componente, congelados. Se guardan y no se derivan al
+    #: leer porque una cotizacion emitida tiene que poder explicarse sin
+    #: consultar un solo maestro: si manana sube el jornal, el precio que el
+    #: cliente acepto sigue siendo reconstruible numero a numero.
+    materials_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    labor_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: `dias efectivos x costo del espacio por dia`. Por dias EFECTIVOS de
+    #: taller, nunca por dias de vigencia de la oferta: son dos plazos
+    #: distintos y confundirlos cobraria espacio por no haber vendido.
+    space_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Materiales + mano de obra + ilustracion. Lo que cuesta cada producto por
+    #: si mismo, antes de repartir nada.
+    direct_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    #: Las dos bases, y la diferencia entre ellas es toda la fase. El COSTO
+    #: REAL lleva el gas que de verdad se quema; el COSTO DE PRODUCCION lleva
+    #: la tarifa que el taller cobra por encender. Intercambiarlos invierte el
+    #: margen entero sin que ningun numero parezca raro.
+    real_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    production_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    #: Las tres salidas comerciales. El suelo y el objetivo salen de los
+    #: limites que ESTA cotizacion congelo, no de un 2 y un 3 escritos en el
+    #: codigo: una emitida cuando el minimo era otro sigue explicandose sola.
+    price_min: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    price_target: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    negotiated_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    #: Lo que va al documento, ya en la moneda de la cotizacion. El subtotal se
+    #: RECONSTRUYE sumando las lineas redondeadas: tomar el precio global
+    #: anterior al redondeo daria un total que no coincide con los unitarios
+    #: que el cliente esta leyendo.
+    subtotal_amount: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    tax_amount: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    total_amount: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Lo que el redondeo anadio respecto al precio objetivo. Puede ser
+    #: negativo si alguna linea no tiene piezas. Se expone porque, sin el,
+    #: nadie sabe por que el subtotal no es exactamente costo x factor.
+    rounding_adjustment: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    #: Precio comercial sin IGV menos costo REAL. El IGV no entra: no es
+    #: ingreso del taller, es dinero que se recauda para otro. Puede ser
+    #: negativo, y entonces hay que poder verlo.
+    estimated_profit: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Sobre el PRECIO y no sobre el costo. Un 75 % sobre precio es un 300 %
+    #: sobre costo, y confundirlos hace irreconocible la cifra.
+    effective_margin_percent: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+
     created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
     created_by_name: Mapped[str | None] = mapped_column(String(200))
 
@@ -562,6 +641,27 @@ class V2Quotation(Base, TimestampMixin):
             name="commercial_high_non_negative",
         ),
         CheckConstraint("firing_gas_total >= 0", name="firing_gas_total_non_negative"),
+        # ---- Fase 010F ----------------------------------------------------
+        # Los costos y los precios no pueden ser negativos. La GANANCIA y el
+        # ajuste por redondeo si: una cotizacion puede venderse a perdida, y
+        # esconderlo tras un cero seria mentir sobre el unico numero que
+        # importa mirar.
+        CheckConstraint("materials_cost_total >= 0", name="materials_total_non_negative"),
+        CheckConstraint("labor_cost_total >= 0", name="labor_total_non_negative"),
+        CheckConstraint("space_cost >= 0", name="space_cost_non_negative"),
+        CheckConstraint("direct_cost_total >= 0", name="direct_total_non_negative"),
+        CheckConstraint("real_cost_total >= 0", name="real_cost_non_negative"),
+        CheckConstraint("production_cost_total >= 0", name="production_cost_non_negative"),
+        CheckConstraint("price_min >= 0", name="price_min_non_negative"),
+        CheckConstraint("price_target >= 0", name="price_target_non_negative"),
+        CheckConstraint("negotiated_price >= 0", name="negotiated_price_non_negative"),
+        CheckConstraint("subtotal_amount >= 0", name="subtotal_non_negative"),
+        CheckConstraint("tax_amount >= 0", name="tax_amount_non_negative"),
+        CheckConstraint("total_amount >= 0", name="total_amount_non_negative"),
+        # El suelo nunca puede pedir mas que el objetivo: si eso pasara, no
+        # existiria ningun factor valido y la cotizacion quedaria sin precio
+        # posible.
+        CheckConstraint("price_min <= price_target", name="price_min_below_target"),
         CheckConstraint(
             "firing_commercial_total >= 0", name="firing_commercial_total_non_negative"
         ),
@@ -703,6 +803,66 @@ class V2QuotationProduct(Base, TimestampMixin):
         calculation_numeric(), nullable=False, server_default=text("0")
     )
 
+    # ---- Fase 010F: el resultado economico de la linea -------------------
+    #: Lo que cuesta ESTA pieza por si misma: materiales mas la mano de obra
+    #: asignada a ella. Es la base con la que se le reparten los costos
+    #: generales, asi que se guarda en vez de recalcularse al leer.
+    direct_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Lo que absorbe de los costos que son de la cotizacion entera. El espacio
+    #: se reparte por HORAS de trabajo y lo general —administracion,
+    #: ilustracion y el personal que apoya al pedido sin producto asignado—
+    #: por COSTO DIRECTO. La quema ya venia repartida por VOLUMEN desde 010E.
+    #:
+    #: Tres bases distintas y no una sola porque tres cosas distintas: el
+    #: taller se ocupa por tiempo, el horno por sitio y la administracion
+    #: acompana al dinero.
+    allocated_space_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    allocated_general_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Las dos bases de la linea, con la misma diferencia que en la cabecera:
+    #: una lleva la tarifa de quema y la otra el gas real.
+    allocated_production_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    allocated_real_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    #: `costo de produccion asignado x factor`, en moneda base.
+    line_price: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Precio de una pieza, ya en la moneda de la cotizacion y todavia sin
+    #: redondear. Se guarda junto al redondeado para poder explicar el salto.
+    unit_price_raw: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: El que ve el cliente: multiplo del escalon comercial, hacia arriba.
+    unit_price: Mapped[Decimal] = mapped_column(
+        money_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Reconstruidos desde el unitario redondeado, que es la unica forma de que
+    #: el documento cuadre al sumarlo a mano.
+    line_subtotal: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    line_tax: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    line_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Subtotal de la linea llevado a moneda base, menos su costo real. Puede
+    #: ser negativo y entonces hay que poder verlo.
+    allocated_profit: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
     quotation: Mapped[V2Quotation] = relationship("V2Quotation", back_populates="products")
 
     __table_args__ = (
@@ -753,5 +913,23 @@ class V2QuotationProduct(Base, TimestampMixin):
         ),
         CheckConstraint("firing_commercial_cost >= 0", name="line_firing_cost_non_negative"),
         CheckConstraint("firing_gas_cost >= 0", name="line_firing_gas_non_negative"),
+        # ---- Fase 010F ----------------------------------------------------
+        CheckConstraint("direct_cost >= 0", name="line_direct_cost_non_negative"),
+        CheckConstraint("allocated_space_cost >= 0", name="line_space_non_negative"),
+        CheckConstraint("allocated_general_cost >= 0", name="line_general_non_negative"),
+        CheckConstraint("allocated_production_cost >= 0", name="line_production_cost_non_negative"),
+        CheckConstraint("allocated_real_cost >= 0", name="line_real_cost_non_negative"),
+        CheckConstraint("line_price >= 0", name="line_price_non_negative"),
+        CheckConstraint("unit_price_raw >= 0", name="line_unit_raw_non_negative"),
+        CheckConstraint("unit_price >= 0", name="line_unit_price_non_negative"),
+        CheckConstraint("line_subtotal >= 0", name="line_subtotal_non_negative"),
+        CheckConstraint("line_tax >= 0", name="line_tax_non_negative"),
+        CheckConstraint("line_total >= 0", name="line_total_non_negative"),
+        # Sin piezas no hay importe. Una linea de cantidad cero puede existir
+        # en un borrador a medias, pero no puede llevar un subtotal.
+        CheckConstraint(
+            "quantity > 0 OR (line_subtotal = 0 AND line_tax = 0 AND line_total = 0)",
+            name="no_quantity_no_amount",
+        ),
         Index("ix_v2_quotation_products_quotation", "v2_quotation_id", "sort_order"),
     )

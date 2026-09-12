@@ -60,6 +60,7 @@ from app.models.quoter_v2 import (
 from app.models.quoter_v2_settings import V2KilnRate
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_pricing import refresh_pricing
 
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
@@ -587,6 +588,9 @@ class V2FiringService:
         # respuesta. Llamarlo aqui tambien duplicaba consultas y obligaba a
         # fusionar dos listas de avisos que siempre decian lo mismo.
         estado = await self.firing_state(quotation_id)
+        # Fase 010F. Cambiar de horno cambia la tarifa de quema, y con ella el
+        # costo de produccion y todos los precios unitarios.
+        await refresh_pricing(self._session, quotation)
         await self._session.flush()
 
         self._audit.record_action(

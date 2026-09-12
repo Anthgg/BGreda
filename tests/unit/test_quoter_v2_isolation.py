@@ -60,6 +60,10 @@ V2_MODULES = (
     "app/services/quoter_v2_firing.py",
     "app/api/v1/quoter_v2_firing.py",
     "app/core/quoter_v2_firing.py",
+    "app/schemas/quoter_v2_pricing.py",
+    "app/services/quoter_v2_pricing.py",
+    "app/api/v1/quoter_v2_pricing.py",
+    "app/core/quoter_v2_pricing.py",
 )
 
 #: Modulos del motor historico. Que V2 importe cualquiera de estos significa
