@@ -95,6 +95,14 @@ class V2KilnNotFoundError(APIError):
     message = "El horno indicado no existe"
 
 
+class V2KilnInactiveError(APIError):
+    """Sugerir un horno que el taller ya no enciende."""
+
+    status_code = 422
+    code = "V2_KILN_INACTIVE"
+    message = "El horno esta dado de baja y no puede sugerirse"
+
+
 class V2FactorOutOfRangeError(APIError):
     """El factor pedido no cabe en el rango vigente de la configuracion."""
 
@@ -202,8 +210,18 @@ class V2SettingsService:
 
         for campo in ("retail_kiln_id", "wholesale_kiln_id"):
             valor = data.get(campo)
-            if valor is not None and await self._session.get(Kiln, valor) is None:
+            if valor is None:
+                continue
+            horno = await self._session.get(Kiln, valor)
+            if horno is None:
                 raise V2KilnNotFoundError()
+            # Fase 010E. Tambien tiene que estar activo. Configurar aqui un
+            # horno dado de baja parecia guardarse bien y despues las
+            # cotizaciones nuevas nacian sin horno, sin que nada explicara por
+            # que. La cotizacion ya rechaza elegir un horno inactivo; esta es
+            # la misma regla en la otra superficie.
+            if not horno.active:
+                raise V2KilnInactiveError(f"«{horno.name}» esta dado de baja")
 
         # `None` significa «no lo mandes» en casi todo el contrato, pero en los
         # dos hornos sugeridos significa «quitalo»: son anulables justamente
@@ -356,6 +374,14 @@ class V2SettingsService:
                 f"{v2.commercial_factor_min} y {v2.commercial_factor_max}"
             )
 
+        # Fase 010E. El horno con el que nace la cotizacion: el sugerido para su
+        # tipo de produccion. SUGERIDO —dentro de la cotizacion se puede cambiar
+        # sin tocar esta configuracion— y no obligatorio: una instalacion recien
+        # creada no tiene hornos todavia, y no poder abrir un borrador por eso
+        # dejaria el sistema sin forma de empezar.
+        tipo = production_type or v2.default_production_type
+        horno = await self._suggested_kiln(v2, tipo)
+
         return {
             "tax_percent_snapshot": politica.tax_percent,
             "currency_code_snapshot": moneda,
@@ -370,12 +396,38 @@ class V2SettingsService:
             "commercial_factor_min_snapshot": v2.commercial_factor_min,
             "commercial_factor_max_snapshot": v2.commercial_factor_max,
             "customer_kind": customer_kind or v2.default_customer_kind,
-            "production_type": production_type or v2.default_production_type,
+            "production_type": tipo,
+            "kiln_id": horno.id if horno is not None else None,
+            "kiln_name_snapshot": horno.name if horno is not None else None,
+            "kiln_capacity_snapshot": (horno.capacity_volume_cm3 if horno is not None else None),
             "low_fire_enabled": v2.low_fire_enabled_default,
             "high_fire_enabled": v2.high_fire_enabled_default,
             "settings_version_snapshot": v2.version,
             "settings_captured_at": datetime.now(UTC),
         }
+
+    async def _suggested_kiln(
+        self, v2: V2CommercialSettings, production_type: V2ProductionType
+    ) -> Kiln | None:
+        """El horno sugerido para un tipo de produccion, si sigue en pie.
+
+        Por menor sugiere el chico y por mayor el grande, pero cual es cual lo
+        dice la configuracion y no una heuristica sobre el nombre o sobre un
+        umbral de capacidad que nadie definio. Un horno configurado y luego
+        dado de baja devuelve `None`: es mejor nacer sin horno —y avisarlo— que
+        nacer con uno que el taller ya no enciende.
+        """
+        kiln_id = (
+            v2.retail_kiln_id
+            if production_type is V2ProductionType.RETAIL
+            else v2.wholesale_kiln_id
+        )
+        if kiln_id is None:
+            return None
+        horno = await self._session.get(Kiln, kiln_id)
+        if horno is None or not horno.active:
+            return None
+        return horno
 
     # ------------------------------------------------------------------
     # Validacion

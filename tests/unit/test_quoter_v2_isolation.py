@@ -56,6 +56,10 @@ V2_MODULES = (
     "app/services/quoter_v2_labor.py",
     "app/api/v1/quoter_v2_labor.py",
     "app/core/quoter_v2_labor.py",
+    "app/schemas/quoter_v2_firing.py",
+    "app/services/quoter_v2_firing.py",
+    "app/api/v1/quoter_v2_firing.py",
+    "app/core/quoter_v2_firing.py",
 )
 
 #: Modulos del motor historico. Que V2 importe cualquiera de estos significa
@@ -197,3 +201,43 @@ def test_el_check_de_secuencias_admite_el_tipo_nuevo() -> None:
         if hasattr(restriccion, "sqltext")
     ]
     assert any("QUOTE_V2" in texto for texto in textos)
+
+
+# ---------------------------------------------------------------------------
+# 6. Fase 010E. El factor por ocupacion no vuelve a V2
+# ---------------------------------------------------------------------------
+#: Los nombres con los que el multiplicador de Legacy volveria. Ninguno es
+#: prohibido en si: lo que se prohibe es que el dominio V2 los NOMBRE, porque
+#: nombrarlos significa haberlos leido.
+FACTOR_SYMBOLS = (
+    "occupancy_bracket",
+    "resolve_factor",
+    "KilnOccupancyFactor",
+    "occupancy_factor",
+    "ALLOWED_BRACKETS",
+    "compute_firing",
+)
+
+
+@pytest.mark.parametrize("modulo", V2_MODULES)
+def test_el_factor_por_ocupacion_no_aparece_en_v2(modulo: str) -> None:
+    """El x3 de Legacy no vuelve, ni con su nombre ni con otro.
+
+    `app.core.firings` NO esta prohibido —de ahi salen el volumen de una pieza,
+    la ocupacion fisica y el techo de hornadas, que son geometria y estaban
+    validados—, pero ese mismo modulo guarda ademas la mitad comercial del
+    motor viejo. Importar de ahi es legitimo; leer el factor, no.
+
+    Por eso la comprobacion no mira el import sino los SIMBOLOS: lo que no
+    puede pasar es que un fichero de V2 mencione el multiplicador.
+    """
+    codigo = (REPO_ROOT / modulo).read_text(encoding="utf-8")
+    # Sin la docstring de cabecera: varios modulos de V2 explican justamente
+    # que el factor desaparecio, y esa explicacion no es un uso.
+    cuerpo = codigo.split('"""', 2)[2] if codigo.lstrip().startswith('"""') else codigo
+    presentes = [simbolo for simbolo in FACTOR_SYMBOLS if simbolo in cuerpo]
+    assert not presentes, (
+        f"{modulo} nombra el factor por ocupacion de Legacy: {presentes}. "
+        "En V2 la ocupacion dice cuanto cabe y cuantas hornadas hacen falta, "
+        "nunca por cuanto multiplicar un precio."
+    )

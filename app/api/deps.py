@@ -47,6 +47,7 @@ from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
+from app.services.quoter_v2_firing import V2FiringService
 from app.services.quoter_v2_labor import V2LaborService
 from app.services.quoter_v2_materials import V2MaterialService
 from app.services.quoter_v2_settings import V2SettingsService
@@ -405,6 +406,22 @@ async def get_v2_labor_service(
 
 
 V2LaborServiceDep = Annotated[V2LaborService, Depends(get_v2_labor_service)]
+
+
+async def get_v2_firing_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2FiringService:
+    """Quema de V2.
+
+    Lee los hornos y sus tarifas; no los escribe. Administrar el maestro es de
+    la configuracion V2, y mezclarlo aqui dejaria que cotizar cambiara la
+    tarifa de la casa.
+    """
+    return V2FiringService(session, audit)
+
+
+V2FiringServiceDep = Annotated[V2FiringService, Depends(get_v2_firing_service)]
 
 
 async def get_v2_quotation_service(

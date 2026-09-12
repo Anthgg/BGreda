@@ -26,6 +26,10 @@ MAX_QUANTITY = Decimal("1000000000")
 #: Un costo por unidad se expresa con mucha escala —0,0013 el gramo— pero no
 #: puede ser arbitrariamente grande.
 MAX_UNIT_COST = Decimal("1000000")
+#: Fase 010E. Tope de una medida, en centimetros. Cien metros de largo no es
+#: una pieza de ceramica: frena un cero de mas al teclear antes de que el
+#: volumen desborde la columna.
+MAX_DIMENSION = Decimal("10000")
 
 
 class V2MaterialUpsertIn(BaseModel):
@@ -102,6 +106,16 @@ class V2QuotationProductIn(BaseModel):
     product_name: str | None = Field(default=None, max_length=200)
     quantity: int = Field(default=0, ge=0, le=1_000_000)
 
+    #: Fase 010E. Medidas de UNA pieza, en centimetros. De aqui sale el volumen
+    #: que ocupa horno, y de ahi las hornadas. Opcionales: un borrador se puede
+    #: guardar sin medir todavia, y entonces la linea no ocupa y avisa.
+    #:
+    #: Cero no se admite. Una pieza de alto cero no existe, y aceptarlo
+    #: guardaria un volumen cero indistinguible de «sin medir».
+    length_cm: Decimal | None = Field(default=None, gt=0, le=MAX_DIMENSION)
+    width_cm: Decimal | None = Field(default=None, gt=0, le=MAX_DIMENSION)
+    height_cm: Decimal | None = Field(default=None, gt=0, le=MAX_DIMENSION)
+
     body_material_id: int | None = Field(default=None, ge=1)
     #: Lo que lleva UNA pieza, en la unidad base del material.
     body_unit_weight: Decimal | None = Field(default=None, ge=0, le=MAX_QUANTITY)
@@ -125,6 +139,20 @@ class V2QuotationProductOut(BaseModel):
     product_id: int | None
     product_name: str | None
     quantity: int
+
+    length_cm: Decimal | None
+    width_cm: Decimal | None
+    height_cm: Decimal | None
+    unit_volume_cm3: Decimal
+    total_volume_cm3: Decimal
+    #: Que porcentaje del horno elegido ocupa esta linea. Informacion, NO un
+    #: multiplicador: en V2 ocupar poco horno no encarece la pieza.
+    firing_occupancy_percent: Decimal
+    #: Su participacion en el volumen total, que es la base del reparto.
+    firing_volume_share_percent: Decimal
+    #: Lo que le toca de la quema y del gas real. Dos numeros distintos.
+    firing_commercial_cost: Decimal
+    firing_gas_cost: Decimal
 
     body_material_id: int | None
     body_material_name: str | None
