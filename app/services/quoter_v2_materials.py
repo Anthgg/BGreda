@@ -53,6 +53,11 @@ from app.models.quoter_v2_materials import V2MaterialCost, V2MaterialKind
 from app.models.recipes import PreparationStatus, RecipePreparation
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_firing import (
+    apply_line_geometry,
+    copy_master_dimensions,
+    refresh_firing,
+)
 
 ZERO = Decimal(0)
 
@@ -423,6 +428,11 @@ class V2MaterialService:
         self._session.add(linea)
         avisos = await self._fill_line(linea, data)
         await self._session.flush()
+        # Fase 010E. La quema depende del volumen de TODAS las lineas: anadir
+        # una pieza puede cambiar el numero de hornadas y el reparto del costo
+        # entre productos. Sin este recalculo la cabecera seguiria diciendo las
+        # hornadas de antes de esta linea.
+        avisos += await refresh_firing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LINE_ENTITY,
@@ -442,12 +452,13 @@ class V2MaterialService:
         *,
         user: AuthenticatedUser,
     ) -> tuple[V2QuotationProduct, list[str]]:
-        await self._draft(quotation_id)
+        quotation = await self._draft(quotation_id)
         linea = await self._line(quotation_id, line_id)
         if "quantity" in data:
             linea.quantity = int(data["quantity"] or 0)
         avisos = await self._fill_line(linea, data)
         await self._session.flush()
+        avisos += await refresh_firing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LINE_ENTITY,
@@ -462,9 +473,13 @@ class V2MaterialService:
     async def delete_line(
         self, quotation_id: int, line_id: int, *, user: AuthenticatedUser
     ) -> None:
-        await self._draft(quotation_id)
+        quotation = await self._draft(quotation_id)
         linea = await self._line(quotation_id, line_id)
         await self._session.delete(linea)
+        await self._session.flush()
+        # Quitar una pieza tambien cambia la carga del horno: lo que quede
+        # tiene que volver a repartirse el costo de la quema entre menos.
+        await refresh_firing(self._session, quotation)
         self._audit.record_action(
             entity_type=V2_LINE_ENTITY,
             entity_id=str(line_id),
@@ -494,6 +509,9 @@ class V2MaterialService:
                 # que el usuario ya escribio manda.
                 if linea.body_unit_weight is None and producto.grammage is not None:
                     linea.body_unit_weight = producto.grammage
+                # Fase 010E. Mismo criterio con las medidas: se ofrecen las del
+                # catalogo y no se pisan las de la linea.
+                copy_master_dimensions(linea, producto)
             else:
                 linea.product_name_snapshot = None
 
@@ -505,6 +523,12 @@ class V2MaterialService:
         if "product_name" in data and linea.product_id is None:
             nombre = (data["product_name"] or "").strip()
             linea.product_name_snapshot = nombre or None
+
+        # Fase 010E. La geometria se recalcula SIEMPRE, igual que el material y
+        # por el mismo motivo: subir la cantidad cambia el volumen total, y un
+        # volumen que no se recalcula deja de corresponder a su linea —y con
+        # el, las hornadas de toda la cotizacion—.
+        apply_line_geometry(linea, data)
         return await self.apply_materials(linea, data)
 
     async def _draft(self, quotation_id: int) -> V2Quotation:

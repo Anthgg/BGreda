@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -252,6 +253,84 @@ class V2Quotation(Base, TimestampMixin):
     #: respeta el precio. 010F cobrara el espacio por ESTOS dias.
     effective_work_days: Mapped[int | None] = mapped_column(Integer)
 
+    # ---- Fase 010E: quema -------------------------------------------------
+    #: El horno de ESTA cotizacion. Nace del sugerido por el tipo de produccion
+    #: —chico para por menor, grande para por mayor— y se puede cambiar aqui
+    #: sin tocar la configuracion global. RESTRICT: retirar un horno del taller
+    #: no puede borrar el documento que explica un precio ya dado.
+    #: Con indice: la clave foranea es RESTRICT, asi que borrar o dar de baja
+    #: un horno obliga a PostgreSQL a comprobar quien lo referencia. Sin
+    #: indice esa comprobacion recorre la tabla entera de cotizaciones y la
+    #: bloquea mientras tanto.
+    kiln_id: Mapped[int | None] = mapped_column(
+        ForeignKey("kilns.id", ondelete="RESTRICT"), index=True
+    )
+    kiln_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    #: La capacidad con la que se calculo, en cm3. Congelada: si manana se
+    #: remide el horno, esta cotizacion sigue explicando sus hornadas con el
+    #: numero que uso. Es ademas el unico dato de «tamano» que el maestro
+    #: tiene: no existe un enum chico/grande, y deducirlo por el nombre
+    #: pondria una tarifa de S/200 en el horno equivocado.
+    kiln_capacity_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+
+    firing_total_volume_cm3: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Puede pasar de 100 y eso no es un error: un 160 % son dos hornadas. Va
+    #: en `quantity_numeric` y no en `percentage_numeric` porque aquel tope de
+    #: 999,999999 lo alcanzaria una produccion grande en un horno chico.
+    firing_occupancy_percent: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Hornadas que pide el volumen: techo de volumen/capacidad. No se
+    #: prorratea ninguna: la segunda hornada al 60 % cuesta una entera.
+    firing_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    low_fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    high_fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    #: Lo que de verdad cuesta encender, por hornada. COSTO, no precio. No
+    #: depende del tipo de cliente: el gas vale lo mismo lo queme quien lo
+    #: queme.
+    gas_cost_low_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
+    gas_cost_high_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
+    #: Lo que se COBRA por hornada, ya resuelto segun el tipo de cliente. Se
+    #: guarda el importe y no «externo o alumno» porque lo que tiene que dejar
+    #: de moverse es el numero.
+    commercial_rate_low_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
+    commercial_rate_high_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
+
+    #: Si cada uno de los cuatro importes lo decidio una persona dentro de esta
+    #: cotizacion. El numero solo no lo distingue, y la diferencia importa: un
+    #: acuerdo no se pierde porque alguien reenvie el mismo horno.
+    gas_low_is_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    gas_high_is_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    commercial_low_is_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    commercial_high_is_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+    firing_gas_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    firing_commercial_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Lo que deja la quema por si sola. GENERADA, al contrario que la tarifa
+    #: por hora de 010D: aqui los dos sumandos viven en esta misma fila, asi
+    #: que la base puede calcularla y nunca podra contradecirlos. No es el
+    #: margen de la cotizacion: es la diferencia de UN componente.
+    firing_difference: Mapped[Decimal] = mapped_column(
+        calculation_numeric(),
+        Computed("firing_commercial_total - firing_gas_total", persisted=True),
+        nullable=False,
+    )
+
     created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
     created_by_name: Mapped[str | None] = mapped_column(String(200))
 
@@ -418,6 +497,74 @@ class V2Quotation(Base, TimestampMixin):
             "customer_kind IS NULL OR customer_kind IN ('EXTERNAL', 'STUDENT')",
             name="customer_kind_allowed",
         ),
+        # ---- Fase 010E ----------------------------------------------------
+        CheckConstraint(
+            "kiln_capacity_snapshot IS NULL OR kiln_capacity_snapshot > 0",
+            name="kiln_capacity_snapshot_positive",
+        ),
+        CheckConstraint("firing_total_volume_cm3 >= 0", name="firing_volume_non_negative"),
+        CheckConstraint("firing_occupancy_percent >= 0", name="firing_occupancy_non_negative"),
+        CheckConstraint("firing_count >= 0", name="firing_count_non_negative"),
+        # Una quema no puede pedir mas hornadas de las que pide el volumen: el
+        # numero de hornadas lo fija la carga, y baja y alta se hacen sobre la
+        # MISMA carga. Un conteo mayor seria cobrar un encendido que nadie hizo.
+        CheckConstraint(
+            "low_fire_count >= 0 AND low_fire_count <= firing_count",
+            name="low_fire_count_within_firing_count",
+        ),
+        CheckConstraint(
+            "high_fire_count >= 0 AND high_fire_count <= firing_count",
+            name="high_fire_count_within_firing_count",
+        ),
+        # Apagada es apagada, igual que el esmalte de 010C y la ilustracion de
+        # 010D. `coalesce` porque una cotizacion de 010A tiene el campo en NULL
+        # —nacio antes de que existiera la quema— y ahi el conteo es cero.
+        CheckConstraint(
+            "coalesce(low_fire_enabled, false) OR low_fire_count = 0",
+            name="low_fire_off_costs_nothing",
+        ),
+        CheckConstraint(
+            "coalesce(high_fire_enabled, false) OR high_fire_count = 0",
+            name="high_fire_off_costs_nothing",
+        ),
+        # Sin horno no hay hornada ni importe. Sin este CHECK, borrar el horno
+        # de un borrador dejaria unos totales huerfanos que nadie sabria a que
+        # capacidad corresponden.
+        CheckConstraint(
+            "kiln_id IS NOT NULL"
+            " OR (firing_count = 0 AND firing_occupancy_percent = 0"
+            "     AND firing_gas_total = 0 AND firing_commercial_total = 0)",
+            name="firing_requires_kiln",
+        ),
+        # Sin un solo encendido no hay importe. Cubre el caso que los dos CHECK
+        # anteriores dejan pasar por separado: apagar AMBAS quemas deja los dos
+        # conteos en cero y, sin esto, los totales podrian quedarse con el
+        # importe de antes de apagarlas.
+        CheckConstraint(
+            "low_fire_count > 0 OR high_fire_count > 0"
+            " OR (firing_gas_total = 0 AND firing_commercial_total = 0)",
+            name="no_firing_costs_nothing",
+        ),
+        CheckConstraint(
+            "gas_cost_low_snapshot IS NULL OR gas_cost_low_snapshot >= 0",
+            name="gas_low_non_negative",
+        ),
+        CheckConstraint(
+            "gas_cost_high_snapshot IS NULL OR gas_cost_high_snapshot >= 0",
+            name="gas_high_non_negative",
+        ),
+        CheckConstraint(
+            "commercial_rate_low_snapshot IS NULL OR commercial_rate_low_snapshot >= 0",
+            name="commercial_low_non_negative",
+        ),
+        CheckConstraint(
+            "commercial_rate_high_snapshot IS NULL OR commercial_rate_high_snapshot >= 0",
+            name="commercial_high_non_negative",
+        ),
+        CheckConstraint("firing_gas_total >= 0", name="firing_gas_total_non_negative"),
+        CheckConstraint(
+            "firing_commercial_total >= 0", name="firing_commercial_total_non_negative"
+        ),
         Index("ix_v2_quotations_created_at", "created_at"),
     )
 
@@ -454,6 +601,45 @@ class V2QuotationProduct(Base, TimestampMixin):
     )
     product_name_snapshot: Mapped[str | None] = mapped_column(String(200))
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    # ---- Fase 010E: geometria y quema ------------------------------------
+    #: Medidas de UNA pieza, en centimetros. Anulables porque un borrador a
+    #: medio llenar es legitimo: se anade la linea, se elige la pasta y las
+    #: medidas llegan despues. Sin ellas la linea no ocupa horno y avisa.
+    #:
+    #: Se copian del maestro cuando el producto las declara y la linea todavia
+    #: no tiene las suyas, igual que el gramaje en 010C. Copiadas y no leidas:
+    #: remedir una pieza en el catalogo no puede recalcular lo ya cotizado.
+    length_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    width_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    height_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    unit_volume_cm3: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    total_volume_cm3: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Que porcentaje del horno elegido ocupa ESTA linea. Es informacion, no un
+    #: multiplicador: en V2 ocupar poco horno no encarece la pieza.
+    firing_occupancy_percent: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Participacion en el volumen total de la cotizacion. Es la base con la
+    #: que se reparte la quema, y se guarda para poder auditar el reparto.
+    firing_volume_share_percent: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Lo que a esta linea le toca de la quema. La suma de todas las lineas es
+    #: exactamente el total de la cotizacion: el resto del redondeo se entrega,
+    #: no se pierde.
+    firing_commercial_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Y lo que le toca del gas REAL. Separado del anterior a proposito: son
+    #: dos numeros distintos y mezclarlos borraria la diferencia de la quema.
+    firing_gas_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
 
     # ---- Pasta -----------------------------------------------------------
     body_material_id: Mapped[int | None] = mapped_column(
@@ -552,5 +738,20 @@ class V2QuotationProduct(Base, TimestampMixin):
             "glaze_ml_per_gram_snapshot IS NULL OR glaze_ml_per_gram_snapshot > 0",
             name="glaze_ml_per_gram_positive",
         ),
+        # ---- Fase 010E ----------------------------------------------------
+        # Una medida en cero no es una pieza plana: es un dato sin poner. NULL
+        # lo dice; un cero guardado lo esconderia detras de un volumen cero.
+        CheckConstraint("length_cm IS NULL OR length_cm > 0", name="length_positive"),
+        CheckConstraint("width_cm IS NULL OR width_cm > 0", name="width_positive"),
+        CheckConstraint("height_cm IS NULL OR height_cm > 0", name="height_positive"),
+        CheckConstraint("unit_volume_cm3 >= 0", name="unit_volume_non_negative"),
+        CheckConstraint("total_volume_cm3 >= 0", name="total_volume_non_negative"),
+        CheckConstraint("firing_occupancy_percent >= 0", name="line_firing_occupancy_non_negative"),
+        CheckConstraint(
+            "firing_volume_share_percent >= 0 AND firing_volume_share_percent <= 100",
+            name="line_volume_share_range",
+        ),
+        CheckConstraint("firing_commercial_cost >= 0", name="line_firing_cost_non_negative"),
+        CheckConstraint("firing_gas_cost >= 0", name="line_firing_gas_non_negative"),
         Index("ix_v2_quotation_products_quotation", "v2_quotation_id", "sort_order"),
     )
