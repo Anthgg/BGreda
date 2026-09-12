@@ -17,6 +17,7 @@ from app.api.v1 import (
     quotation_builder,
     quotations,
     quoter_v2,
+    quoter_v2_labor,
     quoter_v2_materials,
     quoter_v2_settings,
     recipes,
@@ -43,6 +44,8 @@ api_v1_router.include_router(quoter_v2.router)
 #: son dos configuraciones distintas y el IGV se sigue editando en la de
 #: la empresa, que es su unica fuente.
 api_v1_router.include_router(quoter_v2_settings.router)
+#: Fase 010D. Mano de obra de V2: trabajadores, tecnicas e ilustracion.
+api_v1_router.include_router(quoter_v2_labor.router)
 #: Fase 010C. Materiales de V2: valorizacion y lineas de cotizacion.
 api_v1_router.include_router(quoter_v2_materials.router)
 api_v1_router.include_router(production.router)

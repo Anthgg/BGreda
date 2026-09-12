@@ -85,6 +85,12 @@ from app.models.quoter_v2 import (
     V2QuotationProduct,
     V2QuotationStatus,
 )
+from app.models.quoter_v2_labor import (
+    V2QuotationLabor,
+    V2Technique,
+    V2Worker,
+    V2WorkerType,
+)
 from app.models.quoter_v2_materials import (
     V2MaterialCost,
     V2MaterialKind,
@@ -199,6 +205,10 @@ __all__ = [
     "V2MaterialOrigin",
     "V2ProductionType",
     "V2Quotation",
+    "V2QuotationLabor",
     "V2QuotationProduct",
     "V2QuotationStatus",
+    "V2Technique",
+    "V2Worker",
+    "V2WorkerType",
 ]

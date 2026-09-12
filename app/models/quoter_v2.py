@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.masters import Partner
+    from app.models.quoter_v2_labor import V2QuotationLabor
 
 from sqlalchemy import (
     Boolean,
@@ -215,6 +216,42 @@ class V2Quotation(Base, TimestampMixin):
     settings_version_snapshot: Mapped[int | None] = mapped_column(Integer)
     settings_captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # ---- Fase 010D: ilustracion -----------------------------------------
+    #: Apagada por defecto. Encenderla es una decision explicita, igual que el
+    #: esmalte en 010C.
+    illustration_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    illustration_quantity: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Que hay que ilustrar. Texto libre a proposito: inventar categorias
+    #: —basica, media, avanzada— seria decidir por el taller una clasificacion
+    #: comercial que nadie ha pedido.
+    illustration_notes: Mapped[str | None] = mapped_column(Text)
+
+    #: Lo que valia ilustrar cuando se cotizo. Sin esto, subir el jornal de
+    #: ilustracion manana reescribiria un precio ya entregado.
+    illustration_daily_rate_snapshot: Mapped[Decimal | None] = mapped_column(money_numeric())
+    illustration_workday_hours_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    illustration_capacity_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    illustration_hourly_rate_snapshot: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    illustration_hours: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    illustration_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
+    # ---- Fase 010D: planificacion ----------------------------------------
+    #: Cuantos dias de taller se van a usar. Es una DECISION, no un calculo:
+    #: diez horas caben en un dia largo o en dos dias, y quien planifica elige.
+    #: NULL significa que todavia no se ha decidido, no que sean cero.
+    #:
+    #: No confundir con la vigencia de la cotizacion, que es cuanto tiempo se
+    #: respeta el precio. 010F cobrara el espacio por ESTOS dias.
+    effective_work_days: Mapped[int | None] = mapped_column(Integer)
+
     created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
     created_by_name: Mapped[str | None] = mapped_column(String(200))
 
@@ -232,6 +269,18 @@ class V2Quotation(Base, TimestampMixin):
         ),
         lazy="selectin",
     )
+    #: Fase 010D. Las tareas de mano de obra. `selectin` por el mismo motivo
+    #: que los productos: el costo de la cabecera se arma sumandolas.
+    labor: Mapped[list[V2QuotationLabor]] = relationship(
+        "V2QuotationLabor",
+        back_populates="quotation",
+        cascade="all, delete-orphan",
+        # En texto y no en `lambda`: la clase vive en otro modulo y solo se
+        # importa para los tipos, asi que en tiempo de ejecucion el nombre no
+        # existe aqui. SQLAlchemy lo resuelve contra su registro.
+        order_by="(V2QuotationLabor.sort_order, V2QuotationLabor.id)",
+        lazy="selectin",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -245,6 +294,32 @@ class V2Quotation(Base, TimestampMixin):
         CheckConstraint(
             "production_type IN ('RETAIL', 'WHOLESALE')",
             name="production_type_allowed",
+        ),
+        # Fase 010D. Apagada es apagada: sin horas y sin costo. Mismo criterio
+        # que el esmalte de 010C, y por el mismo motivo: «cantidad cero pero
+        # costo distinto de cero» seria cobrar algo que alguien dijo que no.
+        CheckConstraint(
+            "illustration_enabled OR (illustration_hours = 0 AND illustration_cost = 0)",
+            name="illustration_off_costs_nothing",
+        ),
+        CheckConstraint("illustration_quantity >= 0", name="illustration_quantity_non_negative"),
+        CheckConstraint("illustration_hours >= 0", name="illustration_hours_non_negative"),
+        CheckConstraint("illustration_cost >= 0", name="illustration_cost_non_negative"),
+        CheckConstraint(
+            "illustration_capacity_snapshot IS NULL OR illustration_capacity_snapshot > 0",
+            name="illustration_capacity_positive",
+        ),
+        CheckConstraint(
+            "illustration_workday_hours_snapshot IS NULL"
+            " OR (illustration_workday_hours_snapshot > 0"
+            "     AND illustration_workday_hours_snapshot <= 24)",
+            name="illustration_workday_range",
+        ),
+        # Cero dias efectivos con trabajo asignado seria espacio gratis; NULL
+        # es otra cosa —todavia no se decidio— y por eso se admite.
+        CheckConstraint(
+            "effective_work_days IS NULL OR effective_work_days >= 0",
+            name="effective_work_days_non_negative",
         ),
         # Fase 010B. Los snapshots admiten NULL —una cotizacion de 010A nacio
         # sin ellos— pero, si hay valor, tiene que ser un valor posible. Un
