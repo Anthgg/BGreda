@@ -50,6 +50,7 @@ from app.services.quoter_v2 import V2QuotationService
 from app.services.quoter_v2_firing import V2FiringService
 from app.services.quoter_v2_labor import V2LaborService
 from app.services.quoter_v2_materials import V2MaterialService
+from app.services.quoter_v2_pricing import V2PricingService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
@@ -422,6 +423,21 @@ async def get_v2_firing_service(
 
 
 V2FiringServiceDep = Annotated[V2FiringService, Depends(get_v2_firing_service)]
+
+
+async def get_v2_pricing_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2PricingService:
+    """Motor economico de V2.
+
+    Lee costos ya congelados y escribe el resultado. No toca ningun maestro:
+    el precio de una cotizacion no puede cambiar la politica de la casa.
+    """
+    return V2PricingService(session, audit)
+
+
+V2PricingServiceDep = Annotated[V2PricingService, Depends(get_v2_pricing_service)]
 
 
 async def get_v2_quotation_service(

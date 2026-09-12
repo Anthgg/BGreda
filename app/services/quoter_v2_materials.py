@@ -58,6 +58,7 @@ from app.services.quoter_v2_firing import (
     copy_master_dimensions,
     refresh_firing,
 )
+from app.services.quoter_v2_pricing import refresh_pricing
 
 ZERO = Decimal(0)
 
@@ -433,6 +434,10 @@ class V2MaterialService:
         # entre productos. Sin este recalculo la cabecera seguiria diciendo las
         # hornadas de antes de esta linea.
         avisos += await refresh_firing(self._session, quotation)
+        # Fase 010F. El precio depende del costo de TODAS las lineas: anadir
+        # una cambia el reparto de los generales y, con el, cada unitario.
+        # El orden no es casual: geometria, luego quema, luego precio.
+        avisos += await refresh_pricing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LINE_ENTITY,
@@ -459,6 +464,7 @@ class V2MaterialService:
         avisos = await self._fill_line(linea, data)
         await self._session.flush()
         avisos += await refresh_firing(self._session, quotation)
+        avisos += await refresh_pricing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LINE_ENTITY,
@@ -480,6 +486,7 @@ class V2MaterialService:
         # Quitar una pieza tambien cambia la carga del horno: lo que quede
         # tiene que volver a repartirse el costo de la quema entre menos.
         await refresh_firing(self._session, quotation)
+        await refresh_pricing(self._session, quotation)
         self._audit.record_action(
             entity_type=V2_LINE_ENTITY,
             entity_id=str(line_id),

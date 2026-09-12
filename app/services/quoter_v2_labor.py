@@ -63,6 +63,7 @@ from app.models.quoter_v2_settings import V2CommercialSettings
 from app.models.settings import SINGLETON_ID
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_pricing import refresh_pricing
 
 ZERO = Decimal(0)
 
@@ -379,6 +380,10 @@ class V2LaborService:
             avisos = await self._fill_labor(tarea, data, creando=True)
         await self._session.flush()
         avisos += await self._workday_warning(tarea)
+        # Fase 010F. La mano de obra entra en el costo directo de su producto y
+        # en la base por horas con la que se reparte el espacio: sin recalcular,
+        # el precio quedaria explicandose con un costo que ya no es el suyo.
+        avisos += await refresh_pricing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LABOR_ENTITY,
@@ -398,7 +403,7 @@ class V2LaborService:
         *,
         user: AuthenticatedUser,
     ) -> tuple[V2QuotationLabor, list[str]]:
-        await self._draft(quotation_id)
+        quotation = await self._draft(quotation_id)
         tarea = await self._labor(quotation_id, labor_id)
         # Mismo motivo que al crear: cambiar de trabajador deja la fila en un
         # estado intermedio mientras se resuelve el nuevo.
@@ -406,6 +411,7 @@ class V2LaborService:
             avisos = await self._fill_labor(tarea, data, creando=False)
         await self._session.flush()
         avisos += await self._workday_warning(tarea)
+        avisos += await refresh_pricing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LABOR_ENTITY,
@@ -420,7 +426,7 @@ class V2LaborService:
     async def delete_labor(
         self, quotation_id: int, labor_id: int, *, user: AuthenticatedUser
     ) -> None:
-        await self._draft(quotation_id)
+        quotation = await self._draft(quotation_id)
         tarea = await self._labor(quotation_id, labor_id)
         await self._session.delete(tarea)
         self._audit.record_action(
@@ -432,6 +438,7 @@ class V2LaborService:
             metadata={"quotation_id": str(quotation_id)},
         )
         await self._session.flush()
+        await refresh_pricing(self._session, quotation)
 
     # ------------------------------------------------------------------
     # Congelado de una tarea
@@ -675,6 +682,18 @@ class V2LaborService:
             quotation.illustration_hours = ZERO
             quotation.illustration_cost = ZERO
             await self._session.flush()
+            await refresh_pricing(self._session, quotation)
+            # Apagarla tambien se audita. Sin esto, el rastro solo recogia
+            # quien la encendio: retirar un concepto que cuesta dinero no
+            # dejaba huella de quien lo hizo ni de cuando.
+            self._audit.record_action(
+                entity_type=V2_ILLUSTRATION_ENTITY,
+                entity_id=str(quotation.id),
+                action=AuditAction.UPDATE,
+                user_id=user.id,
+                user_display_name=user.display_name,
+                metadata={"enabled": "False", "hours": "0", "cost": "0"},
+            )
             return quotation
 
         ajustes = await self._settings()
@@ -728,6 +747,10 @@ class V2LaborService:
             raise V2LaborInputInvalid(str(error)) from error
 
         await self._session.flush()
+        # Fase 010F. La ilustracion es un costo general de la cotizacion: al
+        # encenderla o cambiarla se reparte entre los productos y mueve todos
+        # los precios.
+        await refresh_pricing(self._session, quotation)
         self._audit.record_action(
             entity_type=V2_ILLUSTRATION_ENTITY,
             entity_id=str(quotation.id),
@@ -754,6 +777,9 @@ class V2LaborService:
         quotation = await self._draft(quotation_id)
         quotation.effective_work_days = effective_work_days
         await self._session.flush()
+        # El espacio se cobra por dias efectivos: decidirlos pone precio a algo
+        # que hasta ahora no lo tenia.
+        await refresh_pricing(self._session, quotation)
         self._audit.record_action(
             entity_type=V2_LABOR_ENTITY,
             entity_id=str(quotation.id),

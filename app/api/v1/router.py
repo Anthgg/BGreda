@@ -20,6 +20,7 @@ from app.api.v1 import (
     quoter_v2_firing,
     quoter_v2_labor,
     quoter_v2_materials,
+    quoter_v2_pricing,
     quoter_v2_settings,
     recipes,
     settings,
@@ -48,6 +49,7 @@ api_v1_router.include_router(quoter_v2_settings.router)
 #: Fase 010D. Mano de obra de V2: trabajadores, tecnicas e ilustracion.
 api_v1_router.include_router(quoter_v2_firing.router)
 api_v1_router.include_router(quoter_v2_labor.router)
+api_v1_router.include_router(quoter_v2_pricing.router)
 #: Fase 010C. Materiales de V2: valorizacion y lineas de cotizacion.
 api_v1_router.include_router(quoter_v2_materials.router)
 api_v1_router.include_router(production.router)

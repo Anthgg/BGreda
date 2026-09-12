@@ -541,12 +541,20 @@ class TestDowngrade:
 
 
 # ---------------------------------------------------------------------------
-# 6. La cabeza
+# 6. La revision se aplica y se sella
 # ---------------------------------------------------------------------------
-async def test_la_cabeza_es_0032(migration_engine: AsyncEngine) -> None:
-    _upgrade("head")
+async def test_subir_a_0032_deja_esa_version_sellada(migration_engine: AsyncEngine) -> None:
+    """Se sube a 0032 POR SU NOMBRE, no a `head`.
+
+    Afirmar que la cabeza del proyecto es 0032 obligaba a reescribir esta
+    prueba en cada fase, y la rompio 0033 el mismo dia que entro. Lo que aqui
+    hay que comprobar es que ESTA revision se aplica limpia y se sella a si
+    misma; cual sea la ultima del proyecto lo vigila la prueba de la revision
+    mas nueva.
+    """
+    _upgrade("0032")
     async with migration_engine.connect() as connection:
-        cabezas = list(
+        sellada = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0032"]
+    assert sellada == ["0032"]
