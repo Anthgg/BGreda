@@ -47,14 +47,17 @@ import asyncio
 import os
 import sys
 import uuid
-from urllib.parse import urlparse
+from typing import NoReturn
 
 import httpx
 import uvicorn
 from fastapi import FastAPI
+from sqlalchemy.dialects.postgresql.asyncpg import dialect as AsyncpgDialect
+from sqlalchemy.engine import make_url
 
 from app.api.deps import get_object_storage, get_profile_repository, get_supabase_auth_client
 from app.core.config import get_settings
+from app.db.session import normalize_database_url
 from app.main import create_app
 from app.models.profile import Profile, UserRole
 from tests.db.fakes import FakeObjectStorage
@@ -67,19 +70,48 @@ ADMIN_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000010")
 HOSTS_LOCALES = {"localhost", "127.0.0.1", "::1"}
 
 
-def _abortar(motivo: str) -> None:
+def _abortar(motivo: str) -> NoReturn:
     print(f"[servidor_revision] {motivo}", file=sys.stderr)
     raise SystemExit(2)
 
 
+def hosts_de_conexion(url: str) -> list[str | None]:
+    """Los hosts a los que asyncpg se conectara DE VERDAD con esta URL.
+
+    No se lee el host de la cadena: se le pide al propio dialecto de SQLAlchemy
+    los argumentos que entregara a asyncpg, porque la cadena miente. En
+    `postgresql://u:p@localhost/db?host=db.remoto` el `hostname` que ve
+    `urlparse` es `localhost`, pero asyncpg recibe `host="db.remoto"` y se
+    conecta alli. Lo encontro la revision de Codex y se comprobo antes de
+    corregirlo. Tambien cubre las URLs multi-host, que llegan como lista.
+    """
+    _, argumentos = AsyncpgDialect().create_connect_args(make_url(normalize_database_url(url)))
+    host = argumentos.get("host")
+    if isinstance(host, (list, tuple)):
+        return [str(h) for h in host]
+    return [None if host is None else str(host)]
+
+
 def _comprobar_entorno() -> tuple[str, str]:
-    """Las tres condiciones sin las cuales este modulo no arranca."""
+    """Las condiciones sin las cuales este modulo no arranca."""
     if os.environ.get("GREDA_E2E_REVISION") != "1":
         _abortar("GREDA_E2E_REVISION=1 es obligatorio: este backend usa autenticacion simulada.")
-    url = os.environ.get("DATABASE_URL", "")
-    host = urlparse(url.replace("+asyncpg", "")).hostname
-    if host not in HOSTS_LOCALES:
-        _abortar(f"DATABASE_URL tiene que apuntar a localhost y apunta a {host!r}.")
+    # Se valida la URL que usara LA APLICACION, no la variable de entorno: la
+    # configuracion tambien puede cargarla de un `.env`, y una guardia que mira
+    # un sitio mientras la aplicacion lee de otro no guarda nada.
+    get_settings.cache_clear()
+    url = get_settings().DATABASE_URL.get_secret_value()
+    if not url:
+        _abortar("DATABASE_URL no esta definida.")
+    try:
+        hosts = hosts_de_conexion(url)
+    except Exception as error:
+        # Cualquier URL que no se entienda se rechaza: no se arranca a ciegas.
+        _abortar(f"DATABASE_URL no se pudo interpretar: {type(error).__name__}.")
+    # Sin host explicito asyncpg cae en PGHOST o en un socket: se exige que lo diga.
+    remotos = [h for h in hosts if h not in HOSTS_LOCALES]
+    if remotos:
+        _abortar(f"DATABASE_URL tiene que conectar solo a localhost y conectaria a {remotos!r}.")
     email = os.environ.get("E2E_EMAIL", "")
     clave = os.environ.get("E2E_PASSWORD", "")
     if not email or not clave:
