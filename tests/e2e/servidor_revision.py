@@ -69,10 +69,23 @@ ADMIN_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000010")
 
 HOSTS_LOCALES = {"localhost", "127.0.0.1", "::1"}
 
+#: Lo UNICO que la URL de la base puede entregarle a asyncpg. Cualquier parametro
+#: de la query llega tal cual a la conexion —`hostaddr`, `service`, `passfile`—,
+#: y aunque hoy ninguno de esos lleve a un servidor remoto con un host local
+#: explicito (la re-revision de Codex lo comprobo), una base de pruebas no
+#: necesita ninguno. Lista blanca y no lista negra: lo que no se conoce, fuera.
+ARGUMENTOS_PERMITIDOS = {"host", "port", "user", "password", "database"}
+
 
 def _abortar(motivo: str) -> NoReturn:
     print(f"[servidor_revision] {motivo}", file=sys.stderr)
     raise SystemExit(2)
+
+
+def argumentos_de_conexion(url: str) -> dict[str, object]:
+    """Lo que el dialecto de SQLAlchemy le entregara a asyncpg con esta URL."""
+    _, argumentos = AsyncpgDialect().create_connect_args(make_url(normalize_database_url(url)))
+    return dict(argumentos)
 
 
 def hosts_de_conexion(url: str) -> list[str | None]:
@@ -85,7 +98,7 @@ def hosts_de_conexion(url: str) -> list[str | None]:
     conecta alli. Lo encontro la revision de Codex y se comprobo antes de
     corregirlo. Tambien cubre las URLs multi-host, que llegan como lista.
     """
-    _, argumentos = AsyncpgDialect().create_connect_args(make_url(normalize_database_url(url)))
+    argumentos = argumentos_de_conexion(url)
     host = argumentos.get("host")
     if isinstance(host, (list, tuple)):
         return [str(h) for h in host]
@@ -104,10 +117,13 @@ def _comprobar_entorno() -> tuple[str, str]:
     if not url:
         _abortar("DATABASE_URL no esta definida.")
     try:
+        extra = sorted(set(argumentos_de_conexion(url)) - ARGUMENTOS_PERMITIDOS)
         hosts = hosts_de_conexion(url)
     except Exception as error:
         # Cualquier URL que no se entienda se rechaza: no se arranca a ciegas.
         _abortar(f"DATABASE_URL no se pudo interpretar: {type(error).__name__}.")
+    if extra:
+        _abortar(f"DATABASE_URL lleva parametros de conexion no permitidos: {extra!r}.")
     # Sin host explicito asyncpg cae en PGHOST o en un socket: se exige que lo diga.
     remotos = [h for h in hosts if h not in HOSTS_LOCALES]
     if remotos:

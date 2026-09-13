@@ -68,6 +68,17 @@ class TestLaBaseTieneQueSerLocal:
         monkeypatch.setenv("DATABASE_URL", url)
         _rechaza()
 
+    @pytest.mark.parametrize(
+        "parametro",
+        ["hostaddr=10.0.0.5", "service=produccion", "passfile=/tmp/pgpass", "ssl=require"],
+    )
+    def test_rechaza_parametros_de_conexion_fuera_de_la_lista_blanca(
+        self, monkeypatch: pytest.MonkeyPatch, parametro: str
+    ) -> None:
+        """Todo parametro de la query llega a asyncpg: una base de pruebas no necesita ninguno."""
+        monkeypatch.setenv("DATABASE_URL", f"{LOCAL}?{parametro}")
+        _rechaza()
+
     def test_sin_url_no_arranca(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DATABASE_URL", "")
         _rechaza()
