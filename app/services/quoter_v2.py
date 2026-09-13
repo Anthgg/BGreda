@@ -53,6 +53,41 @@ V2_QUOTATION_ENTITY = "v2_quotation"
 CUSTOMER_ROLES = (PartnerRole.CLIENT, PartnerRole.BOTH)
 
 
+#: Todo lo que `update_draft` puede llegar a mover, directa o indirectamente.
+#:
+#: Incluye lo que el cuerpo nombra y tambien lo que se mueve en cascada: el
+#: horno que arrastra el tipo de produccion y las tarifas que se retiran al
+#: cambiar de tipo de cliente. Sirve para saber si la peticion cambio algo de
+#: verdad, y por tanto si hay una edicion que auditar.
+CAMPOS_DE_CABECERA = (
+    "customer_id",
+    "customer_name_snapshot",
+    "name",
+    "notes",
+    "customer_kind",
+    "production_type",
+    "currency_code_snapshot",
+    "currency_symbol_snapshot",
+    "exchange_rate_snapshot",
+    "kiln_id",
+    "kiln_name_snapshot",
+    "kiln_capacity_snapshot",
+    "gas_cost_low_snapshot",
+    "gas_cost_high_snapshot",
+    "commercial_rate_low_snapshot",
+    "commercial_rate_high_snapshot",
+    "gas_low_is_override",
+    "gas_high_is_override",
+    "commercial_low_is_override",
+    "commercial_high_is_override",
+)
+
+
+def _cabecera(quotation: V2Quotation) -> dict[str, Any]:
+    """Foto de la cabecera, para comparar antes y despues."""
+    return {campo: getattr(quotation, campo) for campo in CAMPOS_DE_CABECERA}
+
+
 class V2QuotationNotFoundError(APIError):
     status_code = 404
     code = "V2_QUOTATION_NOT_FOUND"
@@ -164,6 +199,7 @@ class V2QuotationService:
         afecta a ESTA cotizacion y a ninguna otra, ni a la configuracion.
         """
         quotation = await self._draft(quotation_id)
+        antes = _cabecera(quotation)
 
         if "customer_id" in data:
             customer = await self._customer(data["customer_id"])
@@ -215,6 +251,18 @@ class V2QuotationService:
             await self._apply_production_type(quotation, data["production_type"])
 
         await self._session.flush()
+
+        # Una peticion que no movio nada NO es una edicion. El flujo de siete
+        # pasos deja volver atras, asi que abrir el paso uno para mirar es
+        # normal: si mirar dejara rastro, el historial quedaria ilegible justo
+        # para la pregunta que se le hace, que es quien cambio el cliente y
+        # cuando. Mismo criterio que `diff_model` en el resto del proyecto.
+        cambiados = sorted(
+            campo for campo, valor in _cabecera(quotation).items() if antes[campo] != valor
+        )
+        if not cambiados:
+            return quotation
+
         self._audit.record_action(
             entity_type=V2_QUOTATION_ENTITY,
             entity_id=str(quotation.id),
@@ -231,6 +279,9 @@ class V2QuotationService:
                     str(quotation.customer_id) if quotation.customer_id is not None else None
                 ),
                 "currency": str(quotation.currency_code_snapshot),
+                # Que se toco exactamente. Sin esto, dos eventos seguidos son
+                # indistinguibles y hay que adivinar cual movio el precio.
+                "campos": ",".join(cambiados),
             },
         )
         return quotation

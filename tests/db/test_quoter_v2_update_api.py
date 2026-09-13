@@ -530,6 +530,54 @@ class TestRecalculo:
         assert Decimal(despues["gas_total"]) == Decimal(antes["gas_total"])
         assert Decimal(despues["commercial_total"]) < Decimal(antes["commercial_total"])
 
+    async def test_mirar_no_deja_rastro_de_edicion(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """Una peticion que no movio nada NO es una edicion.
+
+        El flujo de siete pasos deja volver atras, asi que abrir el paso uno
+        para comprobar quien es el cliente es normal. Si eso dejara rastro de
+        edicion, el historial quedaria ilegible justo para la pregunta que se
+        le hace: quien cambio el cliente, y cuando.
+        """
+        creada = await crear(api, admin_csrf, production_type="WHOLESALE", name="Sin tocar")
+
+        # Cuerpo vacio, y despues los MISMOS valores que ya tenia.
+        assert (await actualizar(api, admin_csrf, creada["id"])).status_code == 200
+        respuesta = await actualizar(
+            api, admin_csrf, creada["id"], name="Sin tocar", production_type="WHOLESALE"
+        )
+        assert respuesta.status_code == 200, respuesta.text
+
+        registros = await db_session.scalar(
+            text(
+                "SELECT count(*) FROM audit_events "
+                "WHERE entity_type = 'v2_quotation' AND entity_id = :id AND action = 'UPDATE'"
+            ),
+            {"id": str(creada["id"])},
+        )
+        assert registros == 0, "reenviar lo mismo no es editar"
+
+    async def test_la_auditoria_dice_que_campos_se_tocaron(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """Sin esto, dos eventos seguidos son indistinguibles."""
+        creada = await crear(api, admin_csrf)
+        cliente = await crear_tercero(api, admin_csrf, "Cliente con campos", "CLIENT")
+
+        await actualizar(api, admin_csrf, creada["id"], customer_id=cliente)
+
+        campos = await db_session.scalar(
+            text(
+                "SELECT metadata->>'campos' FROM audit_events "
+                "WHERE entity_type = 'v2_quotation' AND entity_id = :id AND action = 'UPDATE' "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"id": str(creada["id"])},
+        )
+        assert campos is not None
+        assert "customer_id" in campos
+
     async def test_queda_registrado_en_la_auditoria(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
     ) -> None:
