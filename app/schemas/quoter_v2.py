@@ -73,6 +73,38 @@ class V2QuotationCreateIn(BaseModel):
         return _blank_to_none(value)
 
 
+class V2QuotationUpdateIn(BaseModel):
+    """Cambio de la CABECERA de un borrador. Fase 010G.
+
+    Existe porque el flujo de siete pasos deja volver atras: quien esta en el
+    paso de la quema puede darse cuenta de que el cliente esta mal y regresar
+    al primero. Sin esta ruta, ese cambio no tenia donde guardarse y la unica
+    salida era empezar una cotizacion nueva.
+
+    Semantica parcial, la misma de toda la familia: lo ausente se conserva y la
+    presencia de una clave no es un cambio. NAVEGAR no es editar.
+
+    Solo sobre borradores. Una cotizacion emitida ya comprometio un precio con
+    un cliente concreto y en una moneda concreta.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=200)
+    #: En nulo RETIRA el cliente: un borrador puede empezar sin el.
+    customer_id: int | None = Field(default=None, ge=1)
+    production_type: V2ProductionType | None = None
+    customer_kind: V2CustomerKind | None = None
+    currency_code: str | None = Field(default=None, min_length=3, max_length=3)
+    exchange_rate: Decimal | None = Field(default=None, gt=0, le=MAX_MONEY)
+    notes: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("name", "notes")
+    @classmethod
+    def _normalize(cls, value: str | None) -> str | None:
+        return _blank_to_none(value)
+
+
 class V2QuotationOut(BaseModel):
     """Una cotizacion V2 tal como la ve el frontend."""
 
