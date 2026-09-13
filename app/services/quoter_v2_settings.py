@@ -351,17 +351,9 @@ class V2SettingsService:
         v2 = await self.get()
         politica = await self.commercial_policy()
 
-        moneda = (currency_code or politica.currency_code or BASE_CURRENCY).upper()
-        if moneda not in CURRENCY_SYMBOLS:
-            moneda = BASE_CURRENCY
-
-        # En moneda base no hay nada que convertir. Guardar un 1 ahi seria un
-        # tipo de cambio inventado que alguien acabaria multiplicando.
-        if moneda == BASE_CURRENCY:
-            tasa = None
-        else:
-            tasa = exchange_rate if exchange_rate is not None else v2.default_exchange_rate
-
+        moneda_snapshot = await self.currency_snapshot(
+            currency_code or politica.currency_code, exchange_rate
+        )
         factor = (
             commercial_factor if commercial_factor is not None else v2.commercial_factor_default
         )
@@ -384,9 +376,7 @@ class V2SettingsService:
 
         return {
             "tax_percent_snapshot": politica.tax_percent,
-            "currency_code_snapshot": moneda,
-            "currency_symbol_snapshot": CURRENCY_SYMBOLS[moneda],
-            "exchange_rate_snapshot": tasa,
+            **moneda_snapshot,
             "validity_days_snapshot": v2.quotation_validity_days,
             "workday_hours_snapshot": v2.workday_hours,
             "space_service_cost_per_day_snapshot": v2.space_service_cost_per_day,
@@ -405,6 +395,42 @@ class V2SettingsService:
             "settings_version_snapshot": v2.version,
             "settings_captured_at": datetime.now(UTC),
         }
+
+    async def currency_snapshot(
+        self, currency_code: str | None, exchange_rate: Decimal | None
+    ) -> dict[str, Any]:
+        """Los tres campos de moneda, coherentes entre si.
+
+        Se extrae a su propio metodo porque 010G permite CAMBIAR la moneda de un
+        borrador, y la regla no puede vivir en dos sitios: en moneda base no hay
+        tipo de cambio —un 1 ahi seria una tasa inventada que alguien acabaria
+        multiplicando— y en moneda extranjera es obligatorio. El CHECK de la
+        tabla exige exactamente esas tres combinaciones.
+
+        Una moneda que no conocemos cae a la base en vez de guardarse: es mejor
+        cotizar en soles que en una divisa sin simbolo ni tasa.
+        """
+        moneda = (currency_code or BASE_CURRENCY).upper()
+        if moneda not in CURRENCY_SYMBOLS:
+            moneda = BASE_CURRENCY
+        if moneda == BASE_CURRENCY:
+            tasa = None
+        else:
+            v2 = await self.get()
+            tasa = exchange_rate if exchange_rate is not None else v2.default_exchange_rate
+        return {
+            "currency_code_snapshot": moneda,
+            "currency_symbol_snapshot": CURRENCY_SYMBOLS[moneda],
+            "exchange_rate_snapshot": tasa,
+        }
+
+    async def suggested_kiln_for(self, production_type: V2ProductionType) -> Kiln | None:
+        """El horno sugerido para un tipo de produccion. Publico desde 010G.
+
+        Lo necesita el alta —desde 010E— y ahora tambien la edicion de la
+        cabecera: cambiar de por menor a por mayor mueve el horno sugerido.
+        """
+        return await self._suggested_kiln(await self.get(), production_type)
 
     async def _suggested_kiln(
         self, v2: V2CommercialSettings, production_type: V2ProductionType

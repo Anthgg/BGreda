@@ -25,7 +25,10 @@ from app.schemas.quoter_v2 import (
     V2QuotationListItemOut,
     V2QuotationOut,
     V2QuotationPage,
+    V2QuotationUpdateIn,
 )
+from app.services.quoter_v2_firing import refresh_firing
+from app.services.quoter_v2_pricing import refresh_pricing
 
 router = APIRouter(prefix="/quotations-v2", tags=["cotizador-v2"])
 
@@ -96,6 +99,43 @@ async def create_v2_quotation(
     session: DbSessionDep,
 ) -> V2QuotationOut:
     fila = await service.create_draft(payload.model_dump(), user=admin)
+    resultado = _present(fila)
+    await session.commit()
+    return resultado
+
+
+@router.put("/{quotation_id}", response_model=V2QuotationOut)
+async def update_v2_quotation(
+    quotation_id: Annotated[int, Path(ge=1)],
+    payload: V2QuotationUpdateIn,
+    service: V2QuotationServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> V2QuotationOut:
+    """Cambia la cabecera de un borrador: cliente, nombre, moneda, tipo.
+
+    `exclude_unset` mantiene la semantica parcial de toda la familia. Aqui
+    importa mas que en ningun otro sitio: el flujo de 010G deja volver atras, y
+    abrir el primer paso para mirar no puede reescribir lo que ya se decidio.
+    """
+    fila = await service.update_draft(
+        quotation_id, payload.model_dump(exclude_unset=True), user=admin
+    )
+    # La moneda y el tipo de produccion mueven el horno y, con el, todo el
+    # precio: recalcular aqui evita que el resumen ensene cifras de antes.
+    await refresh_firing(session, fila)
+    await refresh_pricing(session, fila)
+    # `updated_at` se calcula con `onupdate=func.now()`, de modo que el UPDATE
+    # la deja expirada y leerla exige otra consulta. Se pide explicitamente:
+    # dejar que el atributo se cargue solo revienta con `MissingGreenlet`,
+    # porque una carga perezosa no puede esperar a nadie desde codigo sincrono.
+    #
+    # Primero el flush, para que los recalculos de arriba esten escritos: un
+    # refresco sobre cambios sin consolidar los sustituye por lo que haya en la
+    # base. Y SOLO `updated_at`: un refresco a ciegas expira tambien el resto
+    # de la fila y obliga a releerla entera para nada.
+    await session.flush()
+    await session.refresh(fila, attribute_names=["updated_at"])
     resultado = _present(fila)
     await session.commit()
     return resultado
