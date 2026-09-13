@@ -177,10 +177,10 @@ class KilnRate(Base, TimestampMixin):
 
 
 class KilnOccupancyFactor(Base, TimestampMixin):
-    """Tramo de ocupacion y su multiplicador, por horno.
+    """Tramo informativo de ocupacion y su factor historico, por horno.
 
     Es la tabla T15:V25 del documento funcional. Vive en base de datos y no en
-    codigo porque el negocio la ajusta sin desplegar.
+    codigo porque el negocio puede conservarla y consultarla sin desplegar.
     """
 
     __tablename__ = "kiln_occupancy_factors"
@@ -225,13 +225,13 @@ class Firing(Base, TimestampMixin):
     total_volume_cm3: Mapped[Decimal] = mapped_column(
         volume_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
     )
-    #: Ocupacion fisica de la sesion mas cargada, en porcentaje. Informativa: el
-    #: factor no se calcula con ella, sino linea a linea.
+    #: Ocupacion fisica de la sesion mas cargada, en porcentaje. Informativa:
+    #: no multiplica el costo de quema.
     occupancy_percentage: Mapped[Decimal] = mapped_column(
         factor_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
     )
-    #: Factor efectivo de la hoja: ``total_cost / subtotal``. Es un resumen
-    #: ponderado, no un dato de entrada: cada linea tiene el suyo.
+    #: Factor efectivo canonico de la hoja. Desde 009K.4.2 es neutro para el
+    #: costeo; la ocupacion queda solo como referencia operativa.
     occupancy_factor: Mapped[Decimal] = mapped_column(
         factor_numeric(), nullable=False, default=Decimal(1), server_default=text("1")
     )
@@ -334,7 +334,7 @@ class FiringLine(Base, TimestampMixin):
     high_session_id: Mapped[int | None] = mapped_column(
         ForeignKey("firing_kiln_sessions.id", ondelete="SET NULL"), nullable=True
     )
-    #: Horno cuya capacidad decide el tramo de ocupacion de esta linea.
+    #: Horno cuya capacidad decide el tramo informativo de ocupacion.
     factor_kiln_id: Mapped[int | None] = mapped_column(
         ForeignKey("kilns.id", ondelete="RESTRICT"), nullable=True
     )
@@ -342,18 +342,18 @@ class FiringLine(Base, TimestampMixin):
     occupancy_percentage: Mapped[Decimal] = mapped_column(
         factor_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
     )
-    #: Tramo comercial en decenas (10, 20... 100). No es la ocupacion fisica.
+    #: Tramo informativo en decenas (10, 20... 100). No es la ocupacion fisica.
     occupancy_bracket: Mapped[int] = mapped_column(
         Integer, nullable=False, default=10, server_default=text("10")
     )
     occupancy_factor: Mapped[Decimal] = mapped_column(
         factor_numeric(), nullable=False, default=Decimal(1), server_default=text("1")
     )
-    #: Reparto proporcional antes del factor.
+    #: Reparto proporcional del costo real de quema.
     base_cost: Mapped[Decimal] = mapped_column(
         money_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
     )
-    #: Costo final de la linea: ``base_cost * occupancy_factor``.
+    #: Costo canonico de la linea. Desde 009K.4.2 coincide con ``base_cost``.
     allocated_cost: Mapped[Decimal] = mapped_column(
         money_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
     )
