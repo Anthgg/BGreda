@@ -332,12 +332,14 @@ class TestVencerYDuplicar:
         datos = await cotizacion_completa(api, admin_csrf, currency="USD")
         qid = datos["id"]
         antigua = await emitir(api, admin_csrf, qid)
-        pdf_antes = compacto(await pdf_texto(api, qid))
         precio_antes = (await api.get(f"{V2}/{qid}/pricing")).json()
 
+        # `vencer` mueve la fecha de emision al pasado, y el PDF la imprime: el
+        # documento de referencia se toma YA vencido, antes de tocar un maestro.
         await vencer(db_session, qid)
         vencida = (await api.get(f"{V2}/{qid}")).json()
         assert vencida["effective_status"] == "EXPIRED"
+        pdf_antes = compacto(await pdf_texto(api, qid))
 
         # No se acepta con el precio viejo.
         r = await api.post(f"{V2}/{qid}/send-to-production", headers=h(admin_csrf))
@@ -417,8 +419,8 @@ class TestVencerYDuplicar:
         assert Decimal(lineas_viejas[0]["body_cost_per_unit"]) == Decimal("0.0013")
 
         pdf_despues = compacto(await pdf_texto(api, qid))
-        # Mismo documento salvo el distintivo de vencida.
-        assert pdf_despues.replace("cotizaciónvencida", "") == pdf_antes
+        # El mismo documento, byte de texto a byte de texto.
+        assert pdf_despues == pdf_antes
         tasa_vieja = Decimal(antigua["exchange_rate"]).quantize(Decimal("0.01"))
         assert format(tasa_vieja, "f") in pdf_despues
         assert "3.82" not in pdf_despues
@@ -457,8 +459,8 @@ class TestVencerYDuplicar:
         datos = await cotizacion_completa(api, admin_csrf)
         qid = datos["id"]
         await emitir(api, admin_csrf, qid)
-        pdf_antes = compacto(await pdf_texto(api, qid))
         await vencer(db_session, qid)
+        pdf_antes = compacto(await pdf_texto(api, qid))
 
         await db_session.execute(
             text("UPDATE partners SET active = false WHERE id = :id"), {"id": datos["customer_id"]}
@@ -485,7 +487,7 @@ class TestVencerYDuplicar:
         # El PDF de la antigua no se entera de que el cliente se archivo.
         pdf_despues = compacto(await pdf_texto(api, qid))
         assert "andinassac" in pdf_despues
-        assert pdf_despues.replace("cotizaciónvencida", "") == pdf_antes
+        assert pdf_despues == pdf_antes
 
         # Y la nueva no puede emitirse sin cliente.
         resumen = await preview(api, nueva["id"])

@@ -49,7 +49,7 @@ async def _producto_de_catalogo(api: httpx.AsyncClient, csrf: str, nombre: str) 
             "name": nombre,
             "product_type": "FINISHED_PRODUCT",
             "product_category_id": int(categoria.json()["id"]),
-            "base_uom_code": "NIU",
+            "base_uom_code": "unit",
             "sellable": True,
         },
         headers=h(csrf),

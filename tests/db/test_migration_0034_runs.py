@@ -244,3 +244,13 @@ class TestDowngrade:
         resultado = _alembic("downgrade", "0033")
         assert resultado.returncode != 0
         assert "no puede revertirse" in resultado.stdout + resultado.stderr
+
+
+async def test_la_cabeza_es_0034(migration_engine: AsyncEngine) -> None:
+    """Subir a `head` deja 0034. Acompana siempre a la revision mas nueva."""
+    _upgrade("head")
+    async with migration_engine.connect() as connection:
+        cabezas = list(
+            (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
+        )
+    assert cabezas == ["0034"]

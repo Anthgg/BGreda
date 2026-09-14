@@ -390,15 +390,15 @@ class TestDowngrade:
 # ---------------------------------------------------------------------------
 # 5. La cabeza
 # ---------------------------------------------------------------------------
-async def test_la_cabeza_es_0033(migration_engine: AsyncEngine) -> None:
-    """Subir a `head` tiene que dejar 0033, que hoy es la ultima.
+async def test_0033_se_aplica_y_se_sella(migration_engine: AsyncEngine) -> None:
+    """0033 se aplica y queda sellada. La cabeza es 0034 desde 010H.
 
     Esta afirmacion acompana SIEMPRE a la revision mas nueva y se retira de la
     anterior cuando entra una: 0032 la llevaba y la rompio esta misma fase.
     Cuando entre 0034, esta prueba pasa a comprobar solo que 0033 se aplica y
     se sella, como hace ahora la de 0032.
     """
-    _upgrade("head")
+    _upgrade("0033")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
