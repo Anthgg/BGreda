@@ -64,7 +64,11 @@ async def cotizacion_completa(
     pasta_id, worker_id, technique_id = await preparar_maestros(api, csrf)
     customer_id = await cliente(api, csrf)
 
-    payload: dict[str, Any] = {"name": "Pedido de prueba 010H", "customer_id": customer_id}
+    payload: dict[str, Any] = {
+        "name": "Pedido de prueba 010H",
+        "customer_id": customer_id,
+        "client_notes": "Entrega en taller.",
+    }
     if currency:
         payload["currency_code"] = currency
     creada = await api.post(V2, json=payload, headers=h(csrf))

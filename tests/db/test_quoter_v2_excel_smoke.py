@@ -32,10 +32,12 @@ mecanismo que el taller usa cuando pacta un precio.
 
 from __future__ import annotations
 
+import io
 from decimal import Decimal
 from typing import Any
 
 import httpx
+from pypdf import PdfReader
 
 from tests.fixtures.excel_v2_modelo import EXCEL_TOLERANCE, LINES, TOTALS
 
@@ -366,6 +368,49 @@ class TestElCasoDelExcelPorLaApi:
             QUANTIZE_TOLERANCE,
         )
         assert abs(ganancia - TOTALS["estimated_profit"]) <= Decimal(5)
+
+        # --- Fase 010H: el caso del Excel se EMITE y su PDF ---------------
+        # La hoja «PDF cliente» toma Subtotal, IGV y TOTAL de «Cotizador V2»
+        # H13:H15. Lo emitido tiene que ser exactamente lo que el motor dejo,
+        # y el papel tiene que decirlo sin un solo costo interno.
+        cliente = await api.post(
+            "/api/v1/partners",
+            json={"name": "Cliente demo Excel", "role": "CLIENT"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert cliente.status_code == 201, cliente.text
+        cabecera = await api.put(
+            f"{V2}/{cotizacion}",
+            json={"customer_id": int(cliente.json()["id"])},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert cabecera.status_code == 200, cabecera.text
+        resumen = (await api.get(f"{V2}/{cotizacion}/confirmation-preview")).json()
+        assert resumen["can_confirm"], resumen["blockers"]
+        emitida = await api.post(
+            f"{V2}/{cotizacion}/confirm",
+            json={"expected_fingerprint": resumen["fingerprint"]},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert emitida.status_code == 200, emitida.text
+        congelado = (await api.get(f"{V2}/{cotizacion}/confirmation-preview")).json()
+        assert Decimal(congelado["subtotal_amount"]) == subtotal
+        assert Decimal(congelado["tax_amount"]) == impuesto
+        assert Decimal(congelado["total_amount"]) == total
+        assert len(congelado["lines"]) == len(LINES)
+
+        pdf = await api.get(f"{V2}/{cotizacion}/pdf")
+        assert pdf.status_code == 200, pdf.text
+        texto = (
+            "".join(
+                (pagina.extract_text() or "") for pagina in PdfReader(io.BytesIO(pdf.content)).pages
+            )
+            .replace(" ", "")
+            .replace(chr(10), "")
+        )
+        assert f"S/{total.quantize(Decimal('0.01')):,}" in texto
+        for prohibido in ("Costoreal", "Gasreal", "Ganancia", "Margen", "Factor"):
+            assert prohibido not in texto, prohibido
 
     async def test_el_reparto_por_linea_cuadra_con_el_total(
         self, api: httpx.AsyncClient, admin_csrf: str

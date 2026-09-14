@@ -68,8 +68,10 @@ class V2QuotationCreateIn(BaseModel):
     #: por el que cabe cualquier cosa, y 4000 caracteres son mas que de sobra
     #: para una nota interna.
     notes: str | None = Field(default=None, max_length=4000)
+    #: Fase 010H. Observaciones que SI salen en el PDF del cliente.
+    client_notes: str | None = Field(default=None, max_length=2000)
 
-    @field_validator("name", "notes")
+    @field_validator("name", "notes", "client_notes")
     @classmethod
     def _normalize(cls, value: str | None) -> str | None:
         return _blank_to_none(value)

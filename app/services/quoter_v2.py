@@ -165,6 +165,7 @@ class V2QuotationService:
             customer_name_snapshot=customer.name if customer else None,
             name=data.get("name"),
             notes=data.get("notes"),
+            client_notes=data.get("client_notes"),
             created_by=user.id,
             created_by_name=user.display_name,
             # `production_type` sale del snapshot: si el alta no lo dice, lo
