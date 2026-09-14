@@ -52,8 +52,10 @@ from typing import NoReturn
 import httpx
 import uvicorn
 from fastapi import FastAPI
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql.asyncpg import dialect as AsyncpgDialect
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.deps import get_object_storage, get_profile_repository, get_supabase_auth_client
 from app.core.config import get_settings
@@ -285,12 +287,113 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                     "wholesale_kiln_id": hornos["Horno grande E2E"],
                     "illustration_daily_rate": "88",
                     "illustration_pieces_per_workday": "8",
+                    # Fase 010H: el tipo de cambio con el que se emite la
+                    # cotizacion que despues se hace vencer.
+                    "default_exchange_rate": "3.70",
                 },
                 headers=cabeceras,
             ),
             "configuracion del Cotizador V2",
         )
+
+        await sembrar_cotizacion_vencida(api, cabeceras, int(pasta.json()["id"]))
     print("[servidor_revision] siembra completa", flush=True)
+
+
+#: Nombre con el que las E2E encuentran la cotizacion vencida sembrada.
+NOMBRE_VENCIDA = "E2E-SEMILLA-VENCIDA-USD"
+
+
+async def sembrar_cotizacion_vencida(
+    api: httpx.AsyncClient, cabeceras: dict[str, str], pasta_id: int
+) -> None:
+    """Fase 010H. Una cotizacion en dolares EMITIDA hace cuarenta dias.
+
+    Una E2E no puede esperar veinte dias a que algo venza, asi que se emite por
+    la API —con sus validaciones y su huella— y despues se mueve SOLO la fecha
+    de emision al pasado, con SQL, respetando el CHECK de ciclo de vida. Ni una
+    cifra se toca.
+
+    Despues sube el tipo de cambio de la casa de 3,70 a 3,82: la prueba de
+    duplicar tiene que ver que la nueva nace con 3,82 y la vencida conserva
+    3,70.
+    """
+    cliente = (await api.get("/api/v1/partners?limit=5")).json()["items"][0]
+    creada = await _ok(
+        await api.post(
+            "/api/v1/quotations-v2",
+            json={
+                "name": NOMBRE_VENCIDA,
+                "customer_id": cliente["id"],
+                "currency_code": "USD",
+                "client_notes": "Semilla E2E: cotizacion vencida.",
+            },
+            headers=cabeceras,
+        ),
+        "cotizacion vencida",
+    )
+    qid = int(creada.json()["id"])
+    await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/products",
+            json={
+                "product_name": "E2E-Fuente vencida",
+                "quantity": 10,
+                "length_cm": "20",
+                "width_cm": "20",
+                "height_cm": "5",
+                "body_material_id": pasta_id,
+                "body_unit_weight": "400",
+            },
+            headers=cabeceras,
+        ),
+        "linea de la cotizacion vencida",
+    )
+    await _ok(
+        await api.put(
+            f"/api/v1/quotations-v2/{qid}/planning",
+            json={"effective_work_days": 2},
+            headers=cabeceras,
+        ),
+        "dias de la cotizacion vencida",
+    )
+    resumen = (await api.get(f"/api/v1/quotations-v2/{qid}/confirmation-preview")).json()
+    await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/confirm",
+            json={"expected_fingerprint": resumen["fingerprint"]},
+            headers=cabeceras,
+        ),
+        "emision de la cotizacion vencida",
+    )
+
+    motor = create_async_engine(
+        normalize_database_url(get_settings().DATABASE_URL.get_secret_value())
+    )
+    try:
+        async with motor.begin() as conexion:
+            await conexion.execute(
+                text(
+                    "UPDATE v2_quotations SET"
+                    " issued_at = issued_at - interval '40 days',"
+                    " valid_until = valid_until - 40,"
+                    " expires_at = expires_at - interval '40 days'"
+                    " WHERE id = :id"
+                ),
+                {"id": qid},
+            )
+    finally:
+        await motor.dispose()
+
+    ajustes = (await api.get("/api/v1/quoter-v2/settings")).json()["settings"]
+    await _ok(
+        await api.put(
+            "/api/v1/quoter-v2/settings",
+            json={"expected_version": ajustes["version"], "default_exchange_rate": "3.82"},
+            headers=cabeceras,
+        ),
+        "tipo de cambio de hoy",
+    )
 
 
 def main() -> None:
