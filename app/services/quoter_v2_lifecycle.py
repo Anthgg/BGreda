@@ -215,7 +215,9 @@ def document_payload(
 
     Es la base de la huella. Cubre lo que el cliente va a leer —cliente,
     moneda, piezas, medidas, unitarios, totales, vigencia, observaciones— y el
-    factor, que quien emite ve en el resumen. Los costos internos NO entran: si
+    factor, que quien emite ve en el resumen. El nombre de la cotizacion NO
+    entra: es interno y no sale en el papel, asi que renombrarla no puede
+    invalidar un resumen. Los costos internos tampoco: si
     un material se desactiva sin mover ningun unitario, el documento que se
     reviso sigue siendo exactamente el que se emite, y un 409 ahi no tendria
     explicacion posible en pantalla.
@@ -224,7 +226,6 @@ def document_payload(
         "code": quotation.code,
         "customer_id": quotation.customer_id,
         "customer_name": quotation.customer_name_snapshot,
-        "name": quotation.name,
         "client_notes": quotation.client_notes,
         "currency_code": quotation.currency_code_snapshot,
         "exchange_rate": quotation.exchange_rate_snapshot,

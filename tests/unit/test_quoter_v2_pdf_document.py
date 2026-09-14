@@ -249,6 +249,13 @@ class TestProhibido:
         q, lineas = _cotizacion()
         assert SECRETO_NOTAS not in _html(q, lineas)
 
+    def test_el_nombre_interno_de_la_cotizacion_no_sale(self) -> None:
+        """La pantalla lo declara «para reconocerla en el listado»."""
+        q, lineas = _cotizacion(name="Cliente pesado, apretar precio")
+        texto = _texto_visible(_html(q, lineas))
+        assert "apretar precio" not in texto
+        assert "Referencia / Nombre" not in texto
+
     def test_sin_imagenes_de_producto(self) -> None:
         q, lineas = _cotizacion()
         html = _html(q, lineas)

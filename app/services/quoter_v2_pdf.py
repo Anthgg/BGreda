@@ -194,7 +194,11 @@ def build_v2_pdf_document(
         document=DocumentHeaderInfo(
             title=TITULO,
             code=quotation.code,
-            name=quotation.name,
+            # El nombre de la cotizacion es interno: la pantalla de 010G lo
+            # declara «para reconocerla en el listado, no sale en el documento».
+            # Imprimirlo como «Referencia» publicaria lo que alguien escribio
+            # para si mismo. Lo que el cliente debe leer va en `client_notes`.
+            name=None,
             status=quotation.status.value,
             is_cancelled=cancelada,
             # Lo cancelado ya dice ANULADA; no se superponen dos distintivos.
