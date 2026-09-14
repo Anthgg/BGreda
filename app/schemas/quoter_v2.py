@@ -241,6 +241,14 @@ class V2ConfirmationPreviewOut(BaseModel):
     #: emision se rechaza con 409 en vez de congelar lo que nadie reviso.
     fingerprint: str
     customer_name: str | None
+    #: Fase 010H. Lo que el PDF dira del cliente y las condiciones; entra en la
+    #: huella, asi que tambien se ensena.
+    customer_document: str | None = None
+    customer_address: str | None = None
+    customer_email: str | None = None
+    customer_phone: str | None = None
+    conditions: str | None = None
+    payment_notes: str | None = None
     name: str | None
     client_notes: str | None
     currency_code: str | None

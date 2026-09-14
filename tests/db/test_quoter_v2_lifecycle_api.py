@@ -271,6 +271,56 @@ class TestEmitir:
         assert r.json()["error"]["code"] == "V2_QUOTATION_CHANGED"
         assert (await api.get(f"{V2}/{qid}")).json()["status"] == "DRAFT"
 
+    async def test_cambiar_el_cliente_o_las_condiciones_tras_el_resumen_da_conflicto(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """Gate final de Codex: lo que se imprime del cliente tambien es lo revisado.
+
+        La direccion del maestro cambia entre el resumen y el clic: emitir con la
+        nueva seria mandar un papel que nadie vio. Igual con las condiciones.
+        """
+        datos = await cotizacion_completa(api, admin_csrf)
+        qid = datos["id"]
+        visto = await preview(api, qid)
+        assert visto["customer_address"] == "Jr. Barro 456, Lima"
+
+        await db_session.execute(
+            text("UPDATE partners SET address = 'Av. Nueva 999' WHERE id = :id"),
+            {"id": datos["customer_id"]},
+        )
+        await db_session.commit()
+        r = await api.post(
+            f"{V2}/{qid}/confirm",
+            json={"expected_fingerprint": visto["fingerprint"]},
+            headers=h(admin_csrf),
+        )
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "V2_QUOTATION_CHANGED"
+
+        nuevo = await preview(api, qid)
+        assert nuevo["customer_address"] == "Av. Nueva 999"
+        await db_session.execute(text("UPDATE commercial_settings SET payment_notes = 'Contado'"))
+        await db_session.commit()
+        r = await api.post(
+            f"{V2}/{qid}/confirm",
+            json={"expected_fingerprint": nuevo["fingerprint"]},
+            headers=h(admin_csrf),
+        )
+        assert r.status_code == 409
+
+        final = await preview(api, qid)
+        emitida = await api.post(
+            f"{V2}/{qid}/confirm",
+            json={"expected_fingerprint": final["fingerprint"]},
+            headers=h(admin_csrf),
+        )
+        assert emitida.status_code == 200, emitida.text
+        texto = compacto(await pdf_texto(api, qid))
+        assert "av.nueva999" in texto
+        assert "contado" in texto
+        congelado = await preview(api, qid)
+        assert congelado["fingerprint"] == final["fingerprint"]
+
     async def test_releer_el_resumen_no_cambia_la_huella(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:

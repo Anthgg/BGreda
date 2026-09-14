@@ -246,7 +246,18 @@ async def preview_v2_confirmation(
         blockers=[V2BlockerOut(**b.as_dict()) for b in resumen.blockers],
         warnings=resumen.warnings,
         fingerprint=resumen.fingerprint,
-        customer_name=q.customer_name_snapshot,
+        customer_name=resumen.issuance["customer_name"],
+        customer_document=(
+            f"{resumen.issuance['customer_document_type']}: "
+            f"{resumen.issuance['customer_document_number']}"
+            if resumen.issuance["customer_document_number"]
+            else None
+        ),
+        customer_address=resumen.issuance["customer_address"],
+        customer_email=resumen.issuance["customer_email"],
+        customer_phone=resumen.issuance["customer_phone"],
+        conditions=resumen.issuance["conditions"],
+        payment_notes=resumen.issuance["payment_notes"],
         name=q.name,
         client_notes=q.client_notes,
         currency_code=q.currency_code_snapshot,

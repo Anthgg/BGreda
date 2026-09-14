@@ -189,6 +189,8 @@ class ConfirmationPreview:
     fingerprint: str
     validity_days: int | None
     projected_valid_until: date | None
+    #: Lo que se imprimira del cliente y de las condiciones si se emite ahora.
+    issuance: dict[str, str | None]
 
 
 @dataclass(frozen=True)
@@ -210,7 +212,10 @@ class DuplicateResult:
 
 
 def document_payload(
-    quotation: V2Quotation, lines: list[V2QuotationProduct], validity_days: int | None
+    quotation: V2Quotation,
+    lines: list[V2QuotationProduct],
+    validity_days: int | None,
+    issuance: dict[str, str | None],
 ) -> dict[str, Any]:
     """TODO lo que el resumen de emision ensena, y nada mas.
 
@@ -222,11 +227,17 @@ def document_payload(
     un material se desactiva sin mover ningun unitario, el documento que se
     reviso sigue siendo exactamente el que se emite, y un 409 ahi no tendria
     explicacion posible en pantalla.
+
+    **Lo que se congela del cliente y de las condiciones tambien entra**
+    (`issuance`). Hallazgo BLOCKER del gate final de Codex: la huella no lo
+    cubria y la emision lo copiaba del maestro vivo, asi que corregir la
+    direccion del cliente o las condiciones de la casa entre el resumen y el
+    clic emitia un PDF distinto del revisado sin ningun conflicto.
     """
     return {
         "code": quotation.code,
         "customer_id": quotation.customer_id,
-        "customer_name": quotation.customer_name_snapshot,
+        "issuance": issuance,
         "client_notes": quotation.client_notes,
         "currency_code": quotation.currency_code_snapshot,
         "exchange_rate": quotation.exchange_rate_snapshot,
@@ -345,6 +356,7 @@ class V2LifecycleService:
                 proyectada = None
         elif quotation.valid_until is not None:
             proyectada = quotation.valid_until
+        emision = await self._issuance(quotation)
         return ConfirmationPreview(
             quotation=quotation,
             lines=lineas,
@@ -352,9 +364,10 @@ class V2LifecycleService:
             # Sin duplicados y en orden estable: la misma lista dos veces no
             # dice nada nuevo.
             warnings=sorted(set(avisos)),
-            fingerprint=commercial_fingerprint(document_payload(quotation, lineas, dias)),
+            fingerprint=commercial_fingerprint(document_payload(quotation, lineas, dias, emision)),
             validity_days=dias,
             projected_valid_until=proyectada,
+            issuance=emision,
         )
 
     # ------------------------------------------------------------------
@@ -391,7 +404,8 @@ class V2LifecycleService:
         lineas = await self._lines(quotation.id)
         dias = await self._validity_days(quotation)
 
-        huella = commercial_fingerprint(document_payload(quotation, lineas, dias))
+        emision = await self._issuance(quotation)
+        huella = commercial_fingerprint(document_payload(quotation, lineas, dias, emision))
         if huella != expected_fingerprint:
             raise V2QuotationChangedError()
 
@@ -402,10 +416,6 @@ class V2LifecycleService:
         emitida_en = await self.db_now()
         valid_until, expires_at = compute_validity(emitida_en, dias)
 
-        cliente = await self._session.get(Partner, quotation.customer_id)
-        assert cliente is not None  # lo garantiza `_blockers`
-        politica = await self._settings.commercial_policy()
-
         quotation.validity_days_snapshot = dias
         quotation.issued_at = emitida_en
         quotation.valid_until = valid_until
@@ -413,16 +423,16 @@ class V2LifecycleService:
         quotation.issued_by = user.id
         quotation.issued_by_name = user.display_name
         quotation.commercial_fingerprint = huella
-        quotation.customer_name_snapshot = cliente.name
-        quotation.customer_document_type_snapshot = (
-            cliente.document_type.value if cliente.document_type else None
-        )
-        quotation.customer_document_number_snapshot = cliente.document_number
-        quotation.customer_address_snapshot = cliente.address
-        quotation.customer_email_snapshot = cliente.email
-        quotation.customer_phone_snapshot = cliente.phone or cliente.mobile
-        quotation.conditions_snapshot = politica.general_conditions
-        quotation.payment_notes_snapshot = politica.payment_notes
+        # Se congela EXACTAMENTE lo que entro en la huella comprobada arriba,
+        # leido bajo el mismo bloqueo: ni una segunda lectura del maestro.
+        quotation.customer_name_snapshot = emision["customer_name"]
+        quotation.customer_document_type_snapshot = emision["customer_document_type"]
+        quotation.customer_document_number_snapshot = emision["customer_document_number"]
+        quotation.customer_address_snapshot = emision["customer_address"]
+        quotation.customer_email_snapshot = emision["customer_email"]
+        quotation.customer_phone_snapshot = emision["customer_phone"]
+        quotation.conditions_snapshot = emision["conditions"]
+        quotation.payment_notes_snapshot = emision["payment_notes"]
         quotation.status = V2QuotationStatus.CONFIRMED
         await self._session.flush()
 
@@ -878,6 +888,44 @@ class V2LifecycleService:
         return await self._session.scalar(
             select(V2ProductionHandoff).where(V2ProductionHandoff.v2_quotation_id == quotation_id)
         )
+
+    async def _issuance(self, quotation: V2Quotation) -> dict[str, str | None]:
+        """Lo que el PDF dira del cliente y de las condiciones.
+
+        En un borrador sale del maestro y de la configuracion de HOY: es lo que
+        se congelaria si se emitiera ahora. En una emitida sale de lo que se
+        congelo. Resumen, huella y emision leen de aqui, y por eso no pueden
+        discrepar.
+        """
+        if quotation.status is not V2QuotationStatus.DRAFT:
+            return {
+                "customer_name": quotation.customer_name_snapshot,
+                "customer_document_type": quotation.customer_document_type_snapshot,
+                "customer_document_number": quotation.customer_document_number_snapshot,
+                "customer_address": quotation.customer_address_snapshot,
+                "customer_email": quotation.customer_email_snapshot,
+                "customer_phone": quotation.customer_phone_snapshot,
+                "conditions": quotation.conditions_snapshot,
+                "payment_notes": quotation.payment_notes_snapshot,
+            }
+        cliente = (
+            await self._session.get(Partner, quotation.customer_id)
+            if quotation.customer_id is not None
+            else None
+        )
+        politica = await self._settings.commercial_policy()
+        return {
+            "customer_name": cliente.name if cliente else quotation.customer_name_snapshot,
+            "customer_document_type": (
+                cliente.document_type.value if cliente and cliente.document_type else None
+            ),
+            "customer_document_number": cliente.document_number if cliente else None,
+            "customer_address": cliente.address if cliente else None,
+            "customer_email": cliente.email if cliente else None,
+            "customer_phone": (cliente.phone or cliente.mobile) if cliente else None,
+            "conditions": politica.general_conditions,
+            "payment_notes": politica.payment_notes,
+        }
 
     async def _customer_usable(self, customer_id: int) -> bool:
         cliente = await self._session.get(Partner, customer_id)
