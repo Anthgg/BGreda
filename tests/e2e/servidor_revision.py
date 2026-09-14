@@ -244,6 +244,38 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             "valorizacion de la pasta",
         )
 
+        # Fase 010H. Piezas del CATALOGO, como las que ya tiene produccion. Hasta
+        # aqui las E2E solo cotizaban piezas de encargo (nombre libre), y el
+        # camino de elegir un producto del maestro —que copia medidas y gramaje—
+        # no se recorria nunca de punta a punta.
+        piezas = await _ok(
+            await api.post(
+                "/api/v1/categories",
+                json={"name": "Piezas E2E", "parent_id": None},
+                headers=cabeceras,
+            ),
+            "categoria de piezas",
+        )
+        for nombre, gramaje, largo, ancho, alto in PIEZAS_DE_CATALOGO:
+            await _ok(
+                await api.post(
+                    "/api/v1/products",
+                    json={
+                        "name": nombre,
+                        "product_type": "FINISHED_PRODUCT",
+                        "product_category_id": int(piezas.json()["id"]),
+                        "base_uom_code": "unit",
+                        "sellable": True,
+                        "grammage": gramaje,
+                        "length": largo,
+                        "width": ancho,
+                        "height": alto,
+                    },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+
         # Dos hornos con sus tarifas: el chico para por menor, el grande para
         # por mayor. Son los numeros del Excel aprobado.
         hornos: dict[str, int] = {}
@@ -299,6 +331,13 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
         await sembrar_cotizacion_vencida(api, cabeceras, int(pasta.json()["id"]))
     print("[servidor_revision] siembra completa", flush=True)
 
+
+#: Piezas de catalogo: nombre, gramaje (g), largo, ancho y alto (cm).
+PIEZAS_DE_CATALOGO = (
+    ("E2E-Catalogo Plato hondo 22", "450", "22", "22", "5"),
+    ("E2E-Catalogo Taza 250 ml", "280", "9", "9", "10"),
+    ("E2E-Catalogo Fuente oval", "1200", "32", "22", "6"),
+)
 
 #: Nombre con el que las E2E encuentran la cotizacion vencida sembrada.
 NOMBRE_VENCIDA = "E2E-SEMILLA-VENCIDA-USD"
