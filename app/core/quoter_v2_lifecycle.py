@@ -56,9 +56,10 @@ from typing import Any
 #: Hora oficial de Peru. Sin horario de verano: ver la cabecera del modulo.
 BUSINESS_TZ = timezone(timedelta(hours=-5), "America/Lima")
 
-#: Tope de vigencia. Un año cubre cualquier oferta real; mas alla es un dato
-#: tecleado de mas (365 por 3650) que dejaria una oferta viva una decada.
-MAX_VALIDITY_DAYS = 365
+#: Tope de vigencia. El MISMO que admite la configuracion de V2 (010B): con
+#: uno mas bajo aqui, una casa configurada a 400 dias crearia borradores que
+#: nunca podrian emitirse, y el motivo no estaria en ninguna pantalla.
+MAX_VALIDITY_DAYS = 3650
 
 
 class V2EffectiveStatus(StrEnum):

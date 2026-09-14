@@ -76,6 +76,18 @@ class V2QuotationPdfDraftBlockedError(APIError):
     message = "Confirme la cotizacion antes de descargar su PDF"
 
 
+class V2QuotationPdfNotIssuedError(APIError):
+    """Una cancelada que nunca llego a emitirse no tiene documento.
+
+    No es un borrador —ya no se puede confirmar—, asi que decirle «confirme
+    antes» seria invitar a algo imposible.
+    """
+
+    status_code = 409
+    code = "V2_QUOTATION_PDF_NOT_ISSUED"
+    message = "Esta cotizacion se cancelo sin llegar a emitirse y no tiene documento"
+
+
 class V2QuotationPdfService:
     """El documento del cliente de una cotizacion V2. Presenta; no calcula."""
 
@@ -90,8 +102,7 @@ class V2QuotationPdfService:
         return pdf, sanitize_pdf_filename(quotation.code, quotation.customer_name_snapshot)
 
     async def build(self, quotation: V2Quotation, *, expired: bool) -> QuotationPdfDocument:
-        if quotation.status is V2QuotationStatus.DRAFT or quotation.issued_at is None:
-            raise V2QuotationPdfDraftBlockedError()
+        _exigir_emitida(quotation)
         lineas = list(
             (
                 await self._session.scalars(
@@ -114,6 +125,13 @@ class V2QuotationPdfService:
         )
 
 
+def _exigir_emitida(quotation: V2Quotation) -> None:
+    if quotation.status is V2QuotationStatus.DRAFT:
+        raise V2QuotationPdfDraftBlockedError()
+    if quotation.issued_at is None:
+        raise V2QuotationPdfNotIssuedError()
+
+
 def build_v2_pdf_document(
     quotation: V2Quotation,
     lines: list[V2QuotationProduct],
@@ -128,8 +146,8 @@ def build_v2_pdf_document(
     moneda = quotation.currency_code_snapshot or "PEN"
     porcentaje = quotation.tax_percent_snapshot or ZERO
     cancelada = quotation.status is V2QuotationStatus.CANCELLED
-    if quotation.issued_at is None:
-        raise V2QuotationPdfDraftBlockedError()
+    _exigir_emitida(quotation)
+    assert quotation.issued_at is not None
 
     items = [
         QuotationDocItem(
@@ -210,4 +228,9 @@ def build_v2_pdf_document(
     )
 
 
-__all__ = ["V2QuotationPdfDraftBlockedError", "V2QuotationPdfService", "build_v2_pdf_document"]
+__all__ = [
+    "V2QuotationPdfDraftBlockedError",
+    "V2QuotationPdfNotIssuedError",
+    "V2QuotationPdfService",
+    "build_v2_pdf_document",
+]

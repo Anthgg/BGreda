@@ -208,4 +208,3 @@ def test_la_cadena_no_se_rompe() -> None:
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     assert script.get_revision("0032") is not None
     assert script.get_revision("0033").down_revision == "0032"
-
