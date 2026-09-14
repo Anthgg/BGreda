@@ -153,6 +153,10 @@ class DocumentHeaderInfo:
     #: renderiza. Nulo en soles: ahi no hubo conversion, y ensenar una tasa
     #: describiria un cambio de moneda que nunca ocurrio.
     exchange_rate_text: str | None = None
+    #: Fase 010H. Una oferta V2 emitida cuyo plazo ya paso. Se dice con TEXTO
+    #: en la cabecera, no solo con un color: impresa en blanco y negro tiene
+    #: que seguir leyendose vencida. Los documentos Legacy lo dejan en falso.
+    is_expired: bool = False
 
 
 @dataclass(slots=True)
@@ -168,6 +172,14 @@ class QuotationDocItem:
     unit_of_measure: str = "NIU"
     unit_price_formatted: str = "S/ 0.00"
     subtotal_formatted: str = "S/ 0.00"
+    #: Fase 010H. IGV y total de la linea, para el documento que los declara
+    #: (`QuotationPdfDocument.show_line_tax`). Legacy no los rellena y su tabla
+    #: no cambia.
+    line_tax_formatted: str | None = None
+    line_total_formatted: str | None = None
+    #: Fase 010H. La «Observacion» de la hoja PDF cliente: texto para el
+    #: cliente, escrito para el cliente.
+    observation: str | None = None
 
 
 @dataclass(slots=True)
@@ -226,6 +238,10 @@ class QuotationPdfDocument:
     totals: QuotationDocTotals = field(default_factory=QuotationDocTotals)
     conditions: CommercialDocConditions = field(default_factory=CommercialDocConditions)
     bank_accounts: list[BankAccountDocInfo] = field(default_factory=list)
+    #: Fase 010H. Si la tabla lleva IGV y total por linea, como la hoja «PDF
+    #: cliente» del Cotizador V2. Falso por defecto: Legacy y los prototipos
+    #: siguen con su tabla de siempre.
+    show_line_tax: bool = False
 
 
 def _build_conditions_doc(

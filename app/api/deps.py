@@ -49,7 +49,9 @@ from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
 from app.services.quoter_v2_firing import V2FiringService
 from app.services.quoter_v2_labor import V2LaborService
+from app.services.quoter_v2_lifecycle import V2LifecycleService
 from app.services.quoter_v2_materials import V2MaterialService
+from app.services.quoter_v2_pdf import V2QuotationPdfService
 from app.services.quoter_v2_pricing import V2PricingService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
@@ -461,6 +463,31 @@ V2QuotationServiceDep = Annotated[V2QuotationService, Depends(get_v2_quotation_s
 
 
 # ---------------------------------------------------------------------------
+# Fase 010H: ciclo de vida y PDF del Cotizador V2
+# ---------------------------------------------------------------------------
+async def get_v2_lifecycle_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    settings: V2SettingsServiceDep,
+    quotations: V2QuotationServiceDep,
+    materials: V2MaterialServiceDep,
+    labor: V2LaborServiceDep,
+    firing: V2FiringServiceDep,
+) -> V2LifecycleService:
+    """Emitir, cancelar, duplicar y pasar a produccion.
+
+    Recibe los servicios V2 para que duplicar vuelva a pasar por las MISMAS
+    validaciones que un alta a mano. No recibe nada de inventario ni de
+    ordenes de produccion Legacy: el puente de 010H no puede consumir material
+    ni por descuido.
+    """
+    return V2LifecycleService(session, audit, settings, quotations, materials, labor, firing)
+
+
+V2LifecycleServiceDep = Annotated[V2LifecycleService, Depends(get_v2_lifecycle_service)]
+
+
+# ---------------------------------------------------------------------------
 # Fase 5.5: consulta de identidad (DNI/RUC)
 # ---------------------------------------------------------------------------
 def get_peru_api_provider(request: Request) -> IdentityProvider | None:
@@ -523,6 +550,17 @@ async def get_quotation_pdf_service(
 
 
 QuotationPdfServiceDep = Annotated[QuotationPdfService, Depends(get_quotation_pdf_service)]
+
+
+# Fase 010H: PDF del Cotizador V2. Mismo motor documental que CTZ y CPR.
+async def get_v2_quotation_pdf_service(
+    session: DbSessionDep,
+    base: QuotationPdfServiceDep,
+) -> V2QuotationPdfService:
+    return V2QuotationPdfService(session, base)
+
+
+V2QuotationPdfServiceDep = Annotated[V2QuotationPdfService, Depends(get_v2_quotation_pdf_service)]
 
 
 # ---------------------------------------------------------------------------

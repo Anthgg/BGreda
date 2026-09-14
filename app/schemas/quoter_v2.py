@@ -13,14 +13,16 @@ factor comercial, IGV, moneda— entra con su fase y su snapshot.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.pricing_engine import PricingEngineVersion
+from app.core.quoter_v2_lifecycle import V2EffectiveStatus
 from app.models.quoter_v2 import (
     V2CustomerKind,
+    V2ProductionHandoffStatus,
     V2ProductionType,
     V2QuotationStatus,
 )
@@ -66,8 +68,10 @@ class V2QuotationCreateIn(BaseModel):
     #: por el que cabe cualquier cosa, y 4000 caracteres son mas que de sobra
     #: para una nota interna.
     notes: str | None = Field(default=None, max_length=4000)
+    #: Fase 010H. Observaciones que SI salen en el PDF del cliente.
+    client_notes: str | None = Field(default=None, max_length=2000)
 
-    @field_validator("name", "notes")
+    @field_validator("name", "notes", "client_notes")
     @classmethod
     def _normalize(cls, value: str | None) -> str | None:
         return _blank_to_none(value)
@@ -98,11 +102,24 @@ class V2QuotationUpdateIn(BaseModel):
     currency_code: str | None = Field(default=None, min_length=3, max_length=3)
     exchange_rate: Decimal | None = Field(default=None, gt=0, le=MAX_MONEY)
     notes: str | None = Field(default=None, max_length=4000)
+    #: Fase 010H. Observaciones que SI salen en el PDF del cliente. `notes`
+    #: sigue siendo interno.
+    client_notes: str | None = Field(default=None, max_length=2000)
 
-    @field_validator("name", "notes")
+    @field_validator("name", "notes", "client_notes")
     @classmethod
     def _normalize(cls, value: str | None) -> str | None:
         return _blank_to_none(value)
+
+
+class V2ProductionHandoffOut(BaseModel):
+    """Fase 010H. El puente de una cotizacion hacia produccion."""
+
+    id: int
+    v2_quotation_id: int
+    status: V2ProductionHandoffStatus
+    created_at: datetime
+    created_by_name: str | None
 
 
 class V2QuotationOut(BaseModel):
@@ -144,6 +161,25 @@ class V2QuotationOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ---- Fase 010H: ciclo de vida -------------------------------------
+    client_notes: str | None = None
+    #: Lo que la cotizacion ES hoy: `EXPIRED` y `READY_FOR_PRODUCTION` los
+    #: calcula el backend con su reloj. La pantalla no decide si vencio.
+    effective_status: V2EffectiveStatus
+    issued_at: datetime | None = None
+    #: Ultimo dia (calendario de Lima) en que la oferta vale.
+    valid_until: date | None = None
+    expires_at: datetime | None = None
+    issued_by_name: str | None = None
+    cancelled_at: datetime | None = None
+    cancelled_by_name: str | None = None
+    cancel_reason: str | None = None
+    duplicated_from_id: int | None = None
+    #: El borrador ya abierto a partir de esta, si lo hay: la pantalla ofrece
+    #: ir a el en vez de invitar a duplicar otra vez.
+    open_duplicate_id: int | None = None
+    production_handoff: V2ProductionHandoffOut | None = None
+
 
 class V2QuotationListItemOut(BaseModel):
     """Fila del listado. Sin desglose: nadie necesita el detalle para elegir."""
@@ -158,8 +194,116 @@ class V2QuotationListItemOut(BaseModel):
     customer_name: str | None
     name: str | None
     created_at: datetime
+    effective_status: V2EffectiveStatus
+    valid_until: date | None = None
 
 
 class V2QuotationPage(BaseModel):
     items: list[V2QuotationListItemOut]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Fase 010H: emision, cancelacion, duplicacion y puente a produccion
+# ---------------------------------------------------------------------------
+class V2BlockerOut(BaseModel):
+    code: str
+    line_id: int | None = None
+
+
+class V2PreviewLineOut(BaseModel):
+    """Una linea tal como la vera el cliente. Sin un solo costo interno."""
+
+    id: int
+    product_name: str | None
+    quantity: int
+    length_cm: Decimal | None
+    width_cm: Decimal | None
+    height_cm: Decimal | None
+    client_observation: str | None
+    unit_price: Decimal
+    line_subtotal: Decimal
+    line_tax: Decimal
+    line_total: Decimal
+
+
+class V2ConfirmationPreviewOut(BaseModel):
+    """El resumen que se revisa antes de emitir, con la huella que lo identifica."""
+
+    quotation_id: int
+    code: str
+    status: V2QuotationStatus
+    effective_status: V2EffectiveStatus
+    can_confirm: bool
+    blockers: list[V2BlockerOut]
+    warnings: list[str]
+    #: Hay que devolverla al confirmar. Si el documento cambio entre medias, la
+    #: emision se rechaza con 409 en vez de congelar lo que nadie reviso.
+    fingerprint: str
+    customer_name: str | None
+    #: Fase 010H. Lo que el PDF dira del cliente y las condiciones; entra en la
+    #: huella, asi que tambien se ensena.
+    customer_document: str | None = None
+    customer_address: str | None = None
+    customer_email: str | None = None
+    customer_phone: str | None = None
+    conditions: str | None = None
+    payment_notes: str | None = None
+    name: str | None
+    client_notes: str | None
+    currency_code: str | None
+    currency_symbol: str | None
+    exchange_rate: Decimal | None
+    tax_percent: Decimal | None
+    commercial_factor: Decimal | None
+    validity_days: int | None
+    #: Si se emitiera ahora mismo. En una emitida, la que se congelo.
+    valid_until: date | None
+    subtotal_amount: Decimal
+    tax_amount: Decimal
+    total_amount: Decimal
+    lines: list[V2PreviewLineOut]
+
+
+class V2ConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class V2CancelIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize(cls, value: str | None) -> str | None:
+        return _blank_to_none(value)
+
+
+class V2DuplicateWarningOut(BaseModel):
+    code: str
+    name: str | None = None
+
+
+class V2DuplicateOut(BaseModel):
+    quotation: V2QuotationOut
+    #: Falso cuando ya habia un borrador abierto nacido de la misma: el doble
+    #: clic no crea otro.
+    created: bool
+    warnings: list[V2DuplicateWarningOut]
+
+
+class V2SendToProductionOut(BaseModel):
+    handoff: V2ProductionHandoffOut
+    created: bool
+
+
+class V2HistoryEventOut(BaseModel):
+    """Un hecho del ciclo de vida: quien, cuando y que."""
+
+    event: str
+    at: datetime
+    user_name: str | None
+    details: dict[str, str | None]

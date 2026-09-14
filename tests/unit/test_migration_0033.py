@@ -208,13 +208,3 @@ def test_la_cadena_no_se_rompe() -> None:
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     assert script.get_revision("0032") is not None
     assert script.get_revision("0033").down_revision == "0032"
-
-
-def test_0033_es_la_unica_cabeza() -> None:
-    """Dos cabezas son un despliegue que se detiene a mitad, en produccion.
-
-    Esta afirmacion acompana siempre a la ULTIMA revision y se retira de la
-    anterior cuando entra una nueva; por eso ya no vive en 0032.
-    """
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0033"]

@@ -773,7 +773,13 @@ class TestSnapshot:
     ) -> None:
         cotizacion, _ = await escenario(api, admin_csrf)
         await db_session.execute(
-            text("UPDATE v2_quotations SET status = 'CONFIRMED' WHERE id = :id"),
+            text(
+                # Fase 010H: una emitida tiene fechas y huella; el CHECK
+                # `lifecycle_coherent` ya no admite el estado a secas.
+                "UPDATE v2_quotations SET status = 'CONFIRMED', issued_at = now(),"
+                " valid_until = current_date + 20, expires_at = now() + interval '21 days',"
+                " commercial_fingerprint = repeat('a', 64) WHERE id = :id"
+            ),
             {"id": cotizacion},
         )
         await db_session.commit()
@@ -791,7 +797,13 @@ class TestSnapshot:
         antes = await precio(api, cotizacion)
 
         await db_session.execute(
-            text("UPDATE v2_quotations SET status = 'CONFIRMED' WHERE id = :id"),
+            text(
+                # Fase 010H: una emitida tiene fechas y huella; el CHECK
+                # `lifecycle_coherent` ya no admite el estado a secas.
+                "UPDATE v2_quotations SET status = 'CONFIRMED', issued_at = now(),"
+                " valid_until = current_date + 20, expires_at = now() + interval '21 days',"
+                " commercial_fingerprint = repeat('a', 64) WHERE id = :id"
+            ),
             {"id": cotizacion},
         )
         await db_session.execute(

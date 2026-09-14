@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.quoter_v2_lifecycle import MAX_VALIDITY_DAYS
 from app.models.firings import FiringType
 from app.models.quoter_v2 import V2CustomerKind, V2ProductionType
 
@@ -87,7 +88,9 @@ class V2SettingsUpdateIn(BaseModel):
     commercial_factor_default: Decimal | None = Field(default=None, ge=2, le=MAX_FACTOR)
     commercial_factor_max: Decimal | None = Field(default=None, ge=2, le=MAX_FACTOR)
 
-    quotation_validity_days: int | None = Field(default=None, gt=0, le=3650)
+    #: El tope es el MISMO con el que se emite (010H): una casa configurada por
+    #: encima crearia borradores que nunca podrian emitirse.
+    quotation_validity_days: int | None = Field(default=None, gt=0, le=MAX_VALIDITY_DAYS)
     default_exchange_rate: Decimal | None = Field(default=None, gt=0, le=MAX_MONEY)
 
     default_production_type: V2ProductionType | None = None

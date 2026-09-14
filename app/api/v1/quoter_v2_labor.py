@@ -36,6 +36,8 @@ from app.schemas.quoter_v2_labor import (
     V2LaborIn,
     V2LaborOut,
     V2LaborPage,
+    V2LoadWorkerIn,
+    V2LoadWorkerOut,
     V2PlanningIn,
     V2TechniqueCreateIn,
     V2TechniqueOut,
@@ -51,7 +53,9 @@ from app.schemas.quoter_v2_labor import (
 router = APIRouter(tags=["cotizador-v2"])
 
 
-def _worker_out(worker: V2Worker, jornada: Decimal, tarifa: Decimal) -> V2WorkerOut:
+def _worker_out(
+    worker: V2Worker, jornada: Decimal, tarifa: Decimal, tecnicas: list[int] | None = None
+) -> V2WorkerOut:
     return V2WorkerOut(
         id=worker.id,
         name=worker.name,
@@ -63,6 +67,7 @@ def _worker_out(worker: V2Worker, jornada: Decimal, tarifa: Decimal) -> V2Worker
         hourly_rate=tarifa,
         notes=worker.notes,
         version=worker.version,
+        technique_ids=tecnicas or [],
     )
 
 
@@ -75,6 +80,7 @@ def _technique_out(tecnica: V2Technique, jornada: Decimal) -> V2TechniqueOut:
         default_capacity_per_workday=tecnica.default_capacity_per_workday,
         unit=tecnica.unit,
         requires_glaze=tecnica.requires_glaze,
+        manual_hours=tecnica.manual_hours,
         units_per_hour=units_per_hour(tecnica.default_capacity_per_workday, jornada),
         notes=tecnica.notes,
         version=tecnica.version,
@@ -131,10 +137,15 @@ async def list_v2_workers(
     active_only: Annotated[bool, Query()] = False,
 ) -> V2WorkerPage:
     trabajadores = await service.list_workers(active_only=active_only)
+    capacidades = await service.capacities_of([worker.id for worker in trabajadores])
     salida = []
     for worker in trabajadores:
         jornada = await service.resolve_workday_hours(worker)
-        salida.append(_worker_out(worker, jornada, await service.hourly_rate_for(worker)))
+        salida.append(
+            _worker_out(
+                worker, jornada, await service.hourly_rate_for(worker), capacidades[worker.id]
+            )
+        )
     return V2WorkerPage(items=salida)
 
 
@@ -147,7 +158,10 @@ async def create_v2_worker(
 ) -> V2WorkerOut:
     worker = await service.create_worker(payload.model_dump(), user=admin)
     jornada = await service.resolve_workday_hours(worker)
-    resultado = _worker_out(worker, jornada, await service.hourly_rate_for(worker))
+    capacidades = await service.capacities_of([worker.id])
+    resultado = _worker_out(
+        worker, jornada, await service.hourly_rate_for(worker), capacidades[worker.id]
+    )
     await session.commit()
     return resultado
 
@@ -169,7 +183,10 @@ async def update_v2_worker(
         worker_id, datos, expected_version=payload.expected_version, user=admin
     )
     jornada = await service.resolve_workday_hours(worker)
-    resultado = _worker_out(worker, jornada, await service.hourly_rate_for(worker))
+    capacidades = await service.capacities_of([worker.id])
+    resultado = _worker_out(
+        worker, jornada, await service.hourly_rate_for(worker), capacidades[worker.id]
+    )
     await session.commit()
     return resultado
 
@@ -263,6 +280,34 @@ async def add_v2_quotation_labor(
     resultado = _labor_out(fila, avisos)
     await session.commit()
     return resultado
+
+
+@router.post(
+    "/quotations-v2/{quotation_id}/labor/load-worker",
+    response_model=V2LoadWorkerOut,
+)
+async def load_v2_worker_techniques(
+    quotation_id: Annotated[int, Path(ge=1)],
+    payload: V2LoadWorkerIn,
+    service: V2LaborServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> V2LoadWorkerOut:
+    """Correccion 010H. Carga las tecnicas habilitadas del trabajador, sin duplicar."""
+    creadas, saltadas, avisos = await service.load_worker_techniques(
+        quotation_id,
+        payload.worker_id,
+        payload.v2_quotation_product_id,
+        payload.technique_ids,
+        user=admin,
+    )
+    salida = V2LoadWorkerOut(
+        created=[_labor_out(fila, []) for fila in creadas],
+        already_loaded_technique_ids=saltadas,
+        warnings=avisos,
+    )
+    await session.commit()
+    return salida
 
 
 @router.put("/quotations-v2/{quotation_id}/labor/{labor_id}", response_model=V2LaborOut)
