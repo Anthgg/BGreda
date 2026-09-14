@@ -115,6 +115,7 @@ DUP_GLAZE_MATERIAL_UNAVAILABLE = "V2_DUPLICATE_GLAZE_MATERIAL_UNAVAILABLE"
 DUP_KILN_UNAVAILABLE = "V2_DUPLICATE_KILN_UNAVAILABLE"
 DUP_LABOR_UNAVAILABLE = "V2_DUPLICATE_LABOR_UNAVAILABLE"
 DUP_ILLUSTRATION_UNAVAILABLE = "V2_DUPLICATE_ILLUSTRATION_UNAVAILABLE"
+DUP_PLANNING_UNAVAILABLE = "V2_DUPLICATE_PLANNING_UNAVAILABLE"
 
 
 class V2LifecycleNotFoundError(APIError):
@@ -666,8 +667,14 @@ class V2LifecycleService:
         except APIError:
             avisos.append({"code": DUP_KILN_UNAVAILABLE, "name": original.kiln_name_snapshot})
             datos.pop("kiln_id", None)
-            async with self._session.begin_nested():
-                await self._firing.set_firing(nueva.id, datos, user=user)
+            # Sin horno pedido no hay nada que el maestro pueda rechazar; aun asi
+            # un fallo aqui no tumba la duplicacion: las quemas quedan como las
+            # dejo la configuracion de hoy y el borrador se revisa.
+            try:
+                async with self._session.begin_nested():
+                    await self._firing.set_firing(nueva.id, datos, user=user)
+            except APIError:
+                pass
 
     async def _copy_lines(
         self,
@@ -819,7 +826,15 @@ class V2LifecycleService:
     ) -> None:
         """Dias de taller e ilustracion. La ilustracion, con el jornal de hoy."""
         if original.effective_work_days is not None:
-            await self._labor.set_planning(nueva.id, original.effective_work_days, user=user)
+            # Con SAVEPOINT como el resto: si un recalculo futuro llegara a
+            # rechazar los dias, la duplicacion sigue y el borrador pide decidirlos.
+            try:
+                async with self._session.begin_nested():
+                    await self._labor.set_planning(
+                        nueva.id, original.effective_work_days, user=user
+                    )
+            except APIError:
+                avisos.append({"code": DUP_PLANNING_UNAVAILABLE, "name": None})
         if original.illustration_enabled:
             try:
                 async with self._session.begin_nested():
