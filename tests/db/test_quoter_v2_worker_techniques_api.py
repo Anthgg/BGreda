@@ -408,3 +408,39 @@ class TestBarreraDelBackend:
         ]
         r = await cargar(api, admin_csrf, qid, worker["id"])
         assert r.status_code == 409
+
+
+class TestCasosDelRecheck:
+    async def test_subconjunto_vacio_no_se_confunde_con_trabajador_sin_tecnicas(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        worker, _ = await tornero_con_tres(api, admin_csrf)
+        qid = await crear_cotizacion(api, admin_csrf)
+        r = await cargar(api, admin_csrf, qid, worker["id"], technique_ids=[])
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "V2_LABOR_INPUT_INVALID"
+
+    async def test_duplicar_con_la_capacidad_retirada_avisa_y_no_copia_la_tarea(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        from tests.db.test_quoter_v2_lifecycle_api import cotizacion_completa, emitir, vencer
+
+        datos = await cotizacion_completa(api, admin_csrf)
+        qid = datos["id"]
+        await emitir(api, admin_csrf, qid)
+        await vencer(db_session, qid)
+        actual = await ficha(api, datos["worker_id"])
+        retirada = await api.put(
+            f"{WORKERS}/{datos['worker_id']}",
+            json={"expected_version": actual["version"], "technique_ids": []},
+            headers=h(admin_csrf),
+        )
+        assert retirada.status_code == 200, retirada.text
+
+        dup = await api.post(f"{V2}/{qid}/duplicate", headers=h(admin_csrf))
+        assert dup.status_code == 201, dup.text
+        assert "V2_DUPLICATE_LABOR_UNAVAILABLE" in {a["code"] for a in dup.json()["warnings"]}
+        nueva = dup.json()["quotation"]["id"]
+        assert (await api.get(f"{V2}/{nueva}/labor")).json()["items"] == []
+        # La antigua conserva su tarea congelada.
+        assert len((await api.get(f"{V2}/{qid}/labor")).json()["items"]) == 1

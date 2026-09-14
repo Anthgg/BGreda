@@ -408,6 +408,10 @@ class V2LaborService:
             ).all()
         )
         if technique_ids is not None:
+            # Una lista vacia es «no marque ninguna», no «no tiene tecnicas»:
+            # confundirlas diria al usuario que falta configurar la ficha.
+            if not technique_ids:
+                raise V2LaborInputInvalid("Marque al menos una tecnica para anadir")
             pedidas = set(technique_ids)
             no_habilitadas = pedidas - {tecnica.id for tecnica in habilitadas}
             if no_habilitadas:
