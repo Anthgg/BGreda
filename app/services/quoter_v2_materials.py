@@ -531,6 +531,12 @@ class V2MaterialService:
             nombre = (data["product_name"] or "").strip()
             linea.product_name_snapshot = nombre or None
 
+        # Fase 010H. Lo que el cliente leera de esta pieza. Un texto en blanco
+        # no es una observacion: se guarda como ausencia.
+        if "client_observation" in data:
+            observacion = (data["client_observation"] or "").strip()
+            linea.client_observation = observacion or None
+
         # Fase 010E. La geometria se recalcula SIEMPRE, igual que el material y
         # por el mismo motivo: subir la cantidad cambia el volumen total, y un
         # volumen que no se recalcula deja de corresponder a su linea —y con

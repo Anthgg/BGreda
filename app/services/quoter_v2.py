@@ -64,6 +64,7 @@ CAMPOS_DE_CABECERA = (
     "customer_name_snapshot",
     "name",
     "notes",
+    "client_notes",
     "customer_kind",
     "production_type",
     "currency_code_snapshot",
@@ -205,7 +206,7 @@ class V2QuotationService:
             customer = await self._customer(data["customer_id"])
             quotation.customer_id = customer.id if customer else None
             quotation.customer_name_snapshot = customer.name if customer else None
-        for campo in ("name", "notes"):
+        for campo in ("name", "notes", "client_notes"):
             if campo in data:
                 setattr(quotation, campo, data[campo])
         if "customer_kind" in data and data["customer_kind"] is not None:

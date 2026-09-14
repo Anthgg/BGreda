@@ -95,6 +95,7 @@ def _line_out(fila: V2QuotationProduct, warnings: list[str]) -> V2QuotationProdu
         glaze_volume_ml=fila.glaze_volume_ml,
         glaze_cost=fila.glaze_cost,
         materials_cost=fila.body_cost + fila.glaze_cost,
+        client_observation=fila.client_observation,
         warnings=warnings,
     )
 

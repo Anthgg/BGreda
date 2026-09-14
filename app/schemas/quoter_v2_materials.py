@@ -129,6 +129,8 @@ class V2QuotationProductIn(BaseModel):
     #: mas caro por gramo, como referencia de costeo.
     glaze_material_id: int | None = Field(default=None, ge=1)
     glaze_cost_per_unit_override: Decimal | None = Field(default=None, ge=0, le=MAX_UNIT_COST)
+    #: Fase 010H. Texto para el cliente: sale en la columna «Observacion» del PDF.
+    client_observation: str | None = Field(default=None, max_length=500)
 
 
 class V2QuotationProductOut(BaseModel):
@@ -178,6 +180,7 @@ class V2QuotationProductOut(BaseModel):
     glaze_total_weight: Decimal
     glaze_volume_ml: Decimal
     glaze_cost: Decimal
+    client_observation: str | None = None
 
     #: Pasta mas esmalte de ESTA linea. Lo suma el backend y no la pantalla:
     #: sumar dos importes en coma flotante en el navegador produce colas de

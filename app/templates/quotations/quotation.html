@@ -48,6 +48,19 @@
     .quotation-items td.col-price { text-align: right; }
     .quotation-items td.col-subtotal { text-align: right; font-weight: 700; color: var(--doc-ink); }
 
+    /* Fase 010H. Con IGV y total por linea la descripcion cede sitio. Solo
+       aplica al documento que lo declara; el resto conserva sus anchos. */
+    .quotation-items.with-line-tax th.col-desc { width: 34%; }
+    .quotation-items.with-line-tax th.col-uom { width: 7%; }
+    .quotation-items.with-line-tax th.col-qty { width: 8%; }
+    .quotation-items.with-line-tax th.col-price { width: 11%; }
+    .quotation-items.with-line-tax th.col-subtotal { width: 12%; }
+    .quotation-items th.col-tax { width: 11%; text-align: right; }
+    .quotation-items th.col-total { width: 12%; text-align: right; }
+    .quotation-items td.col-tax { text-align: right; }
+    .quotation-items td.col-total { text-align: right; font-weight: 700; color: var(--doc-ink); }
+    .quotation-item-observation { margin-top: 2px; font-style: italic; color: var(--doc-muted); }
+
     .quotation-item-subinfo span { display: inline-block; margin-right: var(--doc-space-3); }
 
     /* Totales y condiciones, en dos columnas. */
@@ -161,7 +174,10 @@
      doc.company,
      doc.document.title,
      doc.document.code,
-     badge={'label': 'COTIZACIÓN ANULADA', 'tone': 'void'} if doc.document.is_cancelled else none,
+     badge=(
+       {'label': 'COTIZACIÓN ANULADA', 'tone': 'void'} if doc.document.is_cancelled
+       else ({'label': 'COTIZACIÓN VENCIDA', 'tone': 'pending'} if doc.document.is_expired else none)
+     ),
      meta=meta
    ) }}
 
@@ -201,7 +217,7 @@
   </div>
 </div>
 
-<table class="doc-table quotation-items">
+<table class="doc-table quotation-items{% if doc.show_line_tax %} with-line-tax{% endif %}">
   <thead>
     <tr>
       <th class="col-num">#</th>
@@ -210,6 +226,10 @@
       <th class="col-uom">Unidad</th>
       <th class="col-price">P. Unitario</th>
       <th class="col-subtotal">Subtotal</th>
+      {% if doc.show_line_tax %}
+      <th class="col-tax">IGV</th>
+      <th class="col-total">Total</th>
+      {% endif %}
     </tr>
   </thead>
   <tbody>
@@ -232,11 +252,18 @@
           <span><strong>Dimensiones:</strong> {{ item.dimensions_formatted }}</span>
           {% endif %}
         </div>
+        {% if item.observation %}
+        <div class="doc-cell-sub quotation-item-observation">{{ item.observation }}</div>
+        {% endif %}
       </td>
       <td class="col-qty">{{ item.quantity_formatted }}</td>
       <td class="col-uom">{{ item.unit_of_measure }}</td>
       <td class="col-price">{{ item.unit_price_formatted }}</td>
       <td class="col-subtotal">{{ item.subtotal_formatted }}</td>
+      {% if doc.show_line_tax %}
+      <td class="col-tax">{{ item.line_tax_formatted or '' }}</td>
+      <td class="col-total">{{ item.line_total_formatted or '' }}</td>
+      {% endif %}
     </tr>
     {% endfor %}
     {# Cargos comerciales: se cobran y no se fabrican, asi que no llevan
