@@ -276,6 +276,32 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 nombre,
             )
 
+        # Trabajadores y tecnicas de la hoja «Configuracion» del Excel aprobado.
+        # Sin ellos el paso de mano de obra no deja asignar trabajo a nadie.
+        for nombre, tipo, jornal in TRABAJADORES:
+            await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/workers",
+                    json={"name": nombre, "worker_type": tipo, "daily_rate": jornal},
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+        for codigo, nombre, rendimiento, esmalte in TECNICAS:
+            await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/techniques",
+                    json={
+                        "code": codigo,
+                        "name": nombre,
+                        "default_capacity_per_workday": rendimiento,
+                        "requires_glaze": esmalte,
+                    },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+
         # Dos hornos con sus tarifas: el chico para por menor, el grande para
         # por mayor. Son los numeros del Excel aprobado.
         hornos: dict[str, int] = {}
@@ -331,6 +357,22 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
         await sembrar_cotizacion_vencida(api, cabeceras, int(pasta.json()["id"]))
     print("[servidor_revision] siembra completa", flush=True)
 
+
+#: Trabajadores del Excel: nombre, tipo y jornal (S/ por jornada de 8 h).
+TRABAJADORES = (
+    ("E2E-Trabajador taller", "INTERNAL", "110"),
+    ("E2E-Tornero", "INTERNAL", "220"),
+    ("E2E-Personal externo", "EXTERNAL", "120"),
+)
+
+#: Tecnicas del Excel: codigo, nombre, piezas por jornada y si exige esmalte.
+TECNICAS = (
+    ("E2E-A-MANO", "A mano", "15", False),
+    ("E2E-TORNO-FACIL", "Torno facil", "50", False),
+    ("E2E-TORNO-DIFICIL", "Torno dificil", "25", False),
+    ("E2E-COLADA", "Colada", "100", False),
+    ("E2E-VIDRIADO-INMERSION", "Vidriado por inmersion", "50", True),
+)
 
 #: Piezas de catalogo: nombre, gramaje (g), largo, ancho y alto (cm).
 PIEZAS_DE_CATALOGO = (
