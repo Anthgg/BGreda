@@ -49,6 +49,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -155,6 +156,19 @@ class V2Technique(Base, TimestampMixin):
         Boolean, nullable=False, server_default=text("false")
     )
 
+    #: Fase 010H (correccion trabajador-tecnica). Una tecnica cuyo tiempo se
+    #: decide A MANO y no sale de piezas por jornada: el «personal adicional»
+    #: del Excel («horas manuales; no reduce plazo automaticamente»).
+    #:
+    #: Es una marca del catalogo y no un nombre en el codigo. Existe porque, al
+    #: cargar las tecnicas de un trabajador sobre un producto, las piezas nacen
+    #: con la cantidad del producto: con un rendimiento de 1 pieza por jornada,
+    #: 50 piezas serian 400 horas que nadie pidio. Una tecnica de horas manuales
+    #: nace en cero piezas y se marca como personal adicional.
+    manual_hours: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
     notes: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
 
@@ -166,6 +180,39 @@ class V2Technique(Base, TimestampMixin):
         CheckConstraint("default_capacity_per_workday > 0", name="capacity_positive"),
         CheckConstraint("version > 0", name="version_positive"),
         Index("ix_v2_techniques_active", "active"),
+    )
+
+
+class V2WorkerTechnique(Base, TimestampMixin):
+    """Fase 010H (correccion). Que tecnicas sabe hacer cada trabajador.
+
+    Regla explicita del taller: la capacidad es del MAESTRO del trabajador. Al
+    elegirlo en una cotizacion se cargan sus tecnicas habilitadas, y quitar una
+    en esa cotizacion no toca este maestro.
+
+    Lo que NO guarda: rendimiento. Sigue siendo de la tecnica —un estandar, no
+    una medicion de la persona—, y la formula de 010D no cambia.
+
+    `active` y no borrado: retirar una capacidad no puede reescribir el pasado.
+    Una cotizacion ya emitida la explica con sus snapshots, y un borrador que
+    la tenia congelada avisa en vez de encallar.
+    """
+
+    __tablename__ = "v2_worker_techniques"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    worker_id: Mapped[int] = mapped_column(
+        ForeignKey("v2_workers.id", ondelete="RESTRICT"), nullable=False
+    )
+    technique_id: Mapped[int] = mapped_column(
+        ForeignKey("v2_techniques.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+
+    __table_args__ = (
+        # Un par, una fila. Sin esto, dos altas simultaneas de la misma
+        # capacidad dejarian dos filas y desactivar una no la retiraria.
+        UniqueConstraint("worker_id", "technique_id", name="uq_v2_worker_techniques_pair"),
     )
 
 

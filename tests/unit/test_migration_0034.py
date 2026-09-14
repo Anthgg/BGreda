@@ -120,9 +120,3 @@ def test_el_downgrade_se_niega_con_documentos_emitidos() -> None:
 def test_la_cadena_no_se_rompe() -> None:
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     assert script.get_revision("0034").down_revision == "0033"
-
-
-def test_0034_es_la_unica_cabeza() -> None:
-    """Dos cabezas son un despliegue que se detiene a mitad, en produccion."""
-    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0034"]

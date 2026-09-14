@@ -57,6 +57,7 @@ from app.models.quoter_v2_labor import (
     V2QuotationLabor,
     V2Technique,
     V2Worker,
+    V2WorkerTechnique,
     V2WorkerType,
 )
 from app.models.quoter_v2_settings import V2CommercialSettings
@@ -79,6 +80,12 @@ WARN_WORKDAY_EXCEEDED = "V2_LABOR_WORKDAY_EXCEEDED"
 WARN_WORKER_UNAVAILABLE = "V2_LABOR_WORKER_UNAVAILABLE"
 WARN_TECHNIQUE_UNAVAILABLE = "V2_LABOR_TECHNIQUE_UNAVAILABLE"
 WARN_GLAZE_TECHNIQUE_WITHOUT_GLAZE = "V2_LABOR_GLAZE_TECHNIQUE_WITHOUT_GLAZE"
+#: Correccion 010H. La tarea de un borrador usa una tecnica que el trabajador ya
+#: no tiene habilitada en su maestro. Avisa y no bloquea: la tarea conserva lo
+#: que congelo, igual que con un trabajador dado de baja.
+WARN_TECHNIQUE_NOT_ENABLED = "V2_LABOR_TECHNIQUE_NOT_ENABLED"
+#: El trabajador elegido no tiene ninguna tecnica activa habilitada.
+WARN_WORKER_WITHOUT_TECHNIQUES = "V2_LABOR_WORKER_WITHOUT_TECHNIQUES"
 
 
 class V2WorkerNotFoundError(APIError):
@@ -113,6 +120,18 @@ class V2LaborResourceInactiveError(APIError):
     status_code = 422
     code = "V2_LABOR_RESOURCE_INACTIVE"
     message = "El trabajador o la tecnica ya no estan activos"
+
+
+class V2LaborTechniqueNotAllowedError(APIError):
+    """Correccion 010H. Ese trabajador no tiene habilitada esa tecnica.
+
+    La pantalla solo ofrece las habilitadas, pero la pantalla no es una barrera:
+    un request escrito a mano llega igual. El backend es la autoridad.
+    """
+
+    status_code = 422
+    code = "V2_LABOR_TECHNIQUE_NOT_ALLOWED"
+    message = "El trabajador no tiene habilitada esa tecnica en su ficha"
 
 
 class V2LaborVersionConflictError(APIError):
@@ -192,9 +211,11 @@ class V2LaborService:
         return worker
 
     async def create_worker(self, data: dict[str, Any], *, user: AuthenticatedUser) -> V2Worker:
+        tecnicas = data.pop("technique_ids", None) or []
         worker = V2Worker(**data)
         self._session.add(worker)
         await self._session.flush()
+        await self._set_capacities(worker.id, tecnicas)
         self._audit.record_action(
             entity_type=V2_WORKER_ENTITY,
             entity_id=str(worker.id),
@@ -235,8 +256,14 @@ class V2LaborService:
             raise V2LaborVersionConflictError()
 
         anterior = str(worker.daily_rate)
+        tecnicas = data.pop("technique_ids", None)
         for campo, valor in data.items():
             setattr(worker, campo, valor)
+        if tecnicas is not None:
+            # El conjunto se REEMPLAZA, con la version de la ficha: dos
+            # administradores que editen capacidades a la vez chocan aqui en
+            # vez de mezclar dos listas que ninguno de los dos eligio.
+            await self._set_capacities(worker.id, tecnicas)
         worker.version += 1
         await self._session.flush()
 
@@ -254,6 +281,180 @@ class V2LaborService:
             },
         )
         return worker
+
+    # ------------------------------------------------------------------
+    # Capacidades del trabajador (correccion 010H)
+    # ------------------------------------------------------------------
+    async def _set_capacities(self, worker_id: int, technique_ids: list[int]) -> None:
+        """Deja habilitadas EXACTAMENTE esas tecnicas.
+
+        Las que salen se desactivan, no se borran: una capacidad retirada no
+        reescribe una cotizacion que la uso. Las que entran se crean o se
+        reactivan. Una tecnica inexistente es un error de la peticion.
+        """
+        pedidas = set(technique_ids)
+        if pedidas:
+            existentes = set(
+                (
+                    await self._session.scalars(
+                        select(V2Technique.id).where(V2Technique.id.in_(pedidas))
+                    )
+                ).all()
+            )
+            faltan = pedidas - existentes
+            if faltan:
+                raise V2TechniqueNotFoundError(
+                    "Una de las tecnicas indicadas no existe",
+                )
+        filas = {
+            fila.technique_id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(V2WorkerTechnique).where(V2WorkerTechnique.worker_id == worker_id)
+                )
+            ).all()
+        }
+        for technique_id, fila in filas.items():
+            fila.active = technique_id in pedidas
+        for technique_id in sorted(pedidas - set(filas)):
+            self._session.add(
+                V2WorkerTechnique(worker_id=worker_id, technique_id=technique_id, active=True)
+            )
+        await self._session.flush()
+
+    async def capacities_of(self, worker_ids: list[int]) -> dict[int, list[int]]:
+        """Las tecnicas HABILITADAS de cada trabajador, activas o no en el catalogo."""
+        salida: dict[int, list[int]] = {worker_id: [] for worker_id in worker_ids}
+        if not worker_ids:
+            return salida
+        filas = (
+            await self._session.execute(
+                select(V2WorkerTechnique.worker_id, V2WorkerTechnique.technique_id)
+                .where(
+                    V2WorkerTechnique.worker_id.in_(worker_ids),
+                    V2WorkerTechnique.active.is_(True),
+                )
+                .order_by(V2WorkerTechnique.technique_id)
+            )
+        ).all()
+        for worker_id, technique_id in filas:
+            salida[int(worker_id)].append(int(technique_id))
+        return salida
+
+    async def is_enabled(self, worker_id: int, technique_id: int) -> bool:
+        return (
+            await self._session.scalar(
+                select(func.count())
+                .select_from(V2WorkerTechnique)
+                .where(
+                    V2WorkerTechnique.worker_id == worker_id,
+                    V2WorkerTechnique.technique_id == technique_id,
+                    V2WorkerTechnique.active.is_(True),
+                )
+            )
+            or 0
+        ) > 0
+
+    async def load_worker_techniques(
+        self,
+        quotation_id: int,
+        worker_id: int,
+        product_line_id: int | None,
+        technique_ids: list[int] | None,
+        *,
+        user: AuthenticatedUser,
+    ) -> tuple[list[V2QuotationLabor], list[int], list[str]]:
+        """Carga en la cotizacion las tecnicas habilitadas de un trabajador.
+
+        Devuelve `(tareas_creadas, tecnicas_ya_cargadas, avisos)`.
+
+        - Solo tecnicas ACTIVAS del catalogo y HABILITADAS para esa persona.
+          `technique_ids`, si viene, es el subconjunto que quien cotiza dejo
+          marcado; pedir una no habilitada es un 422, no un silencio.
+        - Una tarea por tecnica. La que ya estaba cargada para el mismo
+          trabajador y el mismo producto no se duplica: el doble clic y la
+          segunda carga devuelven lo mismo. Todo bajo el bloqueo de la
+          cotizacion, que serializa dos cargas simultaneas.
+        - Piezas: las del producto elegido. «Todo el pedido» nace en cero —sumar
+          platos y tazas no es una cantidad de nada— y una tecnica de horas
+          manuales tambien, marcada como personal adicional.
+
+        No toca el maestro: quitar despues una tarea es borrar ESA tarea.
+        """
+        quotation = await self._draft(quotation_id)
+        worker = await self.get_worker(worker_id)
+        if not worker.active:
+            raise V2LaborResourceInactiveError(
+                f"«{worker.name}» esta dado de baja y no puede asignarse"
+            )
+        linea: V2QuotationProduct | None = None
+        if product_line_id is not None:
+            linea = await self._session.get(V2QuotationProduct, product_line_id)
+            if linea is None or linea.v2_quotation_id != quotation.id:
+                raise V2LaborInputInvalid("El producto indicado no pertenece a esta cotizacion")
+
+        habilitadas = list(
+            (
+                await self._session.scalars(
+                    select(V2Technique)
+                    .join(V2WorkerTechnique, V2WorkerTechnique.technique_id == V2Technique.id)
+                    .where(
+                        V2WorkerTechnique.worker_id == worker.id,
+                        V2WorkerTechnique.active.is_(True),
+                        V2Technique.active.is_(True),
+                    )
+                    .order_by(V2Technique.name, V2Technique.id)
+                )
+            ).all()
+        )
+        if technique_ids is not None:
+            pedidas = set(technique_ids)
+            no_habilitadas = pedidas - {tecnica.id for tecnica in habilitadas}
+            if no_habilitadas:
+                raise V2LaborTechniqueNotAllowedError()
+            habilitadas = [tecnica for tecnica in habilitadas if tecnica.id in pedidas]
+        if not habilitadas:
+            return [], [], [WARN_WORKER_WITHOUT_TECHNIQUES]
+
+        condicion_producto = (
+            V2QuotationLabor.v2_quotation_product_id.is_(None)
+            if product_line_id is None
+            else V2QuotationLabor.v2_quotation_product_id == product_line_id
+        )
+        ya_cargadas = set(
+            (
+                await self._session.scalars(
+                    select(V2QuotationLabor.technique_id).where(
+                        V2QuotationLabor.v2_quotation_id == quotation.id,
+                        V2QuotationLabor.worker_id == worker.id,
+                        condicion_producto,
+                    )
+                )
+            ).all()
+        )
+
+        creadas: list[V2QuotationLabor] = []
+        saltadas: list[int] = []
+        avisos: list[str] = []
+        for tecnica in habilitadas:
+            if tecnica.id in ya_cargadas:
+                saltadas.append(tecnica.id)
+                continue
+            piezas = ZERO if tecnica.manual_hours or linea is None else Decimal(linea.quantity)
+            tarea, propios = await self.add_labor(
+                quotation.id,
+                {
+                    "worker_id": worker.id,
+                    "technique_id": tecnica.id,
+                    "v2_quotation_product_id": product_line_id,
+                    "quantity": piezas,
+                    "is_additional_personnel": tecnica.manual_hours,
+                },
+                user=user,
+            )
+            creadas.append(tarea)
+            avisos += propios
+        return creadas, saltadas, sorted(set(avisos))
 
     # ------------------------------------------------------------------
     # Maestro de tecnicas
@@ -455,11 +656,34 @@ class V2LaborService:
         if "quantity" in data:
             tarea.quantity = data["quantity"] if data["quantity"] is not None else ZERO
 
+        trabajador_antes = None if creando else tarea.worker_id
+        tecnica_antes = None if creando else tarea.technique_id
         avisos += await self._apply_worker(tarea, data, creando=creando)
         avisos += await self._apply_technique(tarea, data, creando=creando)
+        avisos += await self._check_capacity(
+            tarea,
+            elegido_ahora=creando
+            or tarea.worker_id != trabajador_antes
+            or tarea.technique_id != tecnica_antes,
+        )
         avisos += await self._apply_hours(tarea, data)
         avisos += await self._check_glaze(tarea)
         return avisos
+
+    async def _check_capacity(self, tarea: V2QuotationLabor, *, elegido_ahora: bool) -> list[str]:
+        """Que el trabajador tenga habilitada la tecnica. Se mira el PAR final.
+
+        Mismo criterio que con el trabajador dado de baja: elegir HOY una
+        combinacion no habilitada se rechaza; que la capacidad se retirara
+        DESPUES de congelar la tarea solo avisa. Mirarlo campo a campo dejaria
+        pasar un cambio de trabajador que conserva una tecnica que la persona
+        nueva no sabe hacer.
+        """
+        if await self.is_enabled(tarea.worker_id, tarea.technique_id):
+            return []
+        if elegido_ahora:
+            raise V2LaborTechniqueNotAllowedError()
+        return [WARN_TECHNIQUE_NOT_ENABLED]
 
     async def _apply_worker(
         self, tarea: V2QuotationLabor, data: dict[str, Any], *, creando: bool
@@ -899,6 +1123,7 @@ __all__ = [
     "V2LaborQuotationNotEditableError",
     "V2LaborResourceInactiveError",
     "V2LaborService",
+    "V2LaborTechniqueNotAllowedError",
     "V2LaborVersionConflictError",
     "V2TechniqueNotFoundError",
     "V2WorkerNotFoundError",

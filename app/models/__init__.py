@@ -91,6 +91,7 @@ from app.models.quoter_v2_labor import (
     V2QuotationLabor,
     V2Technique,
     V2Worker,
+    V2WorkerTechnique,
     V2WorkerType,
 )
 from app.models.quoter_v2_materials import (
@@ -214,5 +215,6 @@ __all__ = [
     "V2QuotationStatus",
     "V2Technique",
     "V2Worker",
+    "V2WorkerTechnique",
     "V2WorkerType",
 ]

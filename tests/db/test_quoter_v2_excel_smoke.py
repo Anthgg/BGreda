@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 from pypdf import PdfReader
 
+from tests.db.v2_capacidades import habilitar
 from tests.fixtures.excel_v2_modelo import EXCEL_TOLERANCE, LINES, TOTALS
 
 V2 = "/api/v1/quotations-v2"
@@ -265,6 +266,7 @@ class TestElCasoDelExcelPorLaApi:
             nombre = str(linea["name"])
             horas = Decimal(str(linea["labor_hours"]))
             costo = Decimal(str(linea["labor_cost"]))
+            await habilitar(api, admin_csrf, worker_id, technique_id)
             tarea = await api.post(
                 f"{V2}/{cotizacion}/labor",
                 json={
@@ -468,6 +470,7 @@ class TestElCasoDelExcelPorLaApi:
             assert alta.status_code == 201, alta.text
             horas = Decimal(str(linea["labor_hours"]))
             costo = Decimal(str(linea["labor_cost"]))
+            await habilitar(api, admin_csrf, worker_id, technique_id)
             tarea = await api.post(
                 f"{V2}/{cotizacion}/labor",
                 json={

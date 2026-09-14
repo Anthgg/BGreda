@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
+from tests.db.v2_capacidades import habilitar
 
 WORKERS = "/api/v1/quoter-v2/workers"
 TECHNIQUES = "/api/v1/quoter-v2/techniques"
@@ -69,9 +70,18 @@ async def crear_cotizacion(api: httpx.AsyncClient, csrf: str) -> int:
     return int(response.json()["id"])
 
 
+async def version_de(api: httpx.AsyncClient, worker_id: int) -> int:
+    """La version ACTUAL de la ficha: habilitar una tecnica la sube."""
+    fichas = (await api.get(WORKERS)).json()["items"]
+    return int(next(item for item in fichas if item["id"] == worker_id)["version"])
+
+
 async def anadir_tarea(
     api: httpx.AsyncClient, csrf: str, quotation_id: int, **campos: Any
 ) -> dict[str, Any]:
+    # Correccion 010H: la tecnica tiene que estar habilitada en la ficha.
+    if "worker_id" in campos and "technique_id" in campos:
+        await habilitar(api, csrf, int(campos["worker_id"]), int(campos["technique_id"]))
     response = await api.post(
         f"{V2}/{quotation_id}/labor", json=campos, headers={"X-CSRF-Token": csrf}
     )
@@ -204,7 +214,7 @@ class TestTrabajadores:
 
         subida = await api.put(
             f"{WORKERS}/{worker['id']}",
-            json={"expected_version": worker["version"], "daily_rate": "200"},
+            json={"expected_version": await version_de(api, worker["id"]), "daily_rate": "200"},
             headers={"X-CSRF-Token": admin_csrf},
         )
         assert subida.status_code == 200, subida.text
@@ -746,6 +756,7 @@ class TestOverrides:
             hourly_rate_override="17.5",
         )
 
+        await habilitar(api, admin_csrf, segundo["id"], tecnica["id"])
         response = await api.put(
             f"{V2}/{cotizacion}/labor/{tarea['id']}",
             json={"worker_id": segundo["id"]},
@@ -1275,7 +1286,7 @@ class TestReenviarNoEsElegir:
         )
         baja = await api.put(
             f"{WORKERS}/{worker['id']}",
-            json={"expected_version": worker["version"], "active": False},
+            json={"expected_version": await version_de(api, worker["id"]), "active": False},
             headers={"X-CSRF-Token": admin_csrf},
         )
         assert baja.status_code == 200, baja.text
@@ -1340,6 +1351,7 @@ class TestReenviarNoEsElegir:
             hourly_rate_override="17.5",
         )
 
+        await habilitar(api, admin_csrf, segundo["id"], tecnica["id"])
         response = await api.put(
             f"{V2}/{cotizacion}/labor/{tarea['id']}",
             json={"worker_id": segundo["id"]},

@@ -276,19 +276,12 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 nombre,
             )
 
-        # Trabajadores y tecnicas de la hoja «Configuracion» del Excel aprobado.
-        # Sin ellos el paso de mano de obra no deja asignar trabajo a nadie.
-        for nombre, tipo, jornal in TRABAJADORES:
-            await _ok(
-                await api.post(
-                    "/api/v1/quoter-v2/workers",
-                    json={"name": nombre, "worker_type": tipo, "daily_rate": jornal},
-                    headers=cabeceras,
-                ),
-                nombre,
-            )
-        for codigo, nombre, rendimiento, esmalte in TECNICAS:
-            await _ok(
+        # Tecnicas y trabajadores de la hoja «Configuracion» del Excel aprobado.
+        # Primero las tecnicas: cada trabajador nace con las suyas habilitadas,
+        # que son las que el Excel le sugiere (columna «Trabajador sugerido»).
+        tecnicas: dict[str, int] = {}
+        for codigo, nombre, rendimiento, esmalte, manual in TECNICAS:
+            tecnica = await _ok(
                 await api.post(
                     "/api/v1/quoter-v2/techniques",
                     json={
@@ -296,6 +289,22 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                         "name": nombre,
                         "default_capacity_per_workday": rendimiento,
                         "requires_glaze": esmalte,
+                        "manual_hours": manual,
+                    },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+            tecnicas[codigo] = int(tecnica.json()["id"])
+        for nombre, tipo, jornal, suyas in TRABAJADORES:
+            await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/workers",
+                    json={
+                        "name": nombre,
+                        "worker_type": tipo,
+                        "daily_rate": jornal,
+                        "technique_ids": [tecnicas[codigo] for codigo in suyas],
                     },
                     headers=cabeceras,
                 ),
@@ -358,20 +367,36 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
     print("[servidor_revision] siembra completa", flush=True)
 
 
-#: Trabajadores del Excel: nombre, tipo y jornal (S/ por jornada de 8 h).
-TRABAJADORES = (
-    ("E2E-Trabajador taller", "INTERNAL", "110"),
-    ("E2E-Tornero", "INTERNAL", "220"),
-    ("E2E-Personal externo", "EXTERNAL", "120"),
+#: Tecnicas del Excel: codigo, nombre, piezas por jornada, si exige esmalte y si
+#: sus horas se deciden a mano.
+TECNICAS = (
+    ("E2E-A-MANO", "A mano", "15", False, False),
+    ("E2E-TORNO-FACIL", "Torno facil", "50", False, False),
+    ("E2E-TORNO-DIFICIL", "Torno dificil", "25", False, False),
+    ("E2E-COLADA", "Colada", "100", False, False),
+    ("E2E-ARMADO-ASA", "Armado de asa", "50", False, False),
+    ("E2E-VIDRIADO-INMERSION", "Vidriado por inmersion", "50", True, False),
+    ("E2E-VIDRIADO-MANO-ALZADA", "Vidriado a mano alzada", "25", True, False),
+    ("E2E-PERSONAL-ADICIONAL", "Personal adicional", "1", False, True),
 )
 
-#: Tecnicas del Excel: codigo, nombre, piezas por jornada y si exige esmalte.
-TECNICAS = (
-    ("E2E-A-MANO", "A mano", "15", False),
-    ("E2E-TORNO-FACIL", "Torno facil", "50", False),
-    ("E2E-TORNO-DIFICIL", "Torno dificil", "25", False),
-    ("E2E-COLADA", "Colada", "100", False),
-    ("E2E-VIDRIADO-INMERSION", "Vidriado por inmersion", "50", True),
+#: Trabajadores del Excel: nombre, tipo, jornal (S/ por jornada de 8 h) y las
+#: tecnicas que tiene habilitadas.
+TRABAJADORES = (
+    (
+        "E2E-Trabajador taller",
+        "INTERNAL",
+        "110",
+        (
+            "E2E-A-MANO",
+            "E2E-COLADA",
+            "E2E-ARMADO-ASA",
+            "E2E-VIDRIADO-INMERSION",
+            "E2E-VIDRIADO-MANO-ALZADA",
+        ),
+    ),
+    ("E2E-Tornero", "INTERNAL", "220", ("E2E-TORNO-FACIL", "E2E-TORNO-DIFICIL")),
+    ("E2E-Personal externo", "EXTERNAL", "120", ("E2E-PERSONAL-ADICIONAL",)),
 )
 
 #: Piezas de catalogo: nombre, gramaje (g), largo, ancho y alto (cm).

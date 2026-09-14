@@ -33,7 +33,7 @@ eso seria fabricar un historico.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects import postgresql
 
 revision = "0034"
@@ -85,10 +85,16 @@ QUOTATION_CHECKS: tuple[tuple[str, str], ...] = (
 
 
 def upgrade() -> None:
-    conexion = op.get_bind()
-    no_borradores = (
-        conexion.scalar(sa.text("SELECT count(*) FROM v2_quotations WHERE status <> 'DRAFT'")) or 0
-    )
+    # En modo offline (`alembic upgrade head --sql`, que la CI usa para comprobar
+    # que la migracion se puede renderizar) no hay base que consultar: la
+    # comprobacion previa solo tiene sentido con una conexion real.
+    no_borradores = 0
+    if not context.is_offline_mode():
+        conexion = op.get_bind()
+        no_borradores = (
+            conexion.scalar(sa.text("SELECT count(*) FROM v2_quotations WHERE status <> 'DRAFT'"))
+            or 0
+        )
     if no_borradores:
         raise RuntimeError(
             f"0034 no puede aplicarse: hay {no_borradores} cotizacion(es) V2 que no son "

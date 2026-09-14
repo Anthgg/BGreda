@@ -24,6 +24,7 @@ from tests.db.test_quoter_v2_excel_smoke import (
     preparar_configuracion,
     preparar_maestros,
 )
+from tests.db.v2_capacidades import habilitar
 
 V2 = "/api/v1/quotations-v2"
 PARTNERS = "/api/v1/partners"
@@ -94,6 +95,7 @@ async def cotizacion_completa(
         assert r.status_code == 201, r.text
         lineas.append(int(r.json()["id"]))
 
+    await habilitar(api, csrf, worker_id, technique_id)
     tarea = await api.post(
         f"{V2}/{qid}/labor",
         json={
