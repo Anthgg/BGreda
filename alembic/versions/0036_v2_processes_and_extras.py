@@ -33,7 +33,7 @@ Todo aditivo. No toca Legacy, ni los snapshots, ni ninguna cifra ya emitida.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision = "0036"
 down_revision = "0035"
@@ -183,7 +183,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Volver atras borra decisiones de taller que no estan en ningun otro sitio:
     # que procesos necesita cada pieza y que adicionales lleva cada cotizacion.
-    if not op.get_context().is_offline_mode():
+    if not context.is_offline_mode():
         conexion = op.get_bind()
         procesos = conexion.execute(
             sa.text("SELECT count(*) FROM v2_quotation_processes")

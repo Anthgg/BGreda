@@ -247,7 +247,7 @@ class TestDowngrade:
 
 
 async def test_0034_se_aplica_y_se_sella(migration_engine: AsyncEngine) -> None:
-    """0034 se aplica y queda sellada. La cabeza es 0035 desde la correccion de mano de obra."""
+    """0034 se aplica y queda sellada. La cabeza la lleva la migracion mas nueva."""
     _upgrade("0034")
     async with migration_engine.connect() as connection:
         cabezas = list(

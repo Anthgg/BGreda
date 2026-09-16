@@ -198,10 +198,19 @@ class TestDowngrade:
         assert "no puede revertirse" in resultado.stdout + resultado.stderr
 
 
-async def test_la_cabeza_es_0035(migration_engine: AsyncEngine) -> None:
+async def test_0035_se_aplica_dentro_de_la_cadena(migration_engine: AsyncEngine) -> None:
+    """Subir hasta la cabeza deja UNA sola version sellada y 0035 ya aplicada.
+
+    La cabeza se la lleva la migracion mas nueva —hoy 0036—, asi que fijar aqui
+    un numero concreto convertiria esta prueba en una alarma que suena cada vez
+    que alguien anade una migracion. Lo que 0035 tiene que garantizar es que su
+    tabla existe despues de subir del todo.
+    """
     _upgrade("head")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0035"]
+        existe = await connection.scalar(text("SELECT to_regclass('v2_worker_techniques')"))
+    assert len(cabezas) == 1
+    assert existe is not None
