@@ -630,12 +630,13 @@ class V2LifecycleService:
 
         await self._copy_firing(original, nueva, avisos, user)
         mapa = await self._copy_lines(original, nueva, avisos, user)
-        await self._copy_labor(original, nueva, mapa, avisos, user)
         # Correccion 010H. Las lineas nuevas ya nacieron con los procesos que
         # pide el catalogo de HOY; esto trae encima lo que se decidio en la
-        # cotizacion vieja —lo quitado, lo anadido a mano, las piezas escritas—
-        # y vuelve a atar cada tarea con su proceso.
-        await self._copy_processes(original, nueva, mapa, avisos)
+        # cotizacion vieja: lo quitado, lo anadido a mano y las piezas escritas.
+        # Va ANTES de la mano de obra para que cada tarea copiada nazca atada a
+        # su proceso.
+        procesos = await self._copy_processes(original, nueva, mapa, avisos)
+        await self._copy_labor(original, nueva, mapa, procesos, avisos, user)
         await self._copy_extras(original, nueva, mapa, avisos)
         await self._copy_planning(original, nueva, avisos, user)
 
@@ -792,6 +793,7 @@ class V2LifecycleService:
         original: V2Quotation,
         nueva: V2Quotation,
         mapa: dict[int, int],
+        procesos: dict[tuple[int, int], V2QuotationProcess],
         avisos: list[dict[str, Any]],
         user: AuthenticatedUser,
     ) -> None:
@@ -816,12 +818,20 @@ class V2LifecycleService:
                         {"code": DUP_LABOR_UNAVAILABLE, "name": tarea.technique_name_snapshot}
                     )
                     continue
+            proceso = (
+                None if linea_nueva is None else procesos.get((linea_nueva, tarea.technique_id))
+            )
+            if proceso is not None and proceso.removed_at is not None:
+                # La cotizacion vieja habia quitado ese proceso: su tarea no
+                # vuelve, o el duplicado cobraria un trabajo que se descarto.
+                continue
             datos: dict[str, Any] = {
                 "worker_id": tarea.worker_id,
                 "technique_id": tarea.technique_id,
                 "quantity": tarea.quantity,
                 "v2_quotation_product_id": linea_nueva,
                 "is_additional_personnel": tarea.is_additional_personnel,
+                "v2_quotation_process_id": None if proceso is None else proceso.id,
             }
             if tarea.hours_overridden:
                 datos["final_hours_override"] = tarea.final_hours
@@ -842,7 +852,7 @@ class V2LifecycleService:
         nueva: V2Quotation,
         mapa: dict[int, int],
         avisos: list[dict[str, Any]],
-    ) -> None:
+    ) -> dict[tuple[int, int], V2QuotationProcess]:
         """Las decisiones de procesos de la cotizacion vieja, sobre la nueva.
 
         Lo que el catalogo pide hoy ya esta puesto. Aqui se recuperan las tres
@@ -857,17 +867,19 @@ class V2LifecycleService:
                 .order_by(V2QuotationProcess.sort_order, V2QuotationProcess.id)
             )
         ).all()
-        if not viejos:
-            return
-
         nuevos = {
             (proceso.v2_quotation_product_id, proceso.technique_id): proceso
             for proceso in (
                 await self._session.scalars(
-                    select(V2QuotationProcess).where(V2QuotationProcess.v2_quotation_id == nueva.id)
+                    select(V2QuotationProcess).where(
+                        V2QuotationProcess.v2_quotation_id == nueva.id
+                    )
                 )
             ).all()
         }
+        if not viejos:
+            return nuevos
+
         activas = set(
             (
                 await self._session.scalars(
@@ -908,32 +920,7 @@ class V2LifecycleService:
                 proceso.quantity = viejo.quantity
                 proceso.quantity_overridden = viejo.quantity_overridden
         await self._session.flush()
-
-        # Cada tarea copiada vuelve a su proceso. La tarea es quien cuesta; el
-        # proceso es quien explica por que existe, y sin el enlace la pantalla
-        # mostraria el mismo trabajo dos veces: una sin asignar y otra suelta.
-        tareas = (
-            await self._session.scalars(
-                select(V2QuotationLabor).where(V2QuotationLabor.v2_quotation_id == nueva.id)
-            )
-        ).all()
-        for tarea in tareas:
-            if tarea.v2_quotation_product_id is None or tarea.v2_quotation_process_id is not None:
-                continue
-            proceso = nuevos.get((tarea.v2_quotation_product_id, tarea.technique_id))
-            if proceso is not None and proceso.removed_at is None:
-                tarea.v2_quotation_process_id = proceso.id
-        await self._session.flush()
-
-        # Un proceso que la cotizacion vieja habia quitado no puede llegar con
-        # una tarea puesta por la copia de la mano de obra.
-        for proceso in nuevos.values():
-            if proceso.removed_at is None:
-                continue
-            for tarea in tareas:
-                if tarea.v2_quotation_process_id == proceso.id:
-                    await self._session.delete(tarea)
-        await self._session.flush()
+        return nuevos
 
     async def _copy_extras(
         self,

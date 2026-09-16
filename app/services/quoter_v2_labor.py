@@ -60,6 +60,7 @@ from app.models.quoter_v2_labor import (
     V2WorkerTechnique,
     V2WorkerType,
 )
+from app.models.quoter_v2_processes import V2QuotationProcess
 from app.models.quoter_v2_settings import V2CommercialSettings
 from app.models.settings import SINGLETON_ID
 from app.schemas.auth import AuthenticatedUser
@@ -84,6 +85,8 @@ WARN_GLAZE_TECHNIQUE_WITHOUT_GLAZE = "V2_LABOR_GLAZE_TECHNIQUE_WITHOUT_GLAZE"
 #: no tiene habilitada en su maestro. Avisa y no bloquea: la tarea conserva lo
 #: que congelo, igual que con un trabajador dado de baja.
 WARN_TECHNIQUE_NOT_ENABLED = "V2_LABOR_TECHNIQUE_NOT_ENABLED"
+#: La tecnica ya es un proceso vivo de la pieza: se salta en vez de duplicarla.
+WARN_TECHNIQUE_IS_PROCESS = "V2_LABOR_TECHNIQUE_IS_PROCESS"
 #: El trabajador elegido no tiene ninguna tecnica activa habilitada.
 WARN_WORKER_WITHOUT_TECHNIQUES = "V2_LABOR_WORKER_WITHOUT_TECHNIQUES"
 
@@ -120,6 +123,20 @@ class V2LaborResourceInactiveError(APIError):
     status_code = 422
     code = "V2_LABOR_RESOURCE_INACTIVE"
     message = "El trabajador o la tecnica ya no estan activos"
+
+
+class V2LaborAlreadyAProcessError(APIError):
+    """Ese trabajo ya es un proceso de la pieza.
+
+    Crear ademas una tarea suelta con la misma tecnica sobre la misma linea
+    cobraria dos veces lo mismo: el proceso ya tiene -o tendra- la suya. Para
+    ponerle a alguien se asigna el proceso; para traer a una persona de mas se
+    marca personal adicional, que es otra cosa.
+    """
+
+    status_code = 409
+    code = "V2_LABOR_ALREADY_A_PROCESS"
+    message = "Ese trabajo ya es un proceso de la pieza: asigne el trabajador en el proceso"
 
 
 class V2LaborTechniqueNotAllowedError(APIError):
@@ -437,12 +454,34 @@ class V2LaborService:
             ).all()
         )
 
+        # Las tecnicas que ya son un proceso vivo de esa pieza no se cargan por
+        # aqui: el proceso es quien manda, y duplicarlas seria cobrar dos veces.
+        procesos_vivos = (
+            set()
+            if product_line_id is None
+            else set(
+                (
+                    await self._session.scalars(
+                        select(V2QuotationProcess.technique_id).where(
+                            V2QuotationProcess.v2_quotation_product_id == product_line_id,
+                            V2QuotationProcess.removed_at.is_(None),
+                        )
+                    )
+                ).all()
+            )
+        )
+
         creadas: list[V2QuotationLabor] = []
         saltadas: list[int] = []
         avisos: list[str] = []
         for tecnica in habilitadas:
             if tecnica.id in ya_cargadas:
                 saltadas.append(tecnica.id)
+                continue
+            if tecnica.id in procesos_vivos:
+                saltadas.append(tecnica.id)
+                if WARN_TECHNIQUE_IS_PROCESS not in avisos:
+                    avisos.append(WARN_TECHNIQUE_IS_PROCESS)
                 continue
             piezas = ZERO if tecnica.manual_hours or linea is None else Decimal(linea.quantity)
             tarea, propios = await self.add_labor(
@@ -583,6 +622,7 @@ class V2LaborService:
         # contra los NOT NULL con un error que no dice nada de lo que pasa.
         with self._session.no_autoflush:
             avisos = await self._fill_labor(tarea, data, creando=True)
+            await self._check_process_duplicate(tarea)
         await self._session.flush()
         avisos += await self._workday_warning(tarea)
         # Fase 010F. La mano de obra entra en el costo directo de su producto y
@@ -607,7 +647,15 @@ class V2LaborService:
         data: dict[str, Any],
         *,
         user: AuthenticatedUser,
+        recalcular: bool = True,
     ) -> tuple[V2QuotationLabor, list[str]]:
+        """Cambia una tarea.
+
+        `recalcular=False` es para quien va a tocar VARIAS y recalcula una sola
+        vez al final —cambiar la cantidad de un producto mueve todas las tareas
+        de sus procesos—. Recalcular una vez por tarea daria el mismo numero al
+        final por un precio mucho mas caro.
+        """
         quotation = await self._draft(quotation_id)
         tarea = await self._labor(quotation_id, labor_id)
         # Mismo motivo que al crear: cambiar de trabajador deja la fila en un
@@ -616,7 +664,8 @@ class V2LaborService:
             avisos = await self._fill_labor(tarea, data, creando=False)
         await self._session.flush()
         avisos += await self._workday_warning(tarea)
-        avisos += await refresh_pricing(self._session, quotation)
+        if recalcular:
+            avisos += await refresh_pricing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LABOR_ENTITY,
@@ -653,6 +702,8 @@ class V2LaborService:
     ) -> list[str]:
         avisos: list[str] = []
 
+        if "v2_quotation_process_id" in data:
+            tarea.v2_quotation_process_id = data["v2_quotation_process_id"]
         if "v2_quotation_product_id" in data:
             tarea.v2_quotation_product_id = data["v2_quotation_product_id"]
         if "is_additional_personnel" in data:
@@ -673,6 +724,32 @@ class V2LaborService:
         avisos += await self._apply_hours(tarea, data)
         avisos += await self._check_glaze(tarea)
         return avisos
+
+    async def _check_process_duplicate(self, tarea: V2QuotationLabor) -> None:
+        """Una tarea normal no puede repetir un proceso vivo de su pieza.
+
+        La tarea que SALE de un proceso llega ya con su `v2_quotation_process_id`
+        y no entra aqui. El personal adicional tampoco: traer a alguien de mas a
+        hacer el mismo torno es legitimo y se cobra aparte, que es justo lo que
+        el Excel llama «personal adicional».
+        """
+        if (
+            tarea.v2_quotation_process_id is not None
+            or tarea.is_additional_personnel
+            or tarea.v2_quotation_product_id is None
+        ):
+            return
+        proceso = (
+            await self._session.scalars(
+                select(V2QuotationProcess).where(
+                    V2QuotationProcess.v2_quotation_product_id == tarea.v2_quotation_product_id,
+                    V2QuotationProcess.technique_id == tarea.technique_id,
+                    V2QuotationProcess.removed_at.is_(None),
+                )
+            )
+        ).first()
+        if proceso is not None:
+            raise V2LaborAlreadyAProcessError()
 
     async def _check_capacity(self, tarea: V2QuotationLabor, *, elegido_ahora: bool) -> list[str]:
         """Que el trabajador tenga habilitada la tecnica. Se mira el PAR final.

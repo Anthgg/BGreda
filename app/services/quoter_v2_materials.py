@@ -470,9 +470,10 @@ class V2MaterialService:
         avisos = await self._fill_line(linea, data)
         await self._session.flush()
         if linea.product_id != producto_antes:
-            # Otra pieza son otros procesos. Los que alguien quito o anadio a
-            # mano se respetan; solo se proponen los que faltan.
-            avisos += await self._procesos().generate_for_line(linea)
+            # Otra pieza son OTROS procesos: los de la anterior se van con sus
+            # tareas —cobrarian trabajo de una pieza que ya no esta— y entran
+            # los de la nueva. Lo anadido a mano en esta cotizacion se queda.
+            avisos += await self._procesos().reset_product_processes(linea)
         if linea.quantity != cantidad_antes:
             # Mas piezas son mas horas. Salvo donde alguien escribio una
             # cantidad a mano: esa decision manda sobre el automatismo.

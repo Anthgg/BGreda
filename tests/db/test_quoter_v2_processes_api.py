@@ -541,3 +541,141 @@ class TestNoRomperLoQueYaHabia:
 
         assert borrado.status_code == 409
         assert anadido.status_code == 409
+
+
+class TestLoQueEncontroLaAuditoria:
+    """Dos caminos por los que el mismo trabajo se cobraba dos veces."""
+
+    async def test_una_tarea_suelta_no_puede_repetir_un_proceso_vivo(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La pieza ya pide torno: crear ADEMAS una tarea de torno lo cobraria dos veces."""
+        torno = await crear_tecnica(api, admin_csrf, "dupli-torno", name="Torno")
+        pieza = await pieza_con_procesos(api, admin_csrf, "Plato duplicable", [torno["id"]])
+        obrero = await crear_trabajador(api, admin_csrf, "Juan doble")
+        await habilitar(api, admin_csrf, obrero["id"], torno["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await linea_de(api, admin_csrf, cotizacion, pieza, 10)
+
+        respuesta = await api.post(
+            f"{V2}/{cotizacion}/labor",
+            json={
+                "worker_id": obrero["id"],
+                "technique_id": torno["id"],
+                "v2_quotation_product_id": linea,
+                "quantity": "10",
+            },
+            headers=h(admin_csrf),
+        )
+
+        assert respuesta.status_code == 409
+        assert respuesta.json()["error"]["code"] == "V2_LABOR_ALREADY_A_PROCESS"
+
+    async def test_el_personal_adicional_si_puede_repetir_la_tecnica(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Traer a alguien de mas a hacer el mismo torno es legitimo y se cobra aparte."""
+        torno = await crear_tecnica(api, admin_csrf, "apoyo-torno", name="Torno")
+        pieza = await pieza_con_procesos(api, admin_csrf, "Plato con apoyo", [torno["id"]])
+        obrero = await crear_trabajador(api, admin_csrf, "Refuerzo torno")
+        await habilitar(api, admin_csrf, obrero["id"], torno["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await linea_de(api, admin_csrf, cotizacion, pieza, 10)
+
+        respuesta = await api.post(
+            f"{V2}/{cotizacion}/labor",
+            json={
+                "worker_id": obrero["id"],
+                "technique_id": torno["id"],
+                "v2_quotation_product_id": linea,
+                "quantity": "10",
+                "is_additional_personnel": True,
+            },
+            headers=h(admin_csrf),
+        )
+
+        assert respuesta.status_code == 201, respuesta.text
+
+    async def test_cargar_al_trabajador_salta_lo_que_ya_es_proceso(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El camino viejo tampoco duplica: avisa y se salta la tecnica."""
+        torno = await crear_tecnica(api, admin_csrf, "carga-torno", name="Torno")
+        otra = await crear_tecnica(api, admin_csrf, "carga-otra", name="Acabado")
+        pieza = await pieza_con_procesos(api, admin_csrf, "Plato cargado", [torno["id"]])
+        obrero = await crear_trabajador(api, admin_csrf, "Juan carga")
+        await habilitar(api, admin_csrf, obrero["id"], torno["id"], otra["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await linea_de(api, admin_csrf, cotizacion, pieza, 10)
+
+        respuesta = await api.post(
+            f"{V2}/{cotizacion}/labor/load-worker",
+            json={"worker_id": obrero["id"], "v2_quotation_product_id": linea},
+            headers=h(admin_csrf),
+        )
+
+        assert respuesta.status_code == 200, respuesta.text
+        cuerpo = respuesta.json()
+        assert torno["id"] in cuerpo["already_loaded_technique_ids"]
+        assert "V2_LABOR_TECHNIQUE_IS_PROCESS" in cuerpo["warnings"]
+        # Solo se creo la del acabado, que no era proceso de la pieza.
+        assert [tarea["technique_name"] for tarea in cuerpo["created"]] == ["Acabado"]
+
+    async def test_cambiar_de_pieza_cambia_sus_procesos(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Los procesos de la pieza anterior se van: cobrarian trabajo de otra cosa."""
+        torno = await crear_tecnica(api, admin_csrf, "cambio-torno", name="Torno")
+        colada = await crear_tecnica(api, admin_csrf, "cambio-colada", name="Colada")
+        tornada = await pieza_con_procesos(api, admin_csrf, "Pieza torneada", [torno["id"]])
+        colada_pieza = await pieza_con_procesos(api, admin_csrf, "Pieza colada", [colada["id"]])
+        obrero = await crear_trabajador(api, admin_csrf, "Juan cambio")
+        await habilitar(api, admin_csrf, obrero["id"], torno["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await linea_de(api, admin_csrf, cotizacion, tornada, 10)
+        proceso = (await procesos_de(api, cotizacion))[0]
+        await api.post(
+            f"{V2}/{cotizacion}/{PROCESOS}/{proceso['id']}/assign",
+            json={"worker_id": obrero["id"]},
+            headers=h(admin_csrf),
+        )
+
+        cambiada = await api.put(
+            f"{V2}/{cotizacion}/products/{linea}",
+            json={"product_id": colada_pieza["id"]},
+            headers=h(admin_csrf),
+        )
+
+        assert cambiada.status_code == 200, cambiada.text
+        procesos = await procesos_de(api, cotizacion)
+        assert [uno["technique_name"] for uno in procesos] == ["Colada"]
+        # Y su tarea se fue con el: el torno ya no es de esta pieza.
+        tareas = (await api.get(f"{V2}/{cotizacion}/labor")).json()["items"]
+        assert tareas == []
+
+    async def test_lo_anadido_a_mano_sobrevive_al_cambio_de_pieza(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Es una decision de ESTE pedido, no de la pieza."""
+        torno = await crear_tecnica(api, admin_csrf, "queda-torno", name="Torno")
+        colada = await crear_tecnica(api, admin_csrf, "queda-colada", name="Colada")
+        pulido = await crear_tecnica(api, admin_csrf, "queda-pulido", name="Pulido")
+        tornada = await pieza_con_procesos(api, admin_csrf, "Pieza A", [torno["id"]])
+        otra = await pieza_con_procesos(api, admin_csrf, "Pieza B", [colada["id"]])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await linea_de(api, admin_csrf, cotizacion, tornada, 5)
+        await api.post(
+            f"{V2}/{cotizacion}/{PROCESOS}",
+            json={"v2_quotation_product_id": linea, "technique_id": pulido["id"]},
+            headers=h(admin_csrf),
+        )
+
+        await api.put(
+            f"{V2}/{cotizacion}/products/{linea}",
+            json={"product_id": otra["id"]},
+            headers=h(admin_csrf),
+        )
+
+        nombres = [uno["technique_name"] for uno in await procesos_de(api, cotizacion)]
+        assert sorted(nombres) == ["Colada", "Pulido"]
+

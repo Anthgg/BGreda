@@ -122,7 +122,14 @@ class V2ExtraService:
         return extra
 
     async def update_extra(self, extra_id: int, data: dict[str, Any], *, user: Any) -> V2Extra:
-        extra = await self._session.get(V2Extra, extra_id)
+        # Con bloqueo: sin el, dos ediciones que leyeran la misma version
+        # pasarian las dos la comprobacion y una se perderia sin que nadie lo
+        # supiera, que es justo lo que `expected_version` existe para impedir.
+        extra = (
+            await self._session.scalars(
+                select(V2Extra).where(V2Extra.id == extra_id).with_for_update()
+            )
+        ).one_or_none()
         if extra is None:
             raise V2ExtraNotFoundError()
         esperada = data.get("expected_version")

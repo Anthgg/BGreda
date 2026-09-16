@@ -319,15 +319,28 @@ class V2ProcessService:
             ).all()
         )
         cantidad = Decimal(linea.quantity)
-        for proceso in procesos:
-            if proceso.technique.manual_hours:
-                continue
+        afectados = [proceso for proceso in procesos if not proceso.technique.manual_hours]
+        for proceso in afectados:
             proceso.quantity = cantidad
         await self._session.flush()
-        for proceso in procesos:
-            if proceso.technique.manual_hours:
-                continue
-            tarea = await self._tarea_de(proceso)
+
+        # Las tareas de todos ellos en UNA consulta, y un solo recalculo del
+        # precio al final: `update_line` ya lo hace por su cuenta.
+        tareas = {
+            tarea.v2_quotation_process_id: tarea
+            for tarea in (
+                await self._session.scalars(
+                    select(V2QuotationLabor).where(
+                        V2QuotationLabor.v2_quotation_process_id.in_(
+                            [proceso.id for proceso in afectados]
+                        )
+                    )
+                )
+            ).all()
+            if tarea.v2_quotation_process_id is not None
+        }
+        for proceso in afectados:
+            tarea = tareas.get(proceso.id)
             if tarea is not None and not tarea.hours_overridden:
                 # Firma quien cambio la cantidad del producto: la tarea se
                 # mueve por su decision, aunque no la escribiera a mano.
@@ -336,7 +349,43 @@ class V2ProcessService:
                     tarea.id,
                     {"quantity": cantidad},
                     user=user,
+                    recalcular=False,
                 )
+
+    async def reset_product_processes(self, linea: V2QuotationProduct) -> list[str]:
+        """La linea cambio de pieza: sus procesos son los de la pieza NUEVA.
+
+        Los que trajo la pieza anterior —incluidas las lapidas de lo que alguien
+        quito para ella— dejan de tener sentido: eran de otra cosa. Se van con
+        sus tareas. Lo que se anadio a mano en esta cotizacion se queda: es una
+        decision de este pedido, no de la pieza.
+        """
+        viejos = list(
+            (
+                await self._session.scalars(
+                    select(V2QuotationProcess).where(
+                        V2QuotationProcess.v2_quotation_product_id == linea.id,
+                        V2QuotationProcess.origin == V2ProcessOrigin.PRODUCT,
+                    )
+                )
+            ).all()
+        )
+        if viejos:
+            tareas = (
+                await self._session.scalars(
+                    select(V2QuotationLabor).where(
+                        V2QuotationLabor.v2_quotation_process_id.in_(
+                            [proceso.id for proceso in viejos]
+                        )
+                    )
+                )
+            ).all()
+            for tarea in tareas:
+                await self._session.delete(tarea)
+            for proceso in viejos:
+                await self._session.delete(proceso)
+            await self._session.flush()
+        return await self.generate_for_line(linea)
 
     async def add_process(
         self, quotation_id: int, data: dict[str, Any], *, user: Any
@@ -460,9 +509,12 @@ class V2ProcessService:
             )
             return tarea, avisos
 
+        # El proceso viaja en el alta: asi la tarea nace ya atada a el y la
+        # guardia contra duplicados sabe que esta no es una tarea suelta.
         tarea, avisos = await self._labor.add_labor(
             quotation_id,
             {
+                "v2_quotation_process_id": proceso.id,
                 "v2_quotation_product_id": proceso.v2_quotation_product_id,
                 "worker_id": worker_id,
                 "technique_id": proceso.technique_id,
@@ -470,8 +522,6 @@ class V2ProcessService:
             },
             user=user,
         )
-        tarea.v2_quotation_process_id = proceso.id
-        await self._session.flush()
         return tarea, avisos
 
     async def unassign_worker(self, quotation_id: int, process_id: int, *, user: Any) -> None:
