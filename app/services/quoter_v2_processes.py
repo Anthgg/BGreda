@@ -198,18 +198,24 @@ class V2ProcessService:
         if not procesos:
             return []
 
-        tareas = {
-            tarea.v2_quotation_process_id: tarea
-            for tarea in (
-                await self._session.scalars(
-                    select(V2QuotationLabor).where(
-                        V2QuotationLabor.v2_quotation_process_id.in_(
-                            [proceso.id for proceso in procesos]
-                        )
+        # La tarea de cada proceso. Si hubiera mas de una atada al mismo
+        # proceso, manda la que NO es personal adicional: la otra es gente de
+        # mas, y se ve en su propia seccion.
+        tareas: dict[int | None, V2QuotationLabor] = {}
+        for tarea in (
+            await self._session.scalars(
+                select(V2QuotationLabor).where(
+                    V2QuotationLabor.v2_quotation_process_id.in_(
+                        [proceso.id for proceso in procesos]
                     )
                 )
-            ).all()
-        }
+            )
+        ).all():
+            anterior = tareas.get(tarea.v2_quotation_process_id)
+            if anterior is None or (
+                anterior.is_additional_personnel and not tarea.is_additional_personnel
+            ):
+                tareas[tarea.v2_quotation_process_id] = tarea
         jornada = await self._labor.global_workday_hours()
         return [
             ProcesoCalculado(
@@ -326,9 +332,12 @@ class V2ProcessService:
 
         # Las tareas de todos ellos en UNA consulta, y un solo recalculo del
         # precio al final: `update_line` ya lo hace por su cuenta.
-        tareas = {
-            tarea.v2_quotation_process_id: tarea
-            for tarea in (
+        #
+        # Una LISTA y no un diccionario por proceso: si alguna vez dos tareas
+        # apuntaran al mismo proceso, el diccionario se quedaria con una y la
+        # otra seguiria cobrando la cantidad vieja (hallazgo de Gemini).
+        tareas = list(
+            (
                 await self._session.scalars(
                     select(V2QuotationLabor).where(
                         V2QuotationLabor.v2_quotation_process_id.in_(
@@ -337,11 +346,9 @@ class V2ProcessService:
                     )
                 )
             ).all()
-            if tarea.v2_quotation_process_id is not None
-        }
-        for proceso in afectados:
-            tarea = tareas.get(proceso.id)
-            if tarea is not None and not tarea.hours_overridden:
+        )
+        for tarea in tareas:
+            if not tarea.hours_overridden:
                 # Firma quien cambio la cantidad del producto: la tarea se
                 # mueve por su decision, aunque no la escribiera a mano.
                 await self._labor.update_labor(

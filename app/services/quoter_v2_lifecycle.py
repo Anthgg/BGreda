@@ -818,8 +818,13 @@ class V2LifecycleService:
                         {"code": DUP_LABOR_UNAVAILABLE, "name": tarea.technique_name_snapshot}
                     )
                     continue
+            # El personal adicional NO se ata a un proceso: es gente de mas
+            # sobre el mismo trabajo, y atarlo dejaria dos tareas colgando del
+            # mismo proceso.
             proceso = (
-                None if linea_nueva is None else procesos.get((linea_nueva, tarea.technique_id))
+                None
+                if linea_nueva is None or tarea.is_additional_personnel
+                else procesos.get((linea_nueva, tarea.technique_id))
             )
             if proceso is not None and proceso.removed_at is not None:
                 # La cotizacion vieja habia quitado ese proceso: su tarea no
@@ -871,9 +876,7 @@ class V2LifecycleService:
             (proceso.v2_quotation_product_id, proceso.technique_id): proceso
             for proceso in (
                 await self._session.scalars(
-                    select(V2QuotationProcess).where(
-                        V2QuotationProcess.v2_quotation_id == nueva.id
-                    )
+                    select(V2QuotationProcess).where(V2QuotationProcess.v2_quotation_id == nueva.id)
                 )
             ).all()
         }

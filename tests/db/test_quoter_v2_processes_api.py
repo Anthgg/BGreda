@@ -678,4 +678,3 @@ class TestLoQueEncontroLaAuditoria:
 
         nombres = [uno["technique_name"] for uno in await procesos_de(api, cotizacion)]
         assert sorted(nombres) == ["Colada", "Pulido"]
-
