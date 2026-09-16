@@ -307,11 +307,17 @@ class V2ProcessService:
         return avisos
 
     async def sync_quantity(self, linea: V2QuotationProduct, *, user: AuthenticatedUser) -> None:
-        """La cantidad de la linea cambio: las piezas la siguen.
+        """La cantidad de la linea cambio: las piezas de sus PROCESOS la siguen.
 
         Salvo las que alguien escribio a mano. Y si el proceso ya tiene
         trabajador, su tarea se actualiza tambien: dejar la tarea con la
         cantidad vieja daria un costo que no es el de este pedido.
+
+        El personal adicional NO se mueve, y es a proposito. Sus horas las
+        decide una persona —«horas manuales; no reduce plazo automaticamente»,
+        dice el Excel—: si alguien trajo a un refuerzo cuatro horas, subir el
+        pedido de 20 a 50 piezas no convierte esas cuatro horas en diez por su
+        cuenta. Quien planifica decide si hace falta mas apoyo.
         """
         procesos = list(
             (

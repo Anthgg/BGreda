@@ -678,3 +678,36 @@ class TestLoQueEncontroLaAuditoria:
 
         nombres = [uno["technique_name"] for uno in await procesos_de(api, cotizacion)]
         assert sorted(nombres) == ["Colada", "Pulido"]
+
+    async def test_el_personal_adicional_no_se_mueve_al_cambiar_la_cantidad(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Sus horas las decide una persona, no la cantidad del pedido."""
+        torno = await crear_tecnica(api, admin_csrf, "apoyo-fijo", name="Torno")
+        pieza = await pieza_con_procesos(api, admin_csrf, "Pieza con apoyo fijo", [torno["id"]])
+        obrero = await crear_trabajador(api, admin_csrf, "Refuerzo fijo")
+        await habilitar(api, admin_csrf, obrero["id"], torno["id"])
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        linea = await linea_de(api, admin_csrf, cotizacion, pieza, 20)
+        apoyo = await api.post(
+            f"{V2}/{cotizacion}/labor",
+            json={
+                "worker_id": obrero["id"],
+                "technique_id": torno["id"],
+                "v2_quotation_product_id": linea,
+                "quantity": "4",
+                "is_additional_personnel": True,
+            },
+            headers=h(admin_csrf),
+        )
+        assert apoyo.status_code == 201, apoyo.text
+
+        await api.put(
+            f"{V2}/{cotizacion}/products/{linea}", json={"quantity": 50}, headers=h(admin_csrf)
+        )
+
+        tareas = (await api.get(f"{V2}/{cotizacion}/labor")).json()["items"]
+        refuerzo = next(tarea for tarea in tareas if tarea["is_additional_personnel"])
+        assert Decimal(refuerzo["quantity"]) == Decimal(4)
+        # El proceso, en cambio, si sigue a la pieza.
+        assert Decimal((await procesos_de(api, cotizacion))[0]["quantity"]) == Decimal(50)
