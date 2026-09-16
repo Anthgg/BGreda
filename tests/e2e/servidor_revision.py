@@ -52,8 +52,10 @@ from typing import NoReturn
 import httpx
 import uvicorn
 from fastapi import FastAPI
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql.asyncpg import dialect as AsyncpgDialect
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.deps import get_object_storage, get_profile_repository, get_supabase_auth_client
 from app.core.config import get_settings
@@ -242,6 +244,98 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             "valorizacion de la pasta",
         )
 
+        # Fase 010H. Piezas del CATALOGO, como las que ya tiene produccion. Hasta
+        # aqui las E2E solo cotizaban piezas de encargo (nombre libre), y el
+        # camino de elegir un producto del maestro —que copia medidas y gramaje—
+        # no se recorria nunca de punta a punta.
+        piezas = await _ok(
+            await api.post(
+                "/api/v1/categories",
+                json={"name": "Piezas E2E", "parent_id": None},
+                headers=cabeceras,
+            ),
+            "categoria de piezas",
+        )
+        catalogo: dict[str, int] = {}
+        for nombre, gramaje, largo, ancho, alto in PIEZAS_DE_CATALOGO:
+            pieza = await _ok(
+                await api.post(
+                    "/api/v1/products",
+                    json={
+                        "name": nombre,
+                        "product_type": "FINISHED_PRODUCT",
+                        "product_category_id": int(piezas.json()["id"]),
+                        "base_uom_code": "unit",
+                        "sellable": True,
+                        "grammage": gramaje,
+                        "length": largo,
+                        "width": ancho,
+                        "height": alto,
+                    },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+            catalogo[nombre] = int(pieza.json()["id"])
+
+        # Tecnicas y trabajadores de la hoja «Configuracion» del Excel aprobado.
+        # Primero las tecnicas: cada trabajador nace con las suyas habilitadas,
+        # que son las que el Excel le sugiere (columna «Trabajador sugerido»).
+        tecnicas: dict[str, int] = {}
+        for codigo, nombre, rendimiento, esmalte, manual in TECNICAS:
+            tecnica = await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/techniques",
+                    json={
+                        "code": codigo,
+                        "name": nombre,
+                        "default_capacity_per_workday": rendimiento,
+                        "requires_glaze": esmalte,
+                        "manual_hours": manual,
+                    },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+            tecnicas[codigo] = int(tecnica.json()["id"])
+        for nombre, tipo, jornal, suyas in TRABAJADORES:
+            await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/workers",
+                    json={
+                        "name": nombre,
+                        "worker_type": tipo,
+                        "daily_rate": jornal,
+                        "technique_ids": [tecnicas[codigo] for codigo in suyas],
+                    },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+
+        # Correccion 010H: cada pieza del catalogo declara sus procesos. Es lo
+        # que hace que la taza traiga su asa sola en vez de tener que acordarse.
+        for nombre, procesos in PROCESOS_DE_LA_PIEZA:
+            await _ok(
+                await api.put(
+                    f"/api/v1/quoter-v2/products/{catalogo[nombre]}/techniques",
+                    json={"technique_ids": [tecnicas[codigo] for codigo in procesos]},
+                    headers=cabeceras,
+                ),
+                f"procesos de {nombre}",
+            )
+
+        # Conceptos adicionales: el «Otros extras» de la hoja «Cotizador V2».
+        for nombre, unidad, costo in ADICIONALES:
+            await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/extras",
+                    json={"name": nombre, "unit": unidad, "unit_cost": costo},
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+
         # Dos hornos con sus tarifas: el chico para por menor, el grande para
         # por mayor. Son los numeros del Excel aprobado.
         hornos: dict[str, int] = {}
@@ -285,12 +379,170 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                     "wholesale_kiln_id": hornos["Horno grande E2E"],
                     "illustration_daily_rate": "88",
                     "illustration_pieces_per_workday": "8",
+                    # Fase 010H: el tipo de cambio con el que se emite la
+                    # cotizacion que despues se hace vencer.
+                    "default_exchange_rate": "3.70",
                 },
                 headers=cabeceras,
             ),
             "configuracion del Cotizador V2",
         )
+
+        await sembrar_cotizacion_vencida(api, cabeceras, int(pasta.json()["id"]))
     print("[servidor_revision] siembra completa", flush=True)
+
+
+#: Tecnicas del Excel: codigo, nombre, piezas por jornada, si exige esmalte y si
+#: sus horas se deciden a mano.
+TECNICAS = (
+    ("E2E-A-MANO", "A mano", "15", False, False),
+    ("E2E-TORNO-FACIL", "Torno facil", "50", False, False),
+    ("E2E-TORNO-DIFICIL", "Torno dificil", "25", False, False),
+    ("E2E-COLADA", "Colada", "100", False, False),
+    ("E2E-ARMADO-ASA", "Armado de asa", "50", False, False),
+    ("E2E-VIDRIADO-INMERSION", "Vidriado por inmersion", "50", True, False),
+    ("E2E-VIDRIADO-MANO-ALZADA", "Vidriado a mano alzada", "25", True, False),
+    ("E2E-PERSONAL-ADICIONAL", "Personal adicional", "1", False, True),
+)
+
+#: Trabajadores del Excel: nombre, tipo, jornal (S/ por jornada de 8 h) y las
+#: tecnicas que tiene habilitadas.
+TRABAJADORES = (
+    (
+        "E2E-Trabajador taller",
+        "INTERNAL",
+        "110",
+        (
+            "E2E-A-MANO",
+            "E2E-COLADA",
+            "E2E-ARMADO-ASA",
+            "E2E-VIDRIADO-INMERSION",
+            "E2E-VIDRIADO-MANO-ALZADA",
+        ),
+    ),
+    ("E2E-Tornero", "INTERNAL", "220", ("E2E-TORNO-FACIL", "E2E-TORNO-DIFICIL")),
+    ("E2E-Personal externo", "EXTERNAL", "120", ("E2E-PERSONAL-ADICIONAL",)),
+)
+
+#: Piezas de catalogo: nombre, gramaje (g), largo, ancho y alto (cm).
+PIEZAS_DE_CATALOGO = (
+    ("E2E-Catalogo Plato hondo 22", "450", "22", "22", "5"),
+    ("E2E-Catalogo Taza 250 ml", "280", "9", "9", "10"),
+    ("E2E-Catalogo Fuente oval", "1200", "32", "22", "6"),
+)
+
+#: Que procesos necesita cada pieza del catalogo. El plato se tornea y se
+#: vidria; la taza ademas lleva asa, que es justo el caso que el usuario puso
+#: como ejemplo de proceso que no aparecia solo.
+PROCESOS_DE_LA_PIEZA = (
+    ("E2E-Catalogo Plato hondo 22", ("E2E-TORNO-FACIL", "E2E-VIDRIADO-INMERSION")),
+    (
+        "E2E-Catalogo Taza 250 ml",
+        ("E2E-TORNO-FACIL", "E2E-ARMADO-ASA", "E2E-VIDRIADO-INMERSION"),
+    ),
+    ("E2E-Catalogo Fuente oval", ("E2E-COLADA",)),
+)
+
+#: Conceptos adicionales del Excel: no son material ni tecnica.
+ADICIONALES = (
+    ("E2E-Empaque especial", "servicio", "25"),
+    ("E2E-Molde especial", "unidad", "150"),
+)
+
+#: Nombre con el que las E2E encuentran la cotizacion vencida sembrada.
+NOMBRE_VENCIDA = "E2E-SEMILLA-VENCIDA-USD"
+
+
+async def sembrar_cotizacion_vencida(
+    api: httpx.AsyncClient, cabeceras: dict[str, str], pasta_id: int
+) -> None:
+    """Fase 010H. Una cotizacion en dolares EMITIDA hace cuarenta dias.
+
+    Una E2E no puede esperar veinte dias a que algo venza, asi que se emite por
+    la API —con sus validaciones y su huella— y despues se mueve SOLO la fecha
+    de emision al pasado, con SQL, respetando el CHECK de ciclo de vida. Ni una
+    cifra se toca.
+
+    Despues sube el tipo de cambio de la casa de 3,70 a 3,82: la prueba de
+    duplicar tiene que ver que la nueva nace con 3,82 y la vencida conserva
+    3,70.
+    """
+    cliente = (await api.get("/api/v1/partners?limit=5")).json()["items"][0]
+    creada = await _ok(
+        await api.post(
+            "/api/v1/quotations-v2",
+            json={
+                "name": NOMBRE_VENCIDA,
+                "customer_id": cliente["id"],
+                "currency_code": "USD",
+                "client_notes": "Semilla E2E: cotizacion vencida.",
+            },
+            headers=cabeceras,
+        ),
+        "cotizacion vencida",
+    )
+    qid = int(creada.json()["id"])
+    await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/products",
+            json={
+                "product_name": "E2E-Fuente vencida",
+                "quantity": 10,
+                "length_cm": "20",
+                "width_cm": "20",
+                "height_cm": "5",
+                "body_material_id": pasta_id,
+                "body_unit_weight": "400",
+            },
+            headers=cabeceras,
+        ),
+        "linea de la cotizacion vencida",
+    )
+    await _ok(
+        await api.put(
+            f"/api/v1/quotations-v2/{qid}/planning",
+            json={"effective_work_days": 2},
+            headers=cabeceras,
+        ),
+        "dias de la cotizacion vencida",
+    )
+    resumen = (await api.get(f"/api/v1/quotations-v2/{qid}/confirmation-preview")).json()
+    await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/confirm",
+            json={"expected_fingerprint": resumen["fingerprint"]},
+            headers=cabeceras,
+        ),
+        "emision de la cotizacion vencida",
+    )
+
+    motor = create_async_engine(
+        normalize_database_url(get_settings().DATABASE_URL.get_secret_value())
+    )
+    try:
+        async with motor.begin() as conexion:
+            await conexion.execute(
+                text(
+                    "UPDATE v2_quotations SET"
+                    " issued_at = issued_at - interval '40 days',"
+                    " valid_until = valid_until - 40,"
+                    " expires_at = expires_at - interval '40 days'"
+                    " WHERE id = :id"
+                ),
+                {"id": qid},
+            )
+    finally:
+        await motor.dispose()
+
+    ajustes = (await api.get("/api/v1/quoter-v2/settings")).json()["settings"]
+    await _ok(
+        await api.put(
+            "/api/v1/quoter-v2/settings",
+            json={"expected_version": ajustes["version"], "default_exchange_rate": "3.82"},
+            headers=cabeceras,
+        ),
+        "tipo de cambio de hoy",
+    )
 
 
 def main() -> None:

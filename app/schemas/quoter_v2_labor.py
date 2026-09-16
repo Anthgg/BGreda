@@ -45,6 +45,8 @@ class V2WorkerCreateIn(BaseModel):
     workday_hours: Decimal | None = Field(default=None, gt=0, le=MAX_WORKDAY_HOURS)
     active: bool = True
     notes: str | None = Field(default=None, max_length=2000)
+    #: Correccion 010H. Las tecnicas que esta persona sabe hacer.
+    technique_ids: list[int] = Field(default_factory=list, max_length=200)
 
 
 class V2WorkerUpdateIn(BaseModel):
@@ -62,6 +64,8 @@ class V2WorkerUpdateIn(BaseModel):
     workday_hours: Decimal | None = Field(default=None, gt=0, le=MAX_WORKDAY_HOURS)
     active: bool | None = None
     notes: str | None = Field(default=None, max_length=2000)
+    #: Correccion 010H. Si viene, REEMPLAZA el conjunto de tecnicas habilitadas.
+    technique_ids: list[int] | None = Field(default=None, max_length=200)
 
 
 class V2WorkerOut(BaseModel):
@@ -82,6 +86,9 @@ class V2WorkerOut(BaseModel):
     hourly_rate: Decimal
     notes: str | None
     version: int
+    #: Correccion 010H. Tecnicas habilitadas en la ficha (activas o no en el
+    #: catalogo: la pantalla decide si ofrecer una retirada).
+    technique_ids: list[int] = Field(default_factory=list)
 
 
 class V2WorkerPage(BaseModel):
@@ -103,6 +110,8 @@ class V2TechniqueCreateIn(BaseModel):
     #: Si solo tiene sentido sobre una pieza esmaltada. Marca del catalogo, no
     #: una lista de nombres en el codigo.
     requires_glaze: bool = False
+    #: Correccion 010H. Tiempo decidido a mano (personal adicional).
+    manual_hours: bool = False
     active: bool = True
     notes: str | None = Field(default=None, max_length=2000)
 
@@ -117,6 +126,7 @@ class V2TechniqueUpdateIn(BaseModel):
     default_capacity_per_workday: Decimal | None = Field(default=None, gt=0, le=MAX_QUANTITY)
     unit: str | None = Field(default=None, min_length=1, max_length=32)
     requires_glaze: bool | None = None
+    manual_hours: bool | None = None
     active: bool | None = None
     notes: str | None = Field(default=None, max_length=2000)
 
@@ -131,6 +141,7 @@ class V2TechniqueOut(BaseModel):
     default_capacity_per_workday: Decimal
     unit: str
     requires_glaze: bool
+    manual_hours: bool = False
     #: `capacidad / jornada`. Se devuelve calculado para que la pantalla no
     #: repita la division y pueda invertirla.
     units_per_hour: Decimal
@@ -270,3 +281,22 @@ class V2IllustrationOut(BaseModel):
     hourly_rate: Decimal | None
     hours: Decimal
     cost: Decimal
+
+
+class V2LoadWorkerIn(BaseModel):
+    """Correccion 010H. Cargar en la cotizacion las tecnicas de un trabajador."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: int = Field(ge=1)
+    #: NULL = todo el pedido.
+    v2_quotation_product_id: int | None = Field(default=None, ge=1)
+    #: Subconjunto marcado. Ausente = todas las habilitadas y activas.
+    technique_ids: list[int] | None = Field(default=None, max_length=200)
+
+
+class V2LoadWorkerOut(BaseModel):
+    created: list[V2LaborOut]
+    #: Tecnicas que ya estaban cargadas para ese trabajador y ese producto.
+    already_loaded_technique_ids: list[int]
+    warnings: list[str]

@@ -100,6 +100,9 @@ class V2PricingOut(BaseModel):
     illustration_cost: Decimal
     space_cost: Decimal
     administration_cost: Decimal
+    #: Los adicionales del Excel: empaque especial, molde, sello. Entran en las
+    #: dos bases de costo, igual que la administracion.
+    extras_cost: Decimal
     #: Lo que de verdad se quema frente a lo que se cobra por encender.
     gas_cost: Decimal
     firing_commercial_cost: Decimal

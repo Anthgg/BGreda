@@ -33,6 +33,7 @@ def _out(estado: PricingState) -> V2PricingOut:
         illustration_cost=quotation.illustration_cost,
         space_cost=quotation.space_cost,
         administration_cost=quotation.administrative_cost_snapshot or Decimal(0),
+        extras_cost=quotation.extras_cost_total,
         gas_cost=quotation.firing_gas_total,
         firing_commercial_cost=quotation.firing_commercial_total,
         # Se calcula aqui y no se lee de la columna generada: sobre un borrador

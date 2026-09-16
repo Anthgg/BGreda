@@ -82,6 +82,7 @@ from app.core.quoter_v2_pricing import (
 from app.models.audit import AuditAction
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
 from app.models.quoter_v2_labor import V2QuotationLabor
+from app.models.quoter_v2_processes import V2QuotationExtra
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 
@@ -185,6 +186,40 @@ async def _labor_by_line(
     return costos, horas, total
 
 
+async def _extras_by_line(
+    session: AsyncSession, quotation_id: int
+) -> tuple[dict[int, Decimal], Decimal, Decimal]:
+    """Adicionales por linea, los del pedido entero, y el total.
+
+    Un adicional puede colgar de una pieza —un molde para esa taza— o del pedido
+    —el empaque de toda la entrega—. Los primeros van al costo directo de su
+    linea; los segundos se reparten como lo general, igual que la
+    administracion. El total es lo que el resumen muestra como «adicionales».
+    """
+    filas = (
+        await session.execute(
+            select(
+                V2QuotationExtra.v2_quotation_product_id,
+                func.sum(V2QuotationExtra.total_cost),
+            )
+            .where(V2QuotationExtra.v2_quotation_id == quotation_id)
+            .group_by(V2QuotationExtra.v2_quotation_product_id)
+        )
+    ).all()
+
+    por_linea: dict[int, Decimal] = {}
+    generales = ZERO
+    total = ZERO
+    for product_id, costo in filas:
+        costo = Decimal(costo or 0)
+        total += costo
+        if product_id is None:
+            generales += costo
+            continue
+        por_linea[int(product_id)] = costo
+    return por_linea, generales, total
+
+
 def _pesos(preferidos: list[Decimal], cantidades: list[Decimal]) -> list[Decimal]:
     """La base con la que repartir un costo general, con sus dos reservas.
 
@@ -265,12 +300,6 @@ async def _recalculate(
     # ---- 1. Lo que cuesta cada cosa ----------------------------------
     costos_mo, horas_mo, mano_de_obra_total = await _labor_by_line(session, quotation.id)
 
-    materiales_total = ZERO
-    for linea in lineas:
-        directo = linea.body_cost + linea.glaze_cost
-        materiales_total += directo
-        linea.direct_cost = directo + costos_mo.get(linea.id, ZERO)
-
     ilustracion = quotation.illustration_cost
     dias = quotation.effective_work_days
     if dias is None:
@@ -284,14 +313,29 @@ async def _recalculate(
     quema_comercial = quotation.firing_commercial_total
     gas_real = quotation.firing_gas_total
 
+    # Los adicionales del Excel (hoja «Cotizador V2», B25): empaque especial,
+    # molde, sello. Suman al Costo de Produccion Y al Costo Real, porque son
+    # dinero que sale de verdad. Los que cuelgan de una pieza van a su costo
+    # directo; los del pedido entero, a lo general, como la administracion.
+    extras_por_linea, extras_generales, extras_total = await _extras_by_line(session, quotation.id)
+
+    materiales_total = ZERO
+    for linea in lineas:
+        directo = linea.body_cost + linea.glaze_cost
+        materiales_total += directo
+        linea.direct_cost = (
+            directo + costos_mo.get(linea.id, ZERO) + extras_por_linea.get(linea.id, ZERO)
+        )
+
     directo_total = sum((linea.direct_cost for linea in lineas), ZERO)
     # Lo que no cabe en ninguna linea: la administracion, la ilustracion —que
     # es una sola por cotizacion— y el personal que apoya al pedido entero.
     mano_de_obra_sin_asignar = mano_de_obra_total - sum(costos_mo.values(), ZERO)
-    general_total = administracion + ilustracion + mano_de_obra_sin_asignar
+    general_total = administracion + ilustracion + mano_de_obra_sin_asignar + extras_generales
 
     quotation.materials_cost_total = materiales_total
     quotation.labor_cost_total = mano_de_obra_total
+    quotation.extras_cost_total = extras_total
     quotation.space_cost = espacio
     quotation.direct_cost_total = directo_total
     quotation.production_cost_total = directo_total + quema_comercial + espacio + general_total

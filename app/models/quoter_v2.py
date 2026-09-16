@@ -22,7 +22,7 @@ INSERT a mano meta aqui una cotizacion Legacy. El CHECK espejo vive en
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -35,6 +35,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Computed,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -106,6 +107,44 @@ class V2CustomerKind(StrEnum):
 
 #: Tipo de produccion con el que nace una cotizacion V2 si nadie dice otra cosa.
 DEFAULT_V2_PRODUCTION_TYPE = V2ProductionType.RETAIL
+
+
+#: Fase 010H. Coherencia entre el estado y sus marcas, rama a rama.
+#:
+#: Los `status IS NOT NULL` no sobran: en SQL `NULL = 'DRAFT'` es NULL, y un
+#: CHECK que evalua a NULL se da por cumplido. Es el agujero que 0017, 0019 y
+#: las ordenes de produccion tuvieron que tapar.
+#:
+#: - un BORRADOR no tiene emision, ni vigencia, ni cancelacion;
+#: - una EMITIDA tiene las tres marcas de emision y la huella, y no esta
+#:   cancelada;
+#: - una CANCELADA tiene su fecha de cancelacion y, o nunca se emitio (las
+#:   tres marcas nulas), o se emitio (las tres presentes). Un estado a medias
+#:   seria una oferta con fecha de emision y sin vencimiento.
+LIFECYCLE_COHERENT = (
+    "(status IS NOT NULL AND status = 'DRAFT'"
+    " AND issued_at IS NULL AND valid_until IS NULL AND expires_at IS NULL"
+    " AND commercial_fingerprint IS NULL AND cancelled_at IS NULL)"
+    " OR (status IS NOT NULL AND status = 'CONFIRMED'"
+    " AND issued_at IS NOT NULL AND valid_until IS NOT NULL AND expires_at IS NOT NULL"
+    " AND commercial_fingerprint IS NOT NULL AND cancelled_at IS NULL)"
+    " OR (status IS NOT NULL AND status = 'CANCELLED' AND cancelled_at IS NOT NULL"
+    " AND ((issued_at IS NULL AND valid_until IS NULL AND expires_at IS NULL)"
+    "   OR (issued_at IS NOT NULL AND valid_until IS NOT NULL AND expires_at IS NOT NULL"
+    "       AND commercial_fingerprint IS NOT NULL)))"
+)
+
+
+class V2ProductionHandoffStatus(StrEnum):
+    """Fase 010H. Hasta donde llego el pase a produccion.
+
+    Un solo valor a proposito. 010H construye el PUENTE —«esta cotizacion
+    aceptada esta lista para fabricarse»—, no el seguimiento. Inicio, en
+    proceso y finalizado son de 010I, y adelantarlos aqui seria inventar un
+    flujo que nadie ha disenado todavia.
+    """
+
+    READY_FOR_PRODUCTION = "READY_FOR_PRODUCTION"
 
 
 class V2Quotation(Base, TimestampMixin):
@@ -342,6 +381,12 @@ class V2Quotation(Base, TimestampMixin):
     labor_cost_total: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
+    #: Lo que suman los adicionales de esta cotizacion: empaque especial, molde,
+    #: sello... Entra en el Costo de Produccion Y en el Costo Real, como en el
+    #: Excel aprobado, y no se mezcla con materiales ni con mano de obra.
+    extras_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
     #: `dias efectivos x costo del espacio por dia`. Por dias EFECTIVOS de
     #: taller, nunca por dias de vigencia de la oferta: son dos plazos
     #: distintos y confundirlos cobraria espacio por no haber vendido.
@@ -417,6 +462,53 @@ class V2Quotation(Base, TimestampMixin):
 
     created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
     created_by_name: Mapped[str | None] = mapped_column(String(200))
+
+    # ---- Fase 010H: observaciones para el cliente ------------------------
+    #: Lo que SI puede leer el cliente. `notes` es de uso interno desde 010A
+    #: —nadie escribio ahi pensando que saldria en un papel— y reutilizarlo
+    #: imprimiria en el PDF lo que se anoto para el taller.
+    client_notes: Mapped[str | None] = mapped_column(Text)
+
+    # ---- Fase 010H: emision y vigencia -----------------------------------
+    #: Cuando se emitio, con `now()` de la base. NULL mientras es borrador.
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: El ultimo dia de calendario de Lima en que la oferta vale. Es la fecha
+    #: que se imprime; `expires_at` es el limite exclusivo con el que se compara.
+    valid_until: Mapped[date | None] = mapped_column(Date)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    issued_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    issued_by_name: Mapped[str | None] = mapped_column(String(200))
+    #: La huella de lo que se reviso y se congelo. Sirve dos veces: impide
+    #: emitir datos distintos a los mostrados y hace idempotente el doble clic.
+    commercial_fingerprint: Mapped[str | None] = mapped_column(String(64))
+
+    #: Datos del cliente con los que se EMITIO. Desde 010A solo se copiaba el
+    #: nombre; el PDF necesita ademas el documento y el contacto, y leerlos del
+    #: maestro al imprimir haria que corregir una direccion manana cambiara un
+    #: papel ya entregado.
+    customer_document_type_snapshot: Mapped[str | None] = mapped_column(String(16))
+    customer_document_number_snapshot: Mapped[str | None] = mapped_column(String(20))
+    customer_address_snapshot: Mapped[str | None] = mapped_column(String(240))
+    customer_email_snapshot: Mapped[str | None] = mapped_column(String(160))
+    customer_phone_snapshot: Mapped[str | None] = mapped_column(String(32))
+    #: Las condiciones comerciales y de pago vigentes al emitir. Mismo motivo:
+    #: el cliente acepto ESTAS condiciones, no las que la casa escriba despues.
+    conditions_snapshot: Mapped[str | None] = mapped_column(Text)
+    payment_notes_snapshot: Mapped[str | None] = mapped_column(Text)
+
+    # ---- Fase 010H: cancelacion ------------------------------------------
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    cancelled_by_name: Mapped[str | None] = mapped_column(String(200))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+
+    # ---- Fase 010H: duplicacion ------------------------------------------
+    #: De que cotizacion nacio esta, si nacio de una. RESTRICT: la de origen
+    #: explica de donde salen cliente y productos, y no puede borrarse debajo.
+    #: Es solo un rastro: ningun importe se lee de alli.
+    duplicated_from_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_quotations.id", ondelete="RESTRICT"), index=True
+    )
 
     customer: Mapped[Partner | None] = relationship("Partner", foreign_keys=[customer_id])
     #: Fase 010C. Las lineas de la cotizacion. `selectin` porque el costo
@@ -653,6 +745,7 @@ class V2Quotation(Base, TimestampMixin):
         # importa mirar.
         CheckConstraint("materials_cost_total >= 0", name="materials_total_non_negative"),
         CheckConstraint("labor_cost_total >= 0", name="labor_total_non_negative"),
+        CheckConstraint("extras_cost_total >= 0", name="extras_total_non_negative"),
         CheckConstraint("space_cost >= 0", name="space_cost_non_negative"),
         CheckConstraint("direct_cost_total >= 0", name="direct_total_non_negative"),
         CheckConstraint("real_cost_total >= 0", name="real_cost_non_negative"),
@@ -670,7 +763,28 @@ class V2Quotation(Base, TimestampMixin):
         CheckConstraint(
             "firing_commercial_total >= 0", name="firing_commercial_total_non_negative"
         ),
+        # ---- Fase 010H ----------------------------------------------------
+        CheckConstraint(LIFECYCLE_COHERENT, name="lifecycle_coherent"),
+        CheckConstraint(
+            "expires_at IS NULL OR issued_at IS NULL OR expires_at > issued_at",
+            name="expires_after_issue",
+        ),
+        CheckConstraint(
+            "duplicated_from_id IS NULL OR duplicated_from_id <> id",
+            name="not_duplicated_from_itself",
+        ),
         Index("ix_v2_quotations_created_at", "created_at"),
+        # Un solo borrador abierto por cotizacion de origen. Es lo que vuelve
+        # idempotente el doble clic en «Duplicar»: el segundo INSERT choca aqui
+        # aunque las dos peticiones hayan pasado la comprobacion del servicio.
+        # Parcial: cuando ese borrador se emite o se cancela, se puede volver a
+        # duplicar la original.
+        Index(
+            "uq_v2_quotations_open_duplicate",
+            "duplicated_from_id",
+            unique=True,
+            postgresql_where=text("duplicated_from_id IS NOT NULL AND status = 'DRAFT'"),
+        ),
     )
 
 
@@ -868,6 +982,11 @@ class V2QuotationProduct(Base, TimestampMixin):
         calculation_numeric(), nullable=False, server_default=text("0")
     )
 
+    #: Fase 010H. La columna «Observacion» de la hoja PDF cliente: lo que el
+    #: cliente tiene que leer de ESTA pieza —acabado, color, un matiz del
+    #: encargo—. Solo texto para el cliente: nada del taller se escribe aqui.
+    client_observation: Mapped[str | None] = mapped_column(Text)
+
     quotation: Mapped[V2Quotation] = relationship("V2Quotation", back_populates="products")
 
     __table_args__ = (
@@ -937,4 +1056,49 @@ class V2QuotationProduct(Base, TimestampMixin):
             name="no_quantity_no_amount",
         ),
         Index("ix_v2_quotation_products_quotation", "v2_quotation_id", "sort_order"),
+    )
+
+
+class V2ProductionHandoff(Base, TimestampMixin):
+    """Fase 010H. El puente entre una cotizacion V2 aceptada y la produccion.
+
+    Tabla propia y no una fila de `production_orders`. Aquella orden cuelga de
+    una cotizacion LEGACY —su clave foranea apunta a `quotations` y sus lineas a
+    `quotation_items`— y su arranque descuenta inventario por receta. Colgar V2
+    de ella obligaria a reescribir el origen de todas las ordenes y dejaria a
+    un clic de distancia un consumo de material que esta fase prohibe.
+
+    Lo que SI garantiza esta tabla:
+
+    - **identidad**: `v2_quotation_id` dice exactamente que se cotizo, y la
+      huella comercial congelada dice con que contenido;
+    - **unicidad**: UNIQUE sobre la cotizacion. Dos clics simultaneos en
+      «Enviar a produccion» pasan los dos la comprobacion del servicio; solo
+      la base puede impedir que nazcan dos;
+    - **ningun movimiento de inventario**. Ni pasta ni esmalte. El consumo es
+      de 010I, cuando alguien arranque de verdad.
+    """
+
+    __tablename__ = "v2_production_handoffs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    v2_quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("v2_quotations.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    status: Mapped[V2ProductionHandoffStatus] = mapped_column(
+        StrEnumType(V2ProductionHandoffStatus, 32),
+        nullable=False,
+        default=V2ProductionHandoffStatus.READY_FOR_PRODUCTION,
+        server_default=text("'READY_FOR_PRODUCTION'"),
+    )
+    #: Copia de la huella de la cotizacion al pasar. Si algun dia no
+    #: coincidiera con la de la cotizacion, alguien habria tocado un documento
+    #: emitido por debajo.
+    commercial_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    created_by_name: Mapped[str | None] = mapped_column(String(200))
+
+    __table_args__ = (
+        CheckConstraint("status IN ('READY_FOR_PRODUCTION')", name="status_allowed"),
+        CheckConstraint("length(btrim(commercial_fingerprint)) = 64", name="fingerprint_is_sha256"),
     )

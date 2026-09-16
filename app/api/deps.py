@@ -47,10 +47,14 @@ from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
+from app.services.quoter_v2_extras import V2ExtraService
 from app.services.quoter_v2_firing import V2FiringService
 from app.services.quoter_v2_labor import V2LaborService
+from app.services.quoter_v2_lifecycle import V2LifecycleService
 from app.services.quoter_v2_materials import V2MaterialService
+from app.services.quoter_v2_pdf import V2QuotationPdfService
 from app.services.quoter_v2_pricing import V2PricingService
+from app.services.quoter_v2_processes import V2ProcessService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
@@ -409,6 +413,32 @@ async def get_v2_labor_service(
 V2LaborServiceDep = Annotated[V2LaborService, Depends(get_v2_labor_service)]
 
 
+async def get_v2_process_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2ProcessService:
+    """Procesos de la pieza (correccion 010H).
+
+    Tampoco toca existencia ni configuracion: lee el maestro de tecnicas y
+    delega el costo en la mano de obra.
+    """
+    return V2ProcessService(session, audit)
+
+
+V2ProcessServiceDep = Annotated[V2ProcessService, Depends(get_v2_process_service)]
+
+
+async def get_v2_extra_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2ExtraService:
+    """Adicionales: empaque especial, molde, sello. No mueven inventario."""
+    return V2ExtraService(session, audit)
+
+
+V2ExtraServiceDep = Annotated[V2ExtraService, Depends(get_v2_extra_service)]
+
+
 async def get_v2_firing_service(
     session: DbSessionDep,
     audit: AuditRecorderDep,
@@ -458,6 +488,31 @@ async def get_v2_quotation_service(
 
 
 V2QuotationServiceDep = Annotated[V2QuotationService, Depends(get_v2_quotation_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 010H: ciclo de vida y PDF del Cotizador V2
+# ---------------------------------------------------------------------------
+async def get_v2_lifecycle_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    settings: V2SettingsServiceDep,
+    quotations: V2QuotationServiceDep,
+    materials: V2MaterialServiceDep,
+    labor: V2LaborServiceDep,
+    firing: V2FiringServiceDep,
+) -> V2LifecycleService:
+    """Emitir, cancelar, duplicar y pasar a produccion.
+
+    Recibe los servicios V2 para que duplicar vuelva a pasar por las MISMAS
+    validaciones que un alta a mano. No recibe nada de inventario ni de
+    ordenes de produccion Legacy: el puente de 010H no puede consumir material
+    ni por descuido.
+    """
+    return V2LifecycleService(session, audit, settings, quotations, materials, labor, firing)
+
+
+V2LifecycleServiceDep = Annotated[V2LifecycleService, Depends(get_v2_lifecycle_service)]
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +578,17 @@ async def get_quotation_pdf_service(
 
 
 QuotationPdfServiceDep = Annotated[QuotationPdfService, Depends(get_quotation_pdf_service)]
+
+
+# Fase 010H: PDF del Cotizador V2. Mismo motor documental que CTZ y CPR.
+async def get_v2_quotation_pdf_service(
+    session: DbSessionDep,
+    base: QuotationPdfServiceDep,
+) -> V2QuotationPdfService:
+    return V2QuotationPdfService(session, base)
+
+
+V2QuotationPdfServiceDep = Annotated[V2QuotationPdfService, Depends(get_v2_quotation_pdf_service)]
 
 
 # ---------------------------------------------------------------------------
