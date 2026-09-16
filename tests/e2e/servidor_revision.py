@@ -256,8 +256,9 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             ),
             "categoria de piezas",
         )
+        catalogo: dict[str, int] = {}
         for nombre, gramaje, largo, ancho, alto in PIEZAS_DE_CATALOGO:
-            await _ok(
+            pieza = await _ok(
                 await api.post(
                     "/api/v1/products",
                     json={
@@ -275,6 +276,7 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 ),
                 nombre,
             )
+            catalogo[nombre] = int(pieza.json()["id"])
 
         # Tecnicas y trabajadores de la hoja «Configuracion» del Excel aprobado.
         # Primero las tecnicas: cada trabajador nace con las suyas habilitadas,
@@ -306,6 +308,29 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                         "daily_rate": jornal,
                         "technique_ids": [tecnicas[codigo] for codigo in suyas],
                     },
+                    headers=cabeceras,
+                ),
+                nombre,
+            )
+
+        # Correccion 010H: cada pieza del catalogo declara sus procesos. Es lo
+        # que hace que la taza traiga su asa sola en vez de tener que acordarse.
+        for nombre, procesos in PROCESOS_DE_LA_PIEZA:
+            await _ok(
+                await api.put(
+                    f"/api/v1/quoter-v2/products/{catalogo[nombre]}/techniques",
+                    json={"technique_ids": [tecnicas[codigo] for codigo in procesos]},
+                    headers=cabeceras,
+                ),
+                f"procesos de {nombre}",
+            )
+
+        # Conceptos adicionales: el «Otros extras» de la hoja «Cotizador V2».
+        for nombre, unidad, costo in ADICIONALES:
+            await _ok(
+                await api.post(
+                    "/api/v1/quoter-v2/extras",
+                    json={"name": nombre, "unit": unidad, "unit_cost": costo},
                     headers=cabeceras,
                 ),
                 nombre,
@@ -404,6 +429,24 @@ PIEZAS_DE_CATALOGO = (
     ("E2E-Catalogo Plato hondo 22", "450", "22", "22", "5"),
     ("E2E-Catalogo Taza 250 ml", "280", "9", "9", "10"),
     ("E2E-Catalogo Fuente oval", "1200", "32", "22", "6"),
+)
+
+#: Que procesos necesita cada pieza del catalogo. El plato se tornea y se
+#: vidria; la taza ademas lleva asa, que es justo el caso que el usuario puso
+#: como ejemplo de proceso que no aparecia solo.
+PROCESOS_DE_LA_PIEZA = (
+    ("E2E-Catalogo Plato hondo 22", ("E2E-TORNO-FACIL", "E2E-VIDRIADO-INMERSION")),
+    (
+        "E2E-Catalogo Taza 250 ml",
+        ("E2E-TORNO-FACIL", "E2E-ARMADO-ASA", "E2E-VIDRIADO-INMERSION"),
+    ),
+    ("E2E-Catalogo Fuente oval", ("E2E-COLADA",)),
+)
+
+#: Conceptos adicionales del Excel: no son material ni tecnica.
+ADICIONALES = (
+    ("E2E-Empaque especial", "servicio", "25"),
+    ("E2E-Molde especial", "unidad", "150"),
 )
 
 #: Nombre con el que las E2E encuentran la cotizacion vencida sembrada.
