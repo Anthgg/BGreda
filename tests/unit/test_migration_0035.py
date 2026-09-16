@@ -55,9 +55,10 @@ def test_el_downgrade_esta_protegido() -> None:
     assert "RuntimeError" in _codigo().split("def downgrade()")[1]
 
 
-def test_0035_es_la_unica_cabeza() -> None:
+def test_0035_sigue_encadenada_a_0034() -> None:
+    """La cabeza se la lleva la migracion mas nueva; el eslabon es lo que importa."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0035"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("0035").down_revision == "0034"
 
 

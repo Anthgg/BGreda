@@ -29,7 +29,7 @@ servicios V2.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -55,7 +55,8 @@ from app.models.quoter_v2 import (
     V2QuotationProduct,
     V2QuotationStatus,
 )
-from app.models.quoter_v2_labor import V2QuotationLabor
+from app.models.quoter_v2_labor import V2QuotationLabor, V2Technique
+from app.models.quoter_v2_processes import V2Extra, V2QuotationExtra, V2QuotationProcess
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.quoter_v2 import CUSTOMER_ROLES, V2_QUOTATION_ENTITY, V2QuotationService
@@ -114,6 +115,8 @@ DUP_BODY_MATERIAL_UNAVAILABLE = "V2_DUPLICATE_BODY_MATERIAL_UNAVAILABLE"
 DUP_GLAZE_MATERIAL_UNAVAILABLE = "V2_DUPLICATE_GLAZE_MATERIAL_UNAVAILABLE"
 DUP_KILN_UNAVAILABLE = "V2_DUPLICATE_KILN_UNAVAILABLE"
 DUP_LABOR_UNAVAILABLE = "V2_DUPLICATE_LABOR_UNAVAILABLE"
+#: El concepto adicional se retiro del maestro: no se recotiza a ciegas.
+DUP_EXTRA_UNAVAILABLE = "V2_DUPLICATE_EXTRA_UNAVAILABLE"
 DUP_ILLUSTRATION_UNAVAILABLE = "V2_DUPLICATE_ILLUSTRATION_UNAVAILABLE"
 DUP_PLANNING_UNAVAILABLE = "V2_DUPLICATE_PLANNING_UNAVAILABLE"
 
@@ -628,6 +631,12 @@ class V2LifecycleService:
         await self._copy_firing(original, nueva, avisos, user)
         mapa = await self._copy_lines(original, nueva, avisos, user)
         await self._copy_labor(original, nueva, mapa, avisos, user)
+        # Correccion 010H. Las lineas nuevas ya nacieron con los procesos que
+        # pide el catalogo de HOY; esto trae encima lo que se decidio en la
+        # cotizacion vieja —lo quitado, lo anadido a mano, las piezas escritas—
+        # y vuelve a atar cada tarea con su proceso.
+        await self._copy_processes(original, nueva, mapa, avisos)
+        await self._copy_extras(original, nueva, mapa, avisos)
         await self._copy_planning(original, nueva, avisos, user)
 
         await refresh_firing(self._session, nueva)
@@ -826,6 +835,155 @@ class V2LifecycleService:
                         "name": f"{tarea.worker_name_snapshot} · {tarea.technique_name_snapshot}",
                     }
                 )
+
+    async def _copy_processes(
+        self,
+        original: V2Quotation,
+        nueva: V2Quotation,
+        mapa: dict[int, int],
+        avisos: list[dict[str, Any]],
+    ) -> None:
+        """Las decisiones de procesos de la cotizacion vieja, sobre la nueva.
+
+        Lo que el catalogo pide hoy ya esta puesto. Aqui se recuperan las tres
+        decisiones que son de la cotizacion y no del maestro: lo que se quito,
+        lo que se anadio a mano y las piezas que alguien escribio. Sin esto, un
+        duplicado devolveria el acabado que el cliente no queria.
+        """
+        viejos = (
+            await self._session.scalars(
+                select(V2QuotationProcess)
+                .where(V2QuotationProcess.v2_quotation_id == original.id)
+                .order_by(V2QuotationProcess.sort_order, V2QuotationProcess.id)
+            )
+        ).all()
+        if not viejos:
+            return
+
+        nuevos = {
+            (proceso.v2_quotation_product_id, proceso.technique_id): proceso
+            for proceso in (
+                await self._session.scalars(
+                    select(V2QuotationProcess).where(V2QuotationProcess.v2_quotation_id == nueva.id)
+                )
+            ).all()
+        }
+        activas = set(
+            (
+                await self._session.scalars(
+                    select(V2Technique.id).where(
+                        V2Technique.id.in_([proceso.technique_id for proceso in viejos]),
+                        V2Technique.active.is_(True),
+                    )
+                )
+            ).all()
+        )
+
+        for viejo in viejos:
+            linea_nueva = mapa.get(viejo.v2_quotation_product_id)
+            if linea_nueva is None:
+                continue
+            proceso = nuevos.get((linea_nueva, viejo.technique_id))
+            if proceso is None:
+                if viejo.removed_at is not None:
+                    # Estaba quitado y el catalogo ya no lo pide: nada que hacer.
+                    continue
+                if viejo.technique_id not in activas:
+                    avisos.append({"code": DUP_LABOR_UNAVAILABLE, "name": viejo.technique.name})
+                    continue
+                proceso = V2QuotationProcess(
+                    v2_quotation_id=nueva.id,
+                    v2_quotation_product_id=linea_nueva,
+                    technique_id=viejo.technique_id,
+                    sort_order=viejo.sort_order,
+                    origin=viejo.origin,
+                    quantity=viejo.quantity,
+                    quantity_overridden=viejo.quantity_overridden,
+                )
+                self._session.add(proceso)
+                nuevos[(linea_nueva, viejo.technique_id)] = proceso
+            elif viejo.removed_at is not None:
+                proceso.removed_at = datetime.now(UTC)
+            else:
+                proceso.quantity = viejo.quantity
+                proceso.quantity_overridden = viejo.quantity_overridden
+        await self._session.flush()
+
+        # Cada tarea copiada vuelve a su proceso. La tarea es quien cuesta; el
+        # proceso es quien explica por que existe, y sin el enlace la pantalla
+        # mostraria el mismo trabajo dos veces: una sin asignar y otra suelta.
+        tareas = (
+            await self._session.scalars(
+                select(V2QuotationLabor).where(V2QuotationLabor.v2_quotation_id == nueva.id)
+            )
+        ).all()
+        for tarea in tareas:
+            if tarea.v2_quotation_product_id is None or tarea.v2_quotation_process_id is not None:
+                continue
+            proceso = nuevos.get((tarea.v2_quotation_product_id, tarea.technique_id))
+            if proceso is not None and proceso.removed_at is None:
+                tarea.v2_quotation_process_id = proceso.id
+        await self._session.flush()
+
+        # Un proceso que la cotizacion vieja habia quitado no puede llegar con
+        # una tarea puesta por la copia de la mano de obra.
+        for proceso in nuevos.values():
+            if proceso.removed_at is None:
+                continue
+            for tarea in tareas:
+                if tarea.v2_quotation_process_id == proceso.id:
+                    await self._session.delete(tarea)
+        await self._session.flush()
+
+    async def _copy_extras(
+        self,
+        original: V2Quotation,
+        nueva: V2Quotation,
+        mapa: dict[int, int],
+        avisos: list[dict[str, Any]],
+    ) -> None:
+        """Los adicionales, al precio de HOY.
+
+        Misma regla que los materiales: el concepto se vuelve a valorar con el
+        maestro actual y el precio pactado entonces no viaja. Un concepto
+        retirado no se recotiza a ciegas: se avisa y no entra.
+        """
+        viejos = (
+            await self._session.scalars(
+                select(V2QuotationExtra)
+                .where(V2QuotationExtra.v2_quotation_id == original.id)
+                .order_by(V2QuotationExtra.sort_order, V2QuotationExtra.id)
+            )
+        ).all()
+        for viejo in viejos:
+            concepto = await self._session.get(V2Extra, viejo.v2_extra_id)
+            if concepto is None or not concepto.active:
+                avisos.append({"code": DUP_EXTRA_UNAVAILABLE, "name": viejo.name_snapshot})
+                continue
+            linea_nueva = (
+                mapa.get(viejo.v2_quotation_product_id)
+                if viejo.v2_quotation_product_id is not None
+                else None
+            )
+            if viejo.v2_quotation_product_id is not None and linea_nueva is None:
+                avisos.append({"code": DUP_EXTRA_UNAVAILABLE, "name": viejo.name_snapshot})
+                continue
+            self._session.add(
+                V2QuotationExtra(
+                    v2_quotation_id=nueva.id,
+                    v2_quotation_product_id=linea_nueva,
+                    v2_extra_id=concepto.id,
+                    name_snapshot=concepto.name,
+                    unit_snapshot=concepto.unit,
+                    unit_cost_snapshot=concepto.unit_cost,
+                    unit_cost_is_override=False,
+                    description=viejo.description,
+                    quantity=viejo.quantity,
+                    total_cost=viejo.quantity * concepto.unit_cost,
+                    sort_order=viejo.sort_order,
+                )
+            )
+        await self._session.flush()
 
     async def _copy_planning(
         self,

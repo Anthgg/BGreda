@@ -242,6 +242,12 @@ class V2QuotationLabor(Base, TimestampMixin):
         ForeignKey("v2_quotation_products.id", ondelete="CASCADE"), index=True
     )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    #: El proceso del que salio esta tarea (correccion 010H). NULL en las tareas
+    #: creadas antes de que existieran los procesos y en el personal adicional,
+    #: que apoya al pedido y no a una pieza.
+    v2_quotation_process_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_quotation_processes.id", ondelete="SET NULL")
+    )
 
     # ---- Quien, congelado -------------------------------------------------
     worker_id: Mapped[int] = mapped_column(

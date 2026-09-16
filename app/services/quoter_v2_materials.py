@@ -429,6 +429,10 @@ class V2MaterialService:
         self._session.add(linea)
         avisos = await self._fill_line(linea, data)
         await self._session.flush()
+        # Correccion 010H. La pieza trae sus procesos: torno, asa, acabado. Que
+        # aparezcan solos es justo el punto de la correccion; si el catalogo no
+        # los tiene configurados, se avisa y se eligen a mano.
+        avisos += await self._procesos().generate_for_line(linea)
         # Fase 010E. La quema depende del volumen de TODAS las lineas: anadir
         # una pieza puede cambiar el numero de hornadas y el reparto del costo
         # entre productos. Sin este recalculo la cabecera seguiria diciendo las
@@ -459,10 +463,20 @@ class V2MaterialService:
     ) -> tuple[V2QuotationProduct, list[str]]:
         quotation = await self._draft(quotation_id)
         linea = await self._line(quotation_id, line_id)
+        producto_antes = linea.product_id
+        cantidad_antes = linea.quantity
         if "quantity" in data:
             linea.quantity = int(data["quantity"] or 0)
         avisos = await self._fill_line(linea, data)
         await self._session.flush()
+        if linea.product_id != producto_antes:
+            # Otra pieza son otros procesos. Los que alguien quito o anadio a
+            # mano se respetan; solo se proponen los que faltan.
+            avisos += await self._procesos().generate_for_line(linea)
+        if linea.quantity != cantidad_antes:
+            # Mas piezas son mas horas. Salvo donde alguien escribio una
+            # cantidad a mano: esa decision manda sobre el automatismo.
+            await self._procesos().sync_quantity(linea, user=user)
         avisos += await refresh_firing(self._session, quotation)
         avisos += await refresh_pricing(self._session, quotation)
 
@@ -496,6 +510,17 @@ class V2MaterialService:
             metadata={"quotation_id": str(quotation_id)},
         )
         await self._session.flush()
+
+    def _procesos(self) -> Any:
+        """Los procesos, importados aqui y no arriba.
+
+        `V2ProcessService` usa la mano de obra, que usa el precio, que usa los
+        materiales: importarlo en la cabecera cerraria el circulo y ninguno de
+        los cuatro modulos podria cargarse.
+        """
+        from app.services.quoter_v2_processes import V2ProcessService
+
+        return V2ProcessService(self._session, self._audit)
 
     async def _fill_line(self, linea: V2QuotationProduct, data: dict[str, Any]) -> list[str]:
         """Rellena la pieza y recalcula el material entero.

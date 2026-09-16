@@ -47,12 +47,14 @@ from app.services.quotation_builder import QuotationBuilderService
 from app.services.quotation_pdf import QuotationPdfService
 from app.services.quotations import QuotationService
 from app.services.quoter_v2 import V2QuotationService
+from app.services.quoter_v2_extras import V2ExtraService
 from app.services.quoter_v2_firing import V2FiringService
 from app.services.quoter_v2_labor import V2LaborService
 from app.services.quoter_v2_lifecycle import V2LifecycleService
 from app.services.quoter_v2_materials import V2MaterialService
 from app.services.quoter_v2_pdf import V2QuotationPdfService
 from app.services.quoter_v2_pricing import V2PricingService
+from app.services.quoter_v2_processes import V2ProcessService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
@@ -409,6 +411,32 @@ async def get_v2_labor_service(
 
 
 V2LaborServiceDep = Annotated[V2LaborService, Depends(get_v2_labor_service)]
+
+
+async def get_v2_process_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2ProcessService:
+    """Procesos de la pieza (correccion 010H).
+
+    Tampoco toca existencia ni configuracion: lee el maestro de tecnicas y
+    delega el costo en la mano de obra.
+    """
+    return V2ProcessService(session, audit)
+
+
+V2ProcessServiceDep = Annotated[V2ProcessService, Depends(get_v2_process_service)]
+
+
+async def get_v2_extra_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2ExtraService:
+    """Adicionales: empaque especial, molde, sello. No mueven inventario."""
+    return V2ExtraService(session, audit)
+
+
+V2ExtraServiceDep = Annotated[V2ExtraService, Depends(get_v2_extra_service)]
 
 
 async def get_v2_firing_service(

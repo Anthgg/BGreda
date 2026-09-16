@@ -381,6 +381,12 @@ class V2Quotation(Base, TimestampMixin):
     labor_cost_total: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
+    #: Lo que suman los adicionales de esta cotizacion: empaque especial, molde,
+    #: sello... Entra en el Costo de Produccion Y en el Costo Real, como en el
+    #: Excel aprobado, y no se mezcla con materiales ni con mano de obra.
+    extras_cost_total: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
     #: `dias efectivos x costo del espacio por dia`. Por dias EFECTIVOS de
     #: taller, nunca por dias de vigencia de la oferta: son dos plazos
     #: distintos y confundirlos cobraria espacio por no haber vendido.
@@ -739,6 +745,7 @@ class V2Quotation(Base, TimestampMixin):
         # importa mirar.
         CheckConstraint("materials_cost_total >= 0", name="materials_total_non_negative"),
         CheckConstraint("labor_cost_total >= 0", name="labor_total_non_negative"),
+        CheckConstraint("extras_cost_total >= 0", name="extras_total_non_negative"),
         CheckConstraint("space_cost >= 0", name="space_cost_non_negative"),
         CheckConstraint("direct_cost_total >= 0", name="direct_total_non_negative"),
         CheckConstraint("real_cost_total >= 0", name="real_cost_non_negative"),
