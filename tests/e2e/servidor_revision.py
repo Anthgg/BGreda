@@ -367,8 +367,9 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 nombre,
             )
             tecnicas[codigo] = int(tecnica.json()["id"])
+        trabajadores: dict[str, int] = {}
         for nombre, tipo, jornal, suyas in TRABAJADORES:
-            await _ok(
+            trabajador = await _ok(
                 await api.post(
                     "/api/v1/quoter-v2/workers",
                     json={
@@ -381,6 +382,7 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 ),
                 nombre,
             )
+            trabajadores[nombre] = int(trabajador.json()["id"])
 
         # Correccion 010H: cada pieza del catalogo declara sus procesos. Es lo
         # que hace que la taza traiga su asa sola en vez de tener que acordarse.
@@ -457,7 +459,13 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             "configuracion del Cotizador V2",
         )
 
-        await sembrar_cotizacion_vencida(api, cabeceras, int(pasta.json()["id"]))
+        await sembrar_cotizacion_vencida(
+            api,
+            cabeceras,
+            int(pasta.json()["id"]),
+            tecnicas["E2E-A-MANO"],
+            trabajadores["E2E-Trabajador taller"],
+        )
     print("[servidor_revision] siembra completa", flush=True)
 
 
@@ -536,7 +544,11 @@ NOMBRE_VENCIDA = "E2E-SEMILLA-VENCIDA-USD"
 
 
 async def sembrar_cotizacion_vencida(
-    api: httpx.AsyncClient, cabeceras: dict[str, str], pasta_id: int
+    api: httpx.AsyncClient,
+    cabeceras: dict[str, str],
+    pasta_id: int,
+    technique_id: int,
+    worker_id: int,
 ) -> None:
     """Fase 010H. Una cotizacion en dolares EMITIDA hace cuarenta dias.
 
@@ -564,7 +576,7 @@ async def sembrar_cotizacion_vencida(
         "cotizacion vencida",
     )
     qid = int(creada.json()["id"])
-    await _ok(
+    linea = await _ok(
         await api.post(
             f"/api/v1/quotations-v2/{qid}/products",
             json={
@@ -579,6 +591,27 @@ async def sembrar_cotizacion_vencida(
             headers=cabeceras,
         ),
         "linea de la cotizacion vencida",
+    )
+    # Una pieza de encargo tambien la fabrica alguien: sin mano de obra no se
+    # emite, y esta semilla nacio antes de que esa barrera existiera.
+    proceso = await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/processes",
+            json={
+                "v2_quotation_product_id": int(linea.json()["id"]),
+                "technique_id": technique_id,
+            },
+            headers=cabeceras,
+        ),
+        "proceso de la cotizacion vencida",
+    )
+    await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/processes/{int(proceso.json()['id'])}/assign",
+            json={"worker_id": worker_id},
+            headers=cabeceras,
+        ),
+        "trabajador de la cotizacion vencida",
     )
     await _ok(
         await api.put(

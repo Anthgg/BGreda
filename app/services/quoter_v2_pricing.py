@@ -47,13 +47,14 @@ precio global anterior al redondeo daria un total que no coincide con los
 unitarios que el cliente esta leyendo, y el documento no cuadraria al sumarlo
 a mano.
 
-## Ilustracion y Excel de referencia
+## Una divergencia consciente con el Excel de referencia
 
 El modelo en Excel lleva la ilustracion por PRODUCTO. En el sistema es una sola
 por cotizacion: lo fijo la regla aprobada de 010D —«la ilustracion es una sola
-por cotizacion y no una tecnica mas»—. Para el precio por linea se carga a una
-linea del documento; asi el concepto sigue siendo de cabecera, pero el
-redondeo comercial reproduce el subtotal, IGV y total del Excel aprobado.
+por cotizacion y no una tecnica mas»— y esa regla manda sobre el Excel. Aqui se
+trata, por tanto, como un costo general y se reparte por costo directo. Los
+totales de la cotizacion coinciden con el Excel; lo que cambia es a que linea
+se le carga cada parte.
 """
 
 from __future__ import annotations
@@ -86,7 +87,6 @@ from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 
 ZERO = Decimal(0)
-CENT = Decimal("0.01")
 
 #: Entidad de auditoria propia. Mover el factor comercial de una cotizacion no
 #: es lo mismo que cambiarle un material o un horno.
@@ -319,8 +319,6 @@ async def _recalculate(
     # directo; los del pedido entero, a lo general, como la administracion.
     extras_por_linea, extras_generales, extras_total = await _extras_by_line(session, quotation.id)
 
-    illustration_line_id = lineas[0].id if lineas and ilustracion > ZERO else None
-
     materiales_total = ZERO
     for linea in lineas:
         directo = linea.body_cost + linea.glaze_cost
@@ -328,21 +326,12 @@ async def _recalculate(
         linea.direct_cost = (
             directo + costos_mo.get(linea.id, ZERO) + extras_por_linea.get(linea.id, ZERO)
         )
-        if linea.id == illustration_line_id:
-            # La ilustracion sigue siendo un concepto de cotizacion, no una
-            # tecnica. Para el precio por linea se carga a una pieza: si se
-            # dejara en el pool general cambiaria todos los unitarios y el
-            # documento dejaria de cuadrar con el Excel aprobado.
-            linea.direct_cost += ilustracion
 
     directo_total = sum((linea.direct_cost for linea in lineas), ZERO)
-    # Lo que no cabe en ninguna linea: la administracion, la ilustracion cuando
-    # no hay lineas donde cargarla, y el personal que apoya al pedido entero.
+    # Lo que no cabe en ninguna linea: la administracion, la ilustracion —que
+    # es una sola por cotizacion— y el personal que apoya al pedido entero.
     mano_de_obra_sin_asignar = mano_de_obra_total - sum(costos_mo.values(), ZERO)
-    ilustracion_general = ZERO if illustration_line_id is not None else ilustracion
-    general_total = (
-        administracion + ilustracion_general + mano_de_obra_sin_asignar + extras_generales
-    )
+    general_total = administracion + ilustracion + mano_de_obra_sin_asignar + extras_generales
 
     quotation.materials_cost_total = materiales_total
     quotation.labor_cost_total = mano_de_obra_total
@@ -444,8 +433,7 @@ async def _recalculate(
     subtotal_base = to_base_currency(subtotal, cambio)
     # Cuanto anadio el redondeo respecto al precio que se buscaba. Sin este
     # numero nadie sabe por que el subtotal no es exactamente costo x factor.
-    precio_negociado = quotation.negotiated_price.quantize(CENT)
-    quotation.rounding_adjustment = subtotal_base - precio_negociado
+    quotation.rounding_adjustment = subtotal_base - quotation.negotiated_price
     # Contra el costo REAL y sin el IGV: el impuesto no es ingreso del taller.
     quotation.estimated_profit = subtotal_base - quotation.real_cost_total
     quotation.effective_margin_percent = margin_percent(quotation.estimated_profit, subtotal_base)

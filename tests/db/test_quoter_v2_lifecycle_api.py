@@ -331,6 +331,63 @@ class TestEmitir:
         assert not resumen["can_confirm"]
         assert "V2_CONFIRM_PROCESS_WORKER_REQUIRED" in {b["code"] for b in resumen["blockers"]}
 
+    async def test_linea_libre_sin_procesos_no_se_emite(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Una pieza que no esta en el catalogo tambien la fabrica alguien.
+
+        Es el agujero que la auditoria A2H-001 dejaba abierto: la linea libre
+        no tiene ficha de producto, asi que no hay tecnicas requeridas contra
+        las que compararla. Sin un minimo propio, la comparacion de conjuntos
+        la daba por buena —el conjunto vacio es subconjunto de cualquier
+        cosa— y la cotizacion se emitia con mano de obra 0.
+        """
+        await preparar_configuracion(api, admin_csrf)
+        pasta_id, _, _ = await preparar_maestros(api, admin_csrf)
+        customer_id = await cliente(api, admin_csrf, "Cliente linea libre")
+        creada = await api.post(
+            V2,
+            json={"name": "Linea libre sin procesos", "customer_id": customer_id},
+            headers=h(admin_csrf),
+        )
+        qid = int(creada.json()["id"])
+        linea = await api.post(
+            f"{V2}/{qid}/products",
+            json={
+                "product_name": "Pieza libre sin procesos",
+                "quantity": 20,
+                "length_cm": "9",
+                "width_cm": "9",
+                "height_cm": "10",
+                "body_material_id": pasta_id,
+                "body_unit_weight": "450",
+            },
+            headers=h(admin_csrf),
+        )
+        assert linea.status_code == 201, linea.text
+        # Sin un solo proceso: ni catalogo que los imponga, ni definidos aqui.
+        procesos = await api.get(f"{V2}/{qid}/processes")
+        assert procesos.status_code == 200, procesos.text
+        assert procesos.json()["items"] == []
+        plan = await api.put(
+            f"{V2}/{qid}/planning", json={"effective_work_days": 2}, headers=h(admin_csrf)
+        )
+        assert plan.status_code == 200, plan.text
+
+        resumen = await preview(api, qid)
+        assert not resumen["can_confirm"]
+        assert "V2_CONFIRM_LINE_LABOR_REQUIRED" in {b["code"] for b in resumen["blockers"]}
+
+        # Y la barrera no es solo de pantalla: la emision tiene que negarse.
+        emitida = await api.post(
+            f"{V2}/{qid}/confirm",
+            json={"expected_fingerprint": resumen["fingerprint"]},
+            headers=h(admin_csrf),
+        )
+        assert emitida.status_code == 422, emitida.text
+        assert emitida.json()["error"]["code"] == "V2_QUOTATION_INCOMPLETE"
+        assert (await api.get(f"{V2}/{qid}")).json()["status"] == "DRAFT"
+
     async def test_emitida_queda_congelada(self, api: httpx.AsyncClient, admin_csrf: str) -> None:
         datos = await cotizacion_completa(api, admin_csrf)
         qid = datos["id"]

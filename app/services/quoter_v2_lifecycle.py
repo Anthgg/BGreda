@@ -99,6 +99,7 @@ BLOCK_LINE_BODY_MATERIAL = "V2_CONFIRM_LINE_BODY_MATERIAL_REQUIRED"
 BLOCK_LINE_BODY_WEIGHT = "V2_CONFIRM_LINE_BODY_WEIGHT_REQUIRED"
 BLOCK_LINE_PROCESS_REQUIRED = "V2_CONFIRM_LINE_PROCESS_REQUIRED"
 BLOCK_PROCESS_WORKER_REQUIRED = "V2_CONFIRM_PROCESS_WORKER_REQUIRED"
+BLOCK_LINE_LABOR_REQUIRED = "V2_CONFIRM_LINE_LABOR_REQUIRED"
 BLOCK_LINE_PRICE = "V2_CONFIRM_LINE_PRICE_REQUIRED"
 BLOCK_FACTOR_REQUIRED = "V2_CONFIRM_FACTOR_REQUIRED"
 BLOCK_FACTOR_OUT_OF_RANGE = "V2_CONFIRM_FACTOR_OUT_OF_RANGE"
@@ -1124,7 +1125,20 @@ class V2LifecycleService:
         processes_by_line: dict[int, list[V2QuotationProcess]] = {linea.id: [] for linea in lines}
         required_techniques_by_product: dict[int, set[int]] = {}
         labor_by_process: set[int] = set()
+        labor_by_line: set[int] = set()
         if line_ids:
+            labor_by_line = {
+                line_id
+                for line_id in (
+                    await self._session.scalars(
+                        select(V2QuotationLabor.v2_quotation_product_id).where(
+                            V2QuotationLabor.v2_quotation_product_id.in_(line_ids)
+                        )
+                    )
+                ).all()
+                if line_id is not None
+            }
+
             processes = list(
                 (
                     await self._session.scalars(
@@ -1184,11 +1198,26 @@ class V2LifecycleService:
                 else set()
             )
             present_techniques = {process.technique_id for process in processes}
+            # La pieza de CATALOGO trae en su ficha las tecnicas que necesita:
+            # si alguna no esta en la cotizacion, falta trabajo por costear.
             if linea.quantity > 0 and not required_techniques.issubset(present_techniques):
                 bloqueos.append(Blocker(BLOCK_LINE_PROCESS_REQUIRED, linea.id))
-            for process in processes:
-                if process.id not in labor_by_process:
-                    bloqueos.append(Blocker(BLOCK_PROCESS_WORKER_REQUIRED, linea.id))
+            # Un aviso por LINEA, no uno por proceso: a quien lo lee le sirve
+            # saber que pieza esta incompleta, y tres veces el mismo texto solo
+            # ensucia la pantalla.
+            if any(process.id not in labor_by_process for process in processes):
+                bloqueos.append(Blocker(BLOCK_PROCESS_WORKER_REQUIRED, linea.id))
+            # Y el minimo que vale para TODA linea, de catalogo o libre: una
+            # pieza que alguien fabrica tiene mano de obra. Se mira el TRABAJO,
+            # no los procesos, porque una tarea puede colgar de la linea sin
+            # pasar por uno —`v2_quotation_process_id` es NULL en las tareas
+            # anteriores a 010H y en los acuerdos por hora, y asi esta armado
+            # el propio caso del Excel—. Exigir un proceso aqui seria una regla
+            # falsa; exigir que la pieza tenga trabajo es justo lo que A2H-001
+            # encontro roto: la linea libre no tiene ficha contra la que
+            # comparar y se emitia con mano de obra 0.
+            if linea.quantity > 0 and linea.id not in labor_by_line:
+                bloqueos.append(Blocker(BLOCK_LINE_LABOR_REQUIRED, linea.id))
             if linea.quantity > 0 and linea.unit_price <= ZERO:
                 bloqueos.append(Blocker(BLOCK_LINE_PRICE, linea.id))
 

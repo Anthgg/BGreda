@@ -156,6 +156,19 @@ async def test_a2h002_operator_no_gestiona_maestros_v2(
             f"/api/v1/quoter-v2/products/{pieza['id']}/techniques",
             {"technique_ids": [technique["id"]]},
         ),
+        # La pagina de configuracion del Cotizador V2: leerla ya revela las
+        # tarifas del taller, asi que tambien es superficie de administracion.
+        ("GET", "/api/v1/quoter-v2/settings", None),
+        (
+            "PUT",
+            "/api/v1/quoter-v2/settings",
+            {"expected_version": 1, "administrative_cost_per_quotation": "999"},
+        ),
+        (
+            "PUT",
+            f"/api/v1/quoter-v2/settings/kiln-rates/{kiln['id']}/LOW",
+            {"gas_cost": "1", "external_rate": "1"},
+        ),
         ("GET", "/api/v1/quoter-v2/extras", None),
         ("POST", "/api/v1/quoter-v2/extras", {"name": "No pasa", "unit_cost": "1"}),
         (
