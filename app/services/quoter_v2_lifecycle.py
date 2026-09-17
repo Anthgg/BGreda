@@ -56,7 +56,12 @@ from app.models.quoter_v2 import (
     V2QuotationStatus,
 )
 from app.models.quoter_v2_labor import V2QuotationLabor, V2Technique
-from app.models.quoter_v2_processes import V2Extra, V2QuotationExtra, V2QuotationProcess
+from app.models.quoter_v2_processes import (
+    V2Extra,
+    V2ProductTechnique,
+    V2QuotationExtra,
+    V2QuotationProcess,
+)
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.quoter_v2 import CUSTOMER_ROLES, V2_QUOTATION_ENTITY, V2QuotationService
@@ -92,6 +97,8 @@ BLOCK_LINE_PRODUCT = "V2_CONFIRM_LINE_PRODUCT_REQUIRED"
 BLOCK_LINE_QUANTITY = "V2_CONFIRM_LINE_QUANTITY_REQUIRED"
 BLOCK_LINE_BODY_MATERIAL = "V2_CONFIRM_LINE_BODY_MATERIAL_REQUIRED"
 BLOCK_LINE_BODY_WEIGHT = "V2_CONFIRM_LINE_BODY_WEIGHT_REQUIRED"
+BLOCK_LINE_PROCESS_REQUIRED = "V2_CONFIRM_LINE_PROCESS_REQUIRED"
+BLOCK_PROCESS_WORKER_REQUIRED = "V2_CONFIRM_PROCESS_WORKER_REQUIRED"
 BLOCK_LINE_PRICE = "V2_CONFIRM_LINE_PRICE_REQUIRED"
 BLOCK_FACTOR_REQUIRED = "V2_CONFIRM_FACTOR_REQUIRED"
 BLOCK_FACTOR_OUT_OF_RANGE = "V2_CONFIRM_FACTOR_OUT_OF_RANGE"
@@ -1112,6 +1119,55 @@ class V2LifecycleService:
 
         if not lines:
             bloqueos.append(Blocker(BLOCK_NO_LINES))
+
+        line_ids = [linea.id for linea in lines]
+        processes_by_line: dict[int, list[V2QuotationProcess]] = {linea.id: [] for linea in lines}
+        required_techniques_by_product: dict[int, set[int]] = {}
+        labor_by_process: set[int] = set()
+        if line_ids:
+            processes = list(
+                (
+                    await self._session.scalars(
+                        select(V2QuotationProcess).where(
+                            V2QuotationProcess.v2_quotation_product_id.in_(line_ids),
+                            V2QuotationProcess.removed_at.is_(None),
+                        )
+                    )
+                ).all()
+            )
+            for process in processes:
+                processes_by_line.setdefault(process.v2_quotation_product_id, []).append(process)
+
+            process_ids = [process.id for process in processes if process.id is not None]
+            if process_ids:
+                labor_by_process = {
+                    process_id
+                    for process_id in (
+                        await self._session.scalars(
+                            select(V2QuotationLabor.v2_quotation_process_id).where(
+                                V2QuotationLabor.v2_quotation_process_id.in_(process_ids)
+                            )
+                        )
+                    ).all()
+                    if process_id is not None
+                }
+
+            product_ids = {linea.product_id for linea in lines if linea.product_id is not None}
+            if product_ids:
+                required_rows = (
+                    await self._session.execute(
+                        select(V2ProductTechnique.product_id, V2ProductTechnique.technique_id)
+                        .join(V2Technique, V2Technique.id == V2ProductTechnique.technique_id)
+                        .where(
+                            V2ProductTechnique.product_id.in_(product_ids),
+                            V2ProductTechnique.active.is_(True),
+                            V2Technique.active.is_(True),
+                        )
+                    )
+                ).all()
+                for product_id, technique_id in required_rows:
+                    required_techniques_by_product.setdefault(product_id, set()).add(technique_id)
+
         for linea in lines:
             if not linea.product_id and not (linea.product_name_snapshot or "").strip():
                 bloqueos.append(Blocker(BLOCK_LINE_PRODUCT, linea.id))
@@ -1121,6 +1177,18 @@ class V2LifecycleService:
                 bloqueos.append(Blocker(BLOCK_LINE_BODY_MATERIAL, linea.id))
             if linea.body_unit_weight is None or linea.body_unit_weight <= ZERO:
                 bloqueos.append(Blocker(BLOCK_LINE_BODY_WEIGHT, linea.id))
+            processes = processes_by_line.get(linea.id, [])
+            required_techniques = (
+                required_techniques_by_product.get(linea.product_id, set())
+                if linea.product_id is not None
+                else set()
+            )
+            present_techniques = {process.technique_id for process in processes}
+            if linea.quantity > 0 and not required_techniques.issubset(present_techniques):
+                bloqueos.append(Blocker(BLOCK_LINE_PROCESS_REQUIRED, linea.id))
+            for process in processes:
+                if process.id not in labor_by_process:
+                    bloqueos.append(Blocker(BLOCK_PROCESS_WORKER_REQUIRED, linea.id))
             if linea.quantity > 0 and linea.unit_price <= ZERO:
                 bloqueos.append(Blocker(BLOCK_LINE_PRICE, linea.id))
 

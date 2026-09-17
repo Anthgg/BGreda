@@ -24,6 +24,7 @@ from tests.db.test_quoter_v2_excel_smoke import (
     preparar_configuracion,
     preparar_maestros,
 )
+from tests.db.test_quoter_v2_materials_api import crear_producto
 from tests.db.v2_capacidades import habilitar
 
 V2 = "/api/v1/quotations-v2"
@@ -96,17 +97,22 @@ async def cotizacion_completa(
         lineas.append(int(r.json()["id"]))
 
     await habilitar(api, csrf, worker_id, technique_id)
-    tarea = await api.post(
-        f"{V2}/{qid}/labor",
-        json={
-            "v2_quotation_product_id": lineas[0],
-            "worker_id": worker_id,
-            "technique_id": technique_id,
-            "quantity": str(productos[0][1]),
-        },
-        headers=h(csrf),
-    )
-    assert tarea.status_code == 201, tarea.text
+    procesos: list[int] = []
+    for line_id in lineas:
+        proceso = await api.post(
+            f"{V2}/{qid}/processes",
+            json={"v2_quotation_product_id": line_id, "technique_id": technique_id},
+            headers=h(csrf),
+        )
+        assert proceso.status_code == 201, proceso.text
+        process_id = int(proceso.json()["id"])
+        procesos.append(process_id)
+        asignada = await api.post(
+            f"{V2}/{qid}/processes/{process_id}/assign",
+            json={"worker_id": worker_id},
+            headers=h(csrf),
+        )
+        assert asignada.status_code == 200, asignada.text
     plan = await api.put(f"{V2}/{qid}/planning", json={"effective_work_days": 2}, headers=h(csrf))
     assert plan.status_code == 200, plan.text
 
@@ -118,6 +124,7 @@ async def cotizacion_completa(
         "technique_id": technique_id,
         "customer_id": customer_id,
         "lines": lineas,
+        "processes": procesos,
     }
 
 
@@ -226,6 +233,103 @@ class TestEmitir:
         assert r.status_code == 422
         assert r.json()["error"]["code"] == "V2_QUOTATION_INCOMPLETE"
         assert (await api.get(f"{V2}/{qid}")).json()["status"] == "DRAFT"
+
+    async def test_producto_catalogo_con_proceso_requerido_retirado_no_se_emite(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        await preparar_configuracion(api, admin_csrf)
+        pasta_id, _, technique_id = await preparar_maestros(api, admin_csrf)
+        pieza = await crear_producto(
+            api,
+            admin_csrf,
+            "Taza con proceso requerido",
+            product_type="FINISHED_PRODUCT",
+            purchasable=False,
+        )
+        requerida = await api.put(
+            f"/api/v1/quoter-v2/products/{pieza['id']}/techniques",
+            json={"technique_ids": [technique_id]},
+            headers=h(admin_csrf),
+        )
+        assert requerida.status_code == 200, requerida.text
+        customer_id = await cliente(api, admin_csrf, "Cliente proceso requerido")
+        creada = await api.post(
+            V2,
+            json={"name": "Pieza de catalogo incompleta", "customer_id": customer_id},
+            headers=h(admin_csrf),
+        )
+        qid = int(creada.json()["id"])
+        linea = await api.post(
+            f"{V2}/{qid}/products",
+            json={
+                "product_id": pieza["id"],
+                "quantity": 20,
+                "length_cm": "9",
+                "width_cm": "9",
+                "height_cm": "10",
+                "body_material_id": pasta_id,
+                "body_unit_weight": "450",
+            },
+            headers=h(admin_csrf),
+        )
+        assert linea.status_code == 201, linea.text
+        procesos = await api.get(f"{V2}/{qid}/processes")
+        assert procesos.status_code == 200, procesos.text
+        process_id = int(procesos.json()["items"][0]["id"])
+        retirado = await api.delete(f"{V2}/{qid}/processes/{process_id}", headers=h(admin_csrf))
+        assert retirado.status_code == 200, retirado.text
+        plan = await api.put(
+            f"{V2}/{qid}/planning", json={"effective_work_days": 2}, headers=h(admin_csrf)
+        )
+        assert plan.status_code == 200, plan.text
+
+        resumen = await preview(api, qid)
+        assert not resumen["can_confirm"]
+        assert "V2_CONFIRM_LINE_PROCESS_REQUIRED" in {b["code"] for b in resumen["blockers"]}
+
+    async def test_proceso_sin_trabajador_no_se_emite(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        await preparar_configuracion(api, admin_csrf)
+        pasta_id, _, technique_id = await preparar_maestros(api, admin_csrf)
+        customer_id = await cliente(api, admin_csrf, "Cliente trabajador requerido")
+        creada = await api.post(
+            V2,
+            json={"name": "Proceso sin trabajador", "customer_id": customer_id},
+            headers=h(admin_csrf),
+        )
+        qid = int(creada.json()["id"])
+        linea = await api.post(
+            f"{V2}/{qid}/products",
+            json={
+                "product_name": "Taza personalizada",
+                "quantity": 20,
+                "length_cm": "9",
+                "width_cm": "9",
+                "height_cm": "10",
+                "body_material_id": pasta_id,
+                "body_unit_weight": "450",
+            },
+            headers=h(admin_csrf),
+        )
+        assert linea.status_code == 201, linea.text
+        proceso = await api.post(
+            f"{V2}/{qid}/processes",
+            json={
+                "v2_quotation_product_id": int(linea.json()["id"]),
+                "technique_id": technique_id,
+            },
+            headers=h(admin_csrf),
+        )
+        assert proceso.status_code == 201, proceso.text
+        plan = await api.put(
+            f"{V2}/{qid}/planning", json={"effective_work_days": 2}, headers=h(admin_csrf)
+        )
+        assert plan.status_code == 200, plan.text
+
+        resumen = await preview(api, qid)
+        assert not resumen["can_confirm"]
+        assert "V2_CONFIRM_PROCESS_WORKER_REQUIRED" in {b["code"] for b in resumen["blockers"]}
 
     async def test_emitida_queda_congelada(self, api: httpx.AsyncClient, admin_csrf: str) -> None:
         datos = await cotizacion_completa(api, admin_csrf)
