@@ -29,6 +29,8 @@ def _entorno_limpio(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", LOCAL)
     monkeypatch.setenv("E2E_EMAIL", "e2e@example.com")
     monkeypatch.setenv("E2E_PASSWORD", "aleatoria")
+    monkeypatch.setenv("E2E_OPERATOR_EMAIL", "operator@example.com")
+    monkeypatch.setenv("E2E_OPERATOR_PASSWORD", "operador-aleatorio")
     get_settings.cache_clear()
 
 
@@ -94,11 +96,19 @@ class TestLaBaseTieneQueSerLocal:
     def test_acepta_localhost(self, monkeypatch: pytest.MonkeyPatch, url: str) -> None:
         monkeypatch.setenv("DATABASE_URL", url)
         get_settings.cache_clear()
-        assert servidor_revision._comprobar_entorno() == ("e2e@example.com", "aleatoria")
+        assert servidor_revision._comprobar_entorno() == (
+            "e2e@example.com",
+            "aleatoria",
+            "operator@example.com",
+            "operador-aleatorio",
+        )
 
 
 class TestLasCredencialesLlegan:
-    @pytest.mark.parametrize("variable", ["E2E_EMAIL", "E2E_PASSWORD"])
+    @pytest.mark.parametrize(
+        "variable",
+        ["E2E_EMAIL", "E2E_PASSWORD", "E2E_OPERATOR_EMAIL", "E2E_OPERATOR_PASSWORD"],
+    )
     def test_sin_credenciales_no_arranca(
         self, monkeypatch: pytest.MonkeyPatch, variable: str
     ) -> None:
