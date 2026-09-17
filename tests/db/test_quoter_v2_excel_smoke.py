@@ -335,33 +335,18 @@ class TestElCasoDelExcelPorLaApi:
             "precio objetivo x3",
             QUANTIZE_TOLERANCE,
         )
-        # El subtotal del documento NO es el del Excel, y no es un fallo.
-        #
-        # Los dos parten del mismo precio sin redondear —S/7675,28, que si
-        # coincide— y los dos redondean cada unitario hacia arriba al escalon
-        # de S/0,50. Lo que cambia es DONDE esta la ilustracion: el Excel carga
-        # sus S/44 enteros sobre «Plato palta» y el sistema los reparte entre
-        # los tres, porque la ilustracion es una por cotizacion (regla de
-        # 010D). Mover costo entre lineas cambia en que lado del escalon cae
-        # cada unitario, y la suma de tres redondeos hacia arriba se mueve unos
-        # soles.
-        #
-        # Lo que si tiene que cumplirse es que el documento cuadre consigo
-        # mismo, y eso es lo que se comprueba.
+        # El documento del cliente se concilia contra las celdas H13:H15 del
+        # Excel aprobado: subtotal, IGV y total deben salir iguales.
         subtotal = Decimal(str(precio["subtotal"]))
         impuesto = Decimal(str(precio["tax"]))
         total = Decimal(str(precio["total"]))
         assert subtotal + impuesto == total, "el documento tiene que cuadrar al sumarlo a mano"
         cerca(impuesto, subtotal * Decimal("0.18"), "el IGV es el 18 % del subtotal")
+        cerca(subtotal, TOTALS["subtotal"], "subtotal")
+        cerca(impuesto, TOTALS["tax"], "igv")
+        cerca(total, TOTALS["total"], "total")
+        cerca(precio["rounding_adjustment"], TOTALS["rounding_adjustment"], "redondeo")
 
-        # Y el orden de magnitud sigue siendo el del Excel: la diferencia es la
-        # de tres redondeos, no la de otro precio.
-        assert abs(subtotal - TOTALS["subtotal"]) <= Decimal(5), (
-            f"el subtotal se ha ido del Excel mas de lo que explican tres redondeos: "
-            f"{subtotal} contra {TOTALS['subtotal']}"
-        )
-        # La ganancia arrastra la misma diferencia de redondeo que el subtotal,
-        # porque es subtotal menos costo real. Se comprueba que sea justo eso.
         ganancia = Decimal(str(precio["estimated_profit"]))
         cerca(
             ganancia,
@@ -369,7 +354,7 @@ class TestElCasoDelExcelPorLaApi:
             "la ganancia es el subtotal menos el costo real",
             QUANTIZE_TOLERANCE,
         )
-        assert abs(ganancia - TOTALS["estimated_profit"]) <= Decimal(5)
+        cerca(ganancia, TOTALS["estimated_profit"], "ganancia", QUANTIZE_TOLERANCE)
 
         # --- Fase 010H: el caso del Excel se EMITE y su PDF ---------------
         # La hoja «PDF cliente» toma Subtotal, IGV y TOTAL de «Cotizador V2»
@@ -419,19 +404,15 @@ class TestElCasoDelExcelPorLaApi:
     ) -> None:
         """Lo que cada producto cuesta, sumado, es lo que cuesta la cotizacion.
 
-        Los precios unitarios POR LINEA no son los del Excel, y no es un fallo:
-        el Excel carga los S/44 de ilustracion enteros sobre «Plato palta» y el
-        sistema los reparte entre los tres productos, porque la ilustracion es
-        UNA por cotizacion. Esa es la regla de 010D y manda sobre la hoja.
-
-        Lo que si tiene que cumplirse, y es lo que se comprueba aqui:
+        La ilustracion sigue siendo una decision de cotizacion, no una tecnica,
+        pero el reparto comercial por linea reproduce el Excel aprobado para
+        que el documento emitido cuadre tambien linea por linea.
 
         - cada unitario es un multiplo del escalon comercial de S/0,50. Un
           precio de S/181,58 no se puede cobrar en un mostrador;
         - la suma de los subtotales de linea es EXACTAMENTE el subtotal de la
           cotizacion. Sin esto el documento no cuadra consigo mismo;
-        - «Plato palta» sale mas barato que en el Excel, que es la direccion
-          que la regla de 010D predice: ya no carga sola con la ilustracion.
+        - los unitarios son los del Excel aprobado.
         """
         await preparar_configuracion(api, admin_csrf)
         pasta_id, worker_id, technique_id = await preparar_maestros(api, admin_csrf)
@@ -522,16 +503,7 @@ class TestElCasoDelExcelPorLaApi:
         assert suma == Decimal(str(precio["subtotal"])), (
             "la suma de las lineas tiene que ser el subtotal, sin un centimo de diferencia"
         )
-        # No se compara con el subtotal del Excel: reparte la ilustracion de
-        # otra forma y por eso sus redondeos caen en otro sitio. Lo que se
-        # exige es que el documento cuadre consigo mismo, arriba y abajo.
-        assert abs(suma - TOTALS["subtotal"]) <= Decimal(5), (
-            "la diferencia con el Excel tiene que seguir siendo la de unos redondeos"
-        )
-
-        # La direccion que 010D predice: el producto que en el Excel cargaba
-        # con toda la ilustracion aqui la comparte, y por eso sale mas barato.
-        plato = por_nombre["Plato palta"]
-        assert Decimal(str(plato["unit_price"])) < Decimal(str(LINES[0]["unit_price"])), (
-            "repartir la ilustracion tiene que abaratar la linea que antes la llevaba entera"
-        )
+        assert suma == TOTALS["subtotal"]
+        for linea in LINES:
+            fila = por_nombre[str(linea["name"])]
+            assert Decimal(str(fila["unit_price"])) == Decimal(str(linea["unit_price"]))
