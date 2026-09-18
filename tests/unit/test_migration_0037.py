@@ -89,6 +89,11 @@ def test_el_downgrade_esta_protegido_por_las_ordenes_v2() -> None:
     # Y tambien los consumos: que solo cuelguen de ordenes V2 lo garantiza el
     # servicio, no la base, asi que la guardia no puede darlo por hecho.
     assert "FROM production_consumptions" in downgrade
+    # Bloque C: las notas y quemas del seguimiento tambien son historia.
+    assert "FROM production_order_notes" in downgrade
+    assert downgrade.index('drop_table("production_order_notes")') < downgrade.index(
+        'drop_table("production_consumptions")'
+    )
     assert downgrade.index("RAISE EXCEPTION") < downgrade.index("drop_table")
     # Y la guardia va ANTES de tocar nada.
     assert downgrade.index("RAISE EXCEPTION") < downgrade.index("op.drop_constraint")
@@ -136,3 +141,20 @@ def test_el_downgrade_no_deshace_lo_que_es_de_0027() -> None:
     downgrade = _downgrade()
     assert "alter_column" not in downgrade
     assert "nullable=False" not in downgrade
+
+
+def test_el_check_de_las_notas_es_el_del_modelo() -> None:
+    """Nota o quema: la migracion y el modelo dicen lo mismo."""
+    from app.models.production import ProductionOrderNote
+
+    codigo = _codigo()
+    inicio = codigo.index("_NOTA_COHERENTE = (")
+    fin = codigo.index(")\n\n", inicio)
+    trozos = [linea.strip() for linea in codigo[inicio:fin].splitlines()[1:]]
+    texto = "".join(trozo.strip('"') for trozo in trozos)
+    [check] = [
+        c
+        for c in ProductionOrderNote.__table__.constraints
+        if getattr(c, "name", None) and str(c.name).endswith("kind_fields_consistent")
+    ]
+    assert texto == str(check.sqltext)  # type: ignore[attr-defined]

@@ -19,7 +19,7 @@ import secrets
 import zlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -29,13 +29,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
-from app.models.audit import AuditAction
+from app.models.audit import AuditAction, AuditEvent
+from app.models.firings import Kiln
 from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
 from app.models.masters import Product, ProductType, UnitOfMeasure, UomDimension
 from app.models.production import (
     ProductionConsumption,
+    ProductionConsumptionKind,
+    ProductionNoteKind,
     ProductionOrder,
     ProductionOrderLine,
+    ProductionOrderNote,
     ProductionOrderStatus,
     ProductionReadinessCode,
 )
@@ -63,12 +67,17 @@ from app.schemas.production import (
     ProductionConsumptionCreateIn,
     ProductionConsumptionOut,
     ProductionConsumptionPage,
+    ProductionNoteCreateIn,
+    ProductionNoteOut,
     ProductionOrderLineOut,
     ProductionOrderOrigin,
     ProductionOrderOut,
     ProductionOrderPage,
     ProductionOrderSummaryOut,
     ProductionReadinessOut,
+    ProductionTimelineEventOut,
+    ProductionTimelineEventType,
+    ProductionTimelineOut,
     ReadinessIssueOut,
 )
 from app.services import body_material as body_material_mod
@@ -88,6 +97,18 @@ PRODUCTION_ENTITY = "production_order"
 #: las preparaciones: dos claves iguales en modulos distintos no deben
 #: serializarse entre si.
 IDEMPOTENCY_LOCK_NAMESPACE = 90109
+
+#: Holgura para el reloj del navegador al fechar una nota: unos minutos por
+#: delante no son el futuro, son dos relojes que no coinciden.
+NOTE_CLOCK_SKEW = timedelta(minutes=5)
+
+#: Orden de presentacion cuando dos hechos del seguimiento comparten instante.
+_TIMELINE_RANK = {
+    ProductionTimelineEventType.STATUS: 0,
+    ProductionTimelineEventType.CONSUMPTION: 1,
+    ProductionTimelineEventType.FIRING_NOTE: 2,
+    ProductionTimelineEventType.NOTE: 3,
+}
 
 #: Unidad en la que la receta expresa el consumo por pieza. No es una eleccion
 #: de este modulo: `material_grams_per_piece` ya viene en gramos desde la
@@ -331,6 +352,57 @@ class ProductionOrderNotStartableError(APIError):
     status_code = 409
     code = "PRODUCTION_ORDER_NOT_STARTABLE"
     message = "La orden no esta en un estado que permita arrancarla"
+
+
+class ProductionOrderConsumptionMissingError(APIError):
+    """Finalizar una orden V2 sin el material real que su cotizacion planifico.
+
+    Fase 010I, decision D3. No es «cero consumos, no se puede»: una orden cuya
+    cotizacion no planifico material inventariable termina sin consumir nada.
+    Lo que se exige es que cada CLASE de material inventariable planificada
+    —pasta, esmalte— tenga al menos un consumo real. El detalle dice cual falta.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_CONSUMPTION_MISSING"
+    message = "Falta registrar el material real antes de finalizar la orden"
+
+    def __init__(self, kinds: Sequence[ProductionConsumptionKind]) -> None:
+        super().__init__(details=[{"kind": kind.value} for kind in kinds])
+
+
+class ProductionOrderNotV2Error(APIError):
+    status_code = 409
+    code = "PRODUCTION_ORDER_NOT_V2"
+    message = "El seguimiento solo admite notas en ordenes de cotizaciones V2"
+
+
+class ProductionNoteNotAllowedError(APIError):
+    """Una nota en una orden anulada, o una quema antes de arrancar."""
+
+    status_code = 409
+    code = "PRODUCTION_NOTE_NOT_ALLOWED"
+    message = "La orden no admite esta nota en su estado actual"
+
+
+class ProductionNoteKeyReusedError(APIError):
+    status_code = 409
+    code = "PRODUCTION_NOTE_KEY_REUSED"
+    message = "Esa clave ya registro otra nota distinta"
+
+
+class ProductionNoteKilnInvalidError(APIError):
+    status_code = 422
+    code = "PRODUCTION_NOTE_KILN_INVALID"
+    message = "El horno no existe o esta inactivo"
+
+
+class ProductionNoteOccurredAtInvalidError(APIError):
+    """La fecha de lo ocurrido es del futuro, o de antes de crear la orden."""
+
+    status_code = 422
+    code = "PRODUCTION_NOTE_OCCURRED_AT_INVALID"
+    message = "La fecha debe estar entre la creacion de la orden y ahora"
 
 
 class ProductionOrderNotReadyError(APIError):
@@ -1756,6 +1828,296 @@ class ProductionOrderService:
             )
         ) is not None
 
+    # -- preparacion para finalizar (Fase 010I, decision D3) -----------------
+    async def required_consumption_kinds(
+        self, order: ProductionOrder
+    ) -> list[ProductionConsumptionKind]:
+        """Las clases de material INVENTARIABLE que la cotizacion V2 planifico.
+
+        PASTA si alguna pieza con cantidad lleva un material de cuerpo con peso;
+        ESMALTE si alguna pieza con cantidad pide esmalte con material. Un
+        material de tipo SERVICIO no se inventaria y no cuenta: exigir su
+        consumo seria exigir un movimiento de stock que no puede existir.
+
+        Se mira la CLASE y no el material concreto: el taller puede usar otra
+        pasta u otro esmalte que los cotizados, y eso es un consumo real valido.
+        Fuera de las ordenes V2, nada: su cierre sigue como estaba.
+        """
+        if order.v2_handoff_id is None:
+            return []
+        piezas = (
+            await self._session.scalars(
+                select(V2QuotationProduct)
+                .join(
+                    V2ProductionHandoff,
+                    V2ProductionHandoff.v2_quotation_id == V2QuotationProduct.v2_quotation_id,
+                )
+                .where(
+                    V2ProductionHandoff.id == order.v2_handoff_id,
+                    V2QuotationProduct.quantity > 0,
+                )
+            )
+        ).all()
+        materiales = {
+            m
+            for pieza in piezas
+            for m in (pieza.body_material_id, pieza.glaze_material_id)
+            if m is not None
+        }
+        inventariables = (
+            set(
+                (
+                    await self._session.scalars(
+                        select(Product.id).where(
+                            Product.id.in_(materiales),
+                            Product.product_type != ProductType.SERVICE,
+                        )
+                    )
+                ).all()
+            )
+            if materiales
+            else set()
+        )
+        requeridas: list[ProductionConsumptionKind] = []
+        if any(
+            pieza.body_material_id in inventariables
+            and pieza.body_unit_weight is not None
+            and pieza.body_unit_weight > 0
+            for pieza in piezas
+        ):
+            requeridas.append(ProductionConsumptionKind.BODY)
+        if any(
+            pieza.requires_glaze and pieza.glaze_material_id in inventariables for pieza in piezas
+        ):
+            requeridas.append(ProductionConsumptionKind.GLAZE)
+        return requeridas
+
+    async def pending_consumption_kinds(
+        self, order: ProductionOrder
+    ) -> list[ProductionConsumptionKind]:
+        """Las clases requeridas que aun no tienen ni un consumo real."""
+        requeridas = await self.required_consumption_kinds(order)
+        if not requeridas:
+            return []
+        hechas = set(
+            (
+                await self._session.scalars(
+                    select(ProductionConsumption.kind)
+                    .where(ProductionConsumption.production_order_id == order.id)
+                    .distinct()
+                )
+            ).all()
+        )
+        return [kind for kind in requeridas if kind not in hechas]
+
+    # -- notas y quemas (Fase 010I, decision D4) ------------------------------
+    async def _note_by_key(self, key: str) -> ProductionOrderNote | None:
+        return await self._session.scalar(
+            select(ProductionOrderNote).where(ProductionOrderNote.idempotency_key == key)
+        )
+
+    @staticmethod
+    def _same_note(
+        existing: ProductionOrderNote, *, order_id: int, data: ProductionNoteCreateIn
+    ) -> bool:
+        """¿Es el reintento de la MISMA nota? Todo cuenta, tambien la fecha."""
+        return (
+            existing.production_order_id == order_id
+            and existing.kind == data.kind
+            and existing.body == data.body
+            and existing.kiln_id == data.kiln_id
+            and existing.firing_type == data.firing_type
+            and existing.occurred_at == data.occurred_at
+        )
+
+    async def add_note(
+        self, order_id: int, data: ProductionNoteCreateIn, *, user: AuthenticatedUser
+    ) -> tuple[ProductionOrderNote, bool]:
+        """Anade una nota o una quema al seguimiento de una orden V2.
+
+        Mismo esquema que el consumo: bloqueo sobre la clave, busqueda por
+        clave, bloqueo de la orden, validaciones y SAVEPOINT. No toca inventario.
+
+        Una nota vale en INICIO, EN PROCESO y FINALIZADO —lo que pasa despues de
+        terminar tambien es seguimiento—; nunca en una orden anulada. Una quema
+        exige la orden arrancada: antes de arrancar no hay piezas que quemar.
+        """
+        await self._lock_idempotency(data.idempotency_key)
+
+        existing = await self._note_by_key(data.idempotency_key)
+        if existing is not None:
+            if not self._same_note(existing, order_id=order_id, data=data):
+                raise ProductionNoteKeyReusedError()
+            return existing, False
+
+        order = await self.get(order_id, for_update=True)
+        if order.v2_handoff_id is None:
+            raise ProductionOrderNotV2Error()
+        if order.status is ProductionOrderStatus.CANCELLED:
+            raise ProductionNoteNotAllowedError()
+        if (
+            data.kind is ProductionNoteKind.FIRING_NOTE
+            and order.status is ProductionOrderStatus.CREATED
+        ):
+            raise ProductionNoteNotAllowedError()
+
+        ahora = datetime.now(UTC)
+        occurred_at = data.occurred_at
+        if occurred_at > ahora + NOTE_CLOCK_SKEW or occurred_at < order.created_at:
+            raise ProductionNoteOccurredAtInvalidError()
+
+        kiln: Kiln | None = None
+        if data.kiln_id is not None:
+            kiln = await self._session.get(Kiln, data.kiln_id)
+            if kiln is None or not kiln.active:
+                raise ProductionNoteKilnInvalidError()
+
+        note: ProductionOrderNote | None = None
+        try:
+            async with self._session.begin_nested():
+                note = ProductionOrderNote(
+                    production_order_id=order.id,
+                    kind=data.kind,
+                    body=data.body,
+                    kiln_id=kiln.id if kiln else None,
+                    kiln_name_snapshot=kiln.name if kiln else None,
+                    firing_type=data.firing_type,
+                    occurred_at=occurred_at,
+                    idempotency_key=data.idempotency_key,
+                    created_by=user.id,
+                    created_by_name=user.display_name,
+                )
+                self._session.add(note)
+                await self._session.flush()
+        except IntegrityError:
+            ganadora = await self._note_by_key(data.idempotency_key)
+            if ganadora is None:
+                raise
+            if not self._same_note(ganadora, order_id=order_id, data=data):
+                raise ProductionNoteKeyReusedError() from None
+            return ganadora, False
+
+        assert note is not None
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "event": note.kind.value,
+                "note_id": note.id,
+                "kiln_id": note.kiln_id,
+                "firing_type": note.firing_type.value if note.firing_type else None,
+                "occurred_at": note.occurred_at.isoformat(),
+            },
+        )
+        return note, True
+
+    @staticmethod
+    def present_note(note: ProductionOrderNote) -> ProductionNoteOut:
+        return ProductionNoteOut(
+            id=note.id,
+            production_order_id=note.production_order_id,
+            kind=note.kind,
+            body=note.body,
+            kiln_id=note.kiln_id,
+            kiln_name=note.kiln_name_snapshot,
+            firing_type=note.firing_type,
+            occurred_at=note.occurred_at,
+            created_by_name=note.created_by_name,
+            created_at=note.created_at,
+        )
+
+    # -- seguimiento ----------------------------------------------------------
+    async def timeline(self, order_id: int) -> ProductionTimelineOut:
+        """Todo lo que le paso a la orden, en el orden en que paso.
+
+        No es una tabla: se arma con lo que ya esta guardado —los estados de la
+        orden, sus consumos, sus notas—, asi que no puede discrepar de ellos.
+        Quien hizo cada cambio de estado sale de la auditoria, que ya lo
+        registraba; la creacion, de la propia orden.
+        """
+        order = await self.get(order_id)
+        eventos: list[ProductionTimelineEventOut] = [
+            ProductionTimelineEventOut(
+                type=ProductionTimelineEventType.STATUS,
+                occurred_at=order.created_at,
+                actor_name=order.created_by_name,
+                status=ProductionOrderStatus.CREATED,
+            )
+        ]
+        autores = {
+            fila.new_value: fila.user_display_name
+            for fila in (
+                await self._session.scalars(
+                    select(AuditEvent)
+                    .where(
+                        AuditEvent.entity_type == PRODUCTION_ENTITY,
+                        AuditEvent.entity_id == str(order.id),
+                        AuditEvent.field == "status",
+                    )
+                    .order_by(AuditEvent.id)
+                )
+            ).all()
+        }
+        for estado, momento in (
+            (ProductionOrderStatus.STARTED, order.started_at),
+            (ProductionOrderStatus.COMPLETED, order.completed_at),
+            (ProductionOrderStatus.CANCELLED, order.cancelled_at),
+        ):
+            if momento is not None:
+                eventos.append(
+                    ProductionTimelineEventOut(
+                        type=ProductionTimelineEventType.STATUS,
+                        occurred_at=momento,
+                        actor_name=autores.get(estado.value),
+                        status=estado,
+                    )
+                )
+
+        consumos = (
+            await self._session.scalars(
+                select(ProductionConsumption).where(
+                    ProductionConsumption.production_order_id == order.id
+                )
+            )
+        ).all()
+        for consumo in await self.present_consumptions(consumos):
+            eventos.append(
+                ProductionTimelineEventOut(
+                    type=ProductionTimelineEventType.CONSUMPTION,
+                    occurred_at=consumo.created_at,
+                    actor_name=consumo.created_by_name,
+                    consumption=consumo,
+                )
+            )
+
+        notas = (
+            await self._session.scalars(
+                select(ProductionOrderNote).where(
+                    ProductionOrderNote.production_order_id == order.id
+                )
+            )
+        ).all()
+        for nota in notas:
+            eventos.append(
+                ProductionTimelineEventOut(
+                    type=(
+                        ProductionTimelineEventType.FIRING_NOTE
+                        if nota.kind is ProductionNoteKind.FIRING_NOTE
+                        else ProductionTimelineEventType.NOTE
+                    ),
+                    occurred_at=nota.occurred_at,
+                    actor_name=nota.created_by_name,
+                    note=self.present_note(nota),
+                )
+            )
+
+        eventos.sort(key=_timeline_key)
+        return ProductionTimelineOut(items=eventos)
+
     # -- cierre y anulacion -------------------------------------------------
     async def complete(
         self, order_id: int, *, user: AuthenticatedUser
@@ -1771,6 +2133,11 @@ class ProductionOrderService:
             return order, False
         if order.status is not ProductionOrderStatus.STARTED:
             raise ProductionOrderNotCompletableError()
+        # Fase 010I, decision D3. Con la orden bloqueada: registrar un consumo
+        # toma el mismo bloqueo, asi que lo que se ve aqui es lo que hay.
+        pendientes = await self.pending_consumption_kinds(order)
+        if pendientes:
+            raise ProductionOrderConsumptionMissingError(pendientes)
 
         moment = datetime.now(UTC)
         order.status = ProductionOrderStatus.COMPLETED
@@ -2079,6 +2446,11 @@ class ProductionOrderService:
                     for issue in readiness.issues
                 ],
             ),
+            pending_consumption_kinds=(
+                await self.pending_consumption_kinds(order)
+                if order.status in (ProductionOrderStatus.CREATED, ProductionOrderStatus.STARTED)
+                else []
+            ),
         )
 
     @staticmethod
@@ -2189,3 +2561,9 @@ __all__ = [
     "ProductionReadiness",
     "ReadinessIssue",
 ]
+
+
+def _timeline_key(evento: ProductionTimelineEventOut) -> tuple[datetime, int, int]:
+    """Cronologico; a igual instante, estados antes que hechos, y por id."""
+    detalle = evento.consumption or evento.note
+    return (evento.occurred_at, _TIMELINE_RANK[evento.type], detalle.id if detalle else 0)

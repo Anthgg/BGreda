@@ -15,6 +15,7 @@ Lo aditivo:
 
     production_orders.v2_handoff_id   FK a v2_production_handoffs, anulable, UNICA
     production_consumptions           el material REAL gastado en una orden V2
+    production_order_notes            notas y QUEMAS reales del seguimiento (D4)
 
 El consumo es un registro explicito por cada salida de material, y no la receta
 entera descontada al arrancar como en una orden Legacy: en el taller lo cotizado
@@ -23,6 +24,10 @@ el inventario tiene que reflejar lo que de verdad salio. Cada consumo es
 exactamente un movimiento `PRODUCTION_OUT` (UNIQUE sobre el movimiento) y lleva
 una clave de idempotencia obligatoria y UNICA: el doble clic y el reintento de
 red no pueden descontar dos veces.
+
+La quema real (decision D4) es una nota estructurada —horno, tipo, cuando—
+y no una tabla de quemas por orden: una hornada lleva piezas de varias ordenes,
+asi que la quema pertenece al horno y la orden solo deja constancia de ella.
 
 Cuelga del PUENTE y no de la cotizacion: la clave foranea impide que exista
 una orden V2 que no haya pasado por «Enviar a produccion», asi que no nace un
@@ -86,6 +91,15 @@ _ORIGEN_TRES_RAMAS = (
     "(quotation_id IS NOT NULL AND prototype_id IS NULL AND v2_handoff_id IS NULL)"
     " OR (quotation_id IS NULL AND prototype_id IS NOT NULL AND v2_handoff_id IS NULL)"
     " OR (quotation_id IS NULL AND prototype_id IS NULL AND v2_handoff_id IS NOT NULL)"
+)
+
+
+#: Una nota dice algo; una quema dice donde y de que tipo. Identico al modelo.
+_NOTA_COHERENTE = (
+    "(kind = 'NOTE' AND body IS NOT NULL AND length(btrim(body)) > 0"
+    " AND kiln_id IS NULL AND kiln_name_snapshot IS NULL AND firing_type IS NULL)"
+    " OR (kind = 'FIRING_NOTE' AND kiln_id IS NOT NULL"
+    " AND kiln_name_snapshot IS NOT NULL AND firing_type IS NOT NULL)"
 )
 
 
@@ -175,6 +189,49 @@ def upgrade() -> None:
         "ix_production_consumptions_product_id", "production_consumptions", ["product_id"]
     )
 
+    # Bloque C. Notas y quemas en el seguimiento de la orden (decision D4). La
+    # quema es una nota estructurada y no una tabla de quemas por orden: una
+    # hornada lleva piezas de varias ordenes.
+    op.create_table(
+        "production_order_notes",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("production_order_id", sa.Integer(), nullable=False),
+        sa.Column("kind", sa.String(length=16), nullable=False),
+        sa.Column("body", sa.Text(), nullable=True),
+        sa.Column("kiln_id", sa.Integer(), nullable=True),
+        sa.Column("kiln_name_snapshot", sa.String(length=120), nullable=True),
+        sa.Column("firing_type", sa.String(length=8), nullable=True),
+        sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=64), nullable=False),
+        sa.Column("created_by", sa.Uuid(), nullable=True),
+        sa.Column("created_by_name", sa.String(length=120), nullable=True),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["production_order_id"], ["production_orders.id"], ondelete="RESTRICT"
+        ),
+        sa.ForeignKeyConstraint(["kiln_id"], ["kilns.id"], ondelete="RESTRICT"),
+        sa.CheckConstraint("kind IN ('NOTE', 'FIRING_NOTE')", name="kind_allowed"),
+        sa.CheckConstraint(
+            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')", name="firing_type_allowed"
+        ),
+        sa.CheckConstraint(_NOTA_COHERENTE, name="kind_fields_consistent"),
+        sa.CheckConstraint("body IS NULL OR length(body) <= 2000", name="body_length"),
+        sa.CheckConstraint(
+            "length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"
+        ),
+        sa.UniqueConstraint("idempotency_key", name="uq_production_order_notes_idempotency_key"),
+    )
+    op.create_index(
+        "ix_production_order_notes_production_order_id",
+        "production_order_notes",
+        ["production_order_id"],
+    )
+
 
 def downgrade() -> None:
     # Bajar solo es posible si no hay ordenes V2. Si las hay, el CHECK de dos
@@ -188,6 +245,7 @@ def downgrade() -> None:
             DECLARE
                 pendientes integer;
                 consumos integer;
+                notas integer;
             BEGIN
                 SELECT count(*) INTO pendientes
                 FROM production_orders
@@ -196,21 +254,25 @@ def downgrade() -> None:
                 SELECT count(*) INTO consumos
                 FROM production_consumptions;
 
-                IF pendientes > 0 OR consumos > 0 THEN
+                SELECT count(*) INTO notas
+                FROM production_order_notes;
+
+                IF pendientes > 0 OR consumos > 0 OR notas > 0 THEN
                     RAISE EXCEPTION
                         '0037 downgrade bloqueado: % orden(es) de produccion nacieron de una '
-                        'cotizacion V2 y hay % consumo(s) real(es) registrado(s). Volver a '
-                        '0036 dejaria ordenes sin origen valido y borraria material gastado '
-                        'que el inventario si refleja. Decide que hacer antes de bajar.',
-                        pendientes, consumos;
+                        'cotizacion V2, hay % consumo(s) real(es) y % nota(s) de seguimiento. '
+                        'Volver a 0036 dejaria ordenes sin origen valido y borraria material '
+                        'gastado que el inventario si refleja. Decide que hacer antes de bajar.',
+                        pendientes, consumos, notas;
                 END IF;
             END $$;
             """
         )
     )
 
-    # La guardia ya exigio que no haya ni un consumo. Se suelta primero porque
-    # apunta a la orden.
+    # La guardia ya exigio que no haya ni un consumo ni una nota. Se sueltan
+    # primero porque apuntan a la orden.
+    op.drop_table("production_order_notes")
     op.drop_table("production_consumptions")
 
     op.drop_constraint(_CK_ORIGEN, "production_orders", type_="check")

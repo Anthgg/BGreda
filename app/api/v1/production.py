@@ -31,9 +31,12 @@ from app.schemas.production import (
     ProductionConsumptionCreateIn,
     ProductionConsumptionOut,
     ProductionConsumptionPage,
+    ProductionNoteCreateIn,
+    ProductionNoteOut,
     ProductionOrderCreateIn,
     ProductionOrderOut,
     ProductionOrderPage,
+    ProductionTimelineOut,
 )
 
 router = APIRouter(prefix="/production-orders", tags=["produccion"])
@@ -208,7 +211,13 @@ async def complete_production_order(
     actor: WorkshopUserDep,
     session: DbSessionDep,
 ) -> ProductionOrderOut:
-    """Cierra la orden. NO da de alta producto terminado ni crea una quema."""
+    """Cierra la orden. NO da de alta producto terminado ni crea una quema.
+
+    Fase 010I, decision D3: una orden V2 cuya cotizacion planifico material
+    inventariable —pasta, esmalte— necesita al menos un consumo real de cada
+    clase antes de cerrar (`PRODUCTION_ORDER_CONSUMPTION_MISSING`, con la clase
+    que falta en el detalle). Si no planifico ninguno, cierra sin consumos.
+    """
     order, _changed = await service.complete(order_id, user=actor)
     result = await service.present(order)
     await session.commit()
@@ -276,3 +285,40 @@ async def record_production_consumption(
     if not created:
         response.status_code = status.HTTP_200_OK
     return result
+
+
+@router.post(
+    "/{order_id}/notes",
+    response_model=ProductionNoteOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_production_note(
+    order_id: int,
+    payload: ProductionNoteCreateIn,
+    service: ProductionOrderServiceDep,
+    actor: WorkshopUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> ProductionNoteOut:
+    """Anade una nota o una QUEMA real al seguimiento de una orden V2.
+
+    Fase 010I, decision D4. La quema es una nota estructurada —horno, tipo y
+    cuando ocurrio— porque una hornada lleva piezas de varias ordenes. No
+    mueve inventario. Mismo reintento que el consumo: 200 si la clave ya existia.
+    """
+    note, created = await service.add_note(order_id, payload, user=actor)
+    result = service.present_note(note)
+    await session.commit()
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return result
+
+
+@router.get("/{order_id}/timeline", response_model=ProductionTimelineOut)
+async def get_production_timeline(
+    order_id: int,
+    service: ProductionOrderServiceDep,
+    _: CurrentUserDep,
+) -> ProductionTimelineOut:
+    """El seguimiento de la orden: estados, consumos, notas y quemas, en orden."""
+    return await service.timeline(order_id)

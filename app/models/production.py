@@ -48,6 +48,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.precision import quantity_numeric, stock_quantity_numeric, unit_cost_numeric
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
+from app.models.firings import FiringType
 
 #: Longitud de la columna del token opaco del QR. `secrets.token_urlsafe(32)`
 #: rinde 43 caracteres; se deja holgura por si la generacion cambia.
@@ -417,5 +418,67 @@ class ProductionConsumption(Base, TimestampMixin):
             "unit_cost_snapshot IS NULL OR unit_cost_snapshot >= 0",
             name="unit_cost_non_negative",
         ),
+        CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
+    )
+
+
+class ProductionNoteKind(StrEnum):
+    """Que clase de nota se deja en la orden. Fase 010I, decision D4.
+
+    NOTE es texto libre del taller. FIRING_NOTE es la QUEMA real: en que horno,
+    de que tipo y cuando. Es una nota y no una tabla de quemas por orden porque
+    una hornada lleva piezas de varias ordenes; la quema pertenece al horno, y
+    la orden solo deja constancia de que sus piezas pasaron por ella.
+    """
+
+    NOTE = "NOTE"
+    FIRING_NOTE = "FIRING_NOTE"
+
+
+class ProductionOrderNote(Base, TimestampMixin):
+    """Una nota o una quema en el seguimiento de la orden. Fase 010I.
+
+    Solo se anade: no se edita ni se borra. El seguimiento es el historial de
+    lo que paso, y una nota que cambia despues ya no es historial.
+    """
+
+    __tablename__ = "production_order_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    production_order_id: Mapped[int] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kind: Mapped[ProductionNoteKind] = mapped_column(
+        StrEnumType(ProductionNoteKind, 16), nullable=False
+    )
+    body: Mapped[str | None] = mapped_column(Text)
+    #: Solo en FIRING_NOTE. El nombre se copia: un horno renombrado despues no
+    #: debe reescribir en que horno se quemo.
+    kiln_id: Mapped[int | None] = mapped_column(ForeignKey("kilns.id", ondelete="RESTRICT"))
+    kiln_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    firing_type: Mapped[FiringType | None] = mapped_column(StrEnumType(FiringType, 8))
+    #: Cuando OCURRIO, que no es cuando se anoto: la quema se apunta a menudo al
+    #: dia siguiente, al abrir el horno.
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    created_by_name: Mapped[str | None] = mapped_column(String(120))
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('NOTE', 'FIRING_NOTE')", name="kind_allowed"),
+        CheckConstraint(
+            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')", name="firing_type_allowed"
+        ),
+        # Una nota dice algo; una quema dice donde y de que tipo. Ninguna de las
+        # dos se hace pasar por la otra.
+        CheckConstraint(
+            "(kind = 'NOTE' AND body IS NOT NULL AND length(btrim(body)) > 0"
+            " AND kiln_id IS NULL AND kiln_name_snapshot IS NULL AND firing_type IS NULL)"
+            " OR (kind = 'FIRING_NOTE' AND kiln_id IS NOT NULL"
+            " AND kiln_name_snapshot IS NOT NULL AND firing_type IS NOT NULL)",
+            name="kind_fields_consistent",
+        ),
+        CheckConstraint("body IS NULL OR length(body) <= 2000", name="body_length"),
         CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
     )

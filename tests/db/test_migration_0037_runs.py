@@ -399,6 +399,35 @@ async def test_los_check_del_consumo_no_llevan_doble_prefijo(
     assert not [n for n in nombres if n.startswith(doble)], sorted(nombres)
 
 
+async def test_los_check_de_las_notas_no_llevan_doble_prefijo(
+    migration_engine: AsyncEngine,
+) -> None:
+    """Bloque C: la tabla de notas y quemas, con la misma comprobacion."""
+    _upgrade("0037")
+    async with migration_engine.connect() as connection:
+        nombres = set(
+            (
+                await connection.scalars(
+                    text(
+                        "SELECT conname FROM pg_constraint"
+                        " WHERE conrelid = 'production_order_notes'::regclass"
+                    )
+                )
+            ).all()
+        )
+    for esperado in (
+        "ck_production_order_notes_kind_allowed",
+        "ck_production_order_notes_firing_type_allowed",
+        "ck_production_order_notes_kind_fields_consistent",
+        "ck_production_order_notes_body_length",
+        "ck_production_order_notes_idempotency_key_long_enough",
+        "uq_production_order_notes_idempotency_key",
+        "pk_production_order_notes",
+    ):
+        assert esperado in nombres, (esperado, sorted(nombres))
+    assert not [n for n in nombres if n.startswith("ck_production_order_notes_ck_")]
+
+
 async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0037(
     migration_engine: AsyncEngine,
 ) -> None:

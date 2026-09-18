@@ -14,8 +14,10 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.models.firings import FiringType
 from app.models.production import (
     ProductionConsumptionKind,
+    ProductionNoteKind,
     ProductionOrderStatus,
     ProductionReadinessCode,
 )
@@ -169,6 +171,12 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     quotation_payment_status: QuotationPaymentStatus | None
     lines: list[ProductionOrderLineOut]
     readiness: ProductionReadinessOut
+    #: Fase 010I, decision D3. Las clases de material que la cotizacion V2 de
+    #: esta orden planifico como inventariables y que aun no tienen ningun
+    #: consumo real. Mientras no este vacia, la orden no puede FINALIZAR. Viaja
+    #: para que la pantalla diga que falta; quien decide es `complete`.
+    #: Siempre vacia fuera de las ordenes V2.
+    pending_consumption_kinds: list[ProductionConsumptionKind] = Field(default_factory=list)
 
 
 class ProductionOrderPage(BaseModel):
@@ -233,3 +241,78 @@ class ProductionConsumptionOut(BaseModel):
 class ProductionConsumptionPage(BaseModel):
     items: list[ProductionConsumptionOut]
     total: int
+
+
+class ProductionNoteCreateIn(BaseModel):
+    """Anadir una nota o una quema al seguimiento de la orden. Fase 010I, D4.
+
+    NOTE: solo texto. FIRING_NOTE: horno y tipo de quema obligatorios, texto
+    opcional. `occurred_at` es cuando paso, y es OBLIGATORIA: la pantalla la
+    propone en «ahora» y la manda siempre. Si fuera opcional, un reintento sin
+    fecha no podria distinguirse de una nota fechada en otro momento
+    (hallazgo de Copilot en el bloque C).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ProductionNoteKind
+    body: str | None = Field(default=None, max_length=2000)
+    kiln_id: int | None = Field(default=None, gt=0)
+    firing_type: FiringType | None = None
+    occurred_at: datetime
+    #: OBLIGATORIA, como en el consumo: un doble clic no debe dejar dos notas.
+    idempotency_key: str = Field(min_length=8, max_length=64)
+
+    @model_validator(mode="after")
+    def _campos_de_su_clase(self) -> ProductionNoteCreateIn:
+        texto = (self.body or "").strip()
+        self.body = texto or None
+        if self.kind is ProductionNoteKind.NOTE:
+            if self.body is None:
+                raise ValueError("Una nota necesita texto")
+            if self.kiln_id is not None or self.firing_type is not None:
+                raise ValueError("Una nota no lleva horno ni tipo de quema")
+        elif self.kiln_id is None or self.firing_type is None:
+            raise ValueError("Una quema necesita horno y tipo de quema")
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("occurred_at debe llevar zona horaria")
+        return self
+
+
+class ProductionNoteOut(BaseModel):
+    id: int
+    production_order_id: int
+    kind: ProductionNoteKind
+    body: str | None
+    kiln_id: int | None
+    kiln_name: str | None
+    firing_type: FiringType | None
+    occurred_at: datetime
+    created_by_name: str | None
+    created_at: datetime
+
+
+class ProductionTimelineEventType(StrEnum):
+    #: Un cambio de estado: INICIO, EN PROCESO, FINALIZADO o Anulada.
+    STATUS = "STATUS"
+    CONSUMPTION = "CONSUMPTION"
+    NOTE = "NOTE"
+    FIRING_NOTE = "FIRING_NOTE"
+
+
+class ProductionTimelineEventOut(BaseModel):
+    """Un hecho del seguimiento. Solo viaja el detalle de su tipo."""
+
+    type: ProductionTimelineEventType
+    occurred_at: datetime
+    actor_name: str | None
+    #: Solo en STATUS: el estado al que se llego.
+    status: ProductionOrderStatus | None = None
+    consumption: ProductionConsumptionOut | None = None
+    note: ProductionNoteOut | None = None
+
+
+class ProductionTimelineOut(BaseModel):
+    """El seguimiento de la orden, del hecho mas antiguo al mas reciente."""
+
+    items: list[ProductionTimelineEventOut]
