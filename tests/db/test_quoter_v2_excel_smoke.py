@@ -40,7 +40,7 @@ import httpx
 from pypdf import PdfReader
 
 from tests.db.v2_capacidades import habilitar
-from tests.fixtures.excel_v2_modelo import EXCEL_TOLERANCE, LINES, TOTALS
+from tests.fixtures.excel_v2_modelo import EXCEL_TOLERANCE, LINES, TAX_PERCENT, TOTALS
 
 V2 = "/api/v1/quotations-v2"
 KILNS = "/api/v1/kilns"
@@ -534,4 +534,194 @@ class TestElCasoDelExcelPorLaApi:
         plato = por_nombre["Plato palta"]
         assert Decimal(str(plato["unit_price"])) < Decimal(str(LINES[0]["unit_price"])), (
             "repartir la ilustracion tiene que abaratar la linea que antes la llevaba entera"
+        )
+
+    async def test_la_distancia_con_el_excel_es_solo_el_redondeo(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """De donde salen exactamente los S/2,36 que separan el documento del Excel.
+
+        El gate PRE-010I acepta esta divergencia, pero acepta SOLO esta. Que el
+        total se quede en S/9.075,38 en vez de los S/9.077,74 de la hoja no
+        puede volverse una coartada para cualquier diferencia futura, asi que
+        aqui se fija su origen entero y se comprueba que no haya ninguna otra.
+
+        La cadena es esta:
+
+        1. la ilustracion es UNA por cotizacion (010D), asi que no entra en el
+           costo directo de ninguna pieza: entra en el pool general junto a la
+           administracion. El Excel, en cambio, carga sus S/44 enteros sobre
+           «Plato palta»;
+        2. ese pool se reparte entre las lineas por COSTO DIRECTO. Como la
+           ilustracion ya no esta dentro del directo de «Plato palta», la base
+           del reparto es otra y cada linea recibe una porcion distinta;
+        3. el unitario de cada linea se redondea HACIA ARRIBA al escalon de
+           S/0,50;
+        4. el subtotal se reconstruye sumando esos unitarios ya redondeados.
+
+        Los pasos 1 y 2 mueven costo ENTRE lineas sin crear ni perder un
+        centimo: el precio total antes de redondear sigue siendo el del Excel,
+        S/7.675,28. Toda la diferencia nace en el paso 3, porque los importes
+        caen a distinto lado del escalon, y el paso 4 la traslada al documento.
+        El IGV la arrastra proporcionalmente, y por eso la distancia en el
+        total es exactamente la del subtotal con su impuesto.
+        """
+        await preparar_configuracion(api, admin_csrf)
+        pasta_id, worker_id, technique_id = await preparar_maestros(api, admin_csrf)
+
+        creada = await api.post(
+            V2,
+            json={"name": "Reconciliacion del delta", "production_type": "RETAIL"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert creada.status_code == 201, creada.text
+        cotizacion = int(creada.json()["id"])
+
+        medidas = {
+            "Plato palta": ("18", "12", "3"),
+            "Tasa Buho": ("5", "3", "3"),
+            "PLATOS HONDOS CHICOS": ("30", "15", "2"),
+        }
+        for linea in LINES:
+            nombre = str(linea["name"])
+            largo, ancho, alto = medidas[nombre]
+            por_pieza = Decimal(str(linea["materials_cost"])) / Decimal(str(linea["quantity"]))
+            alta = await api.post(
+                f"{V2}/{cotizacion}/products",
+                json={
+                    "product_name": nombre,
+                    "quantity": linea["quantity"],
+                    "length_cm": largo,
+                    "width_cm": ancho,
+                    "height_cm": alto,
+                    "body_material_id": pasta_id,
+                    "body_unit_weight": "1",
+                    "body_cost_per_unit_override": str(por_pieza),
+                },
+                headers={"X-CSRF-Token": admin_csrf},
+            )
+            assert alta.status_code == 201, alta.text
+            horas = Decimal(str(linea["labor_hours"]))
+            costo = Decimal(str(linea["labor_cost"]))
+            await habilitar(api, admin_csrf, worker_id, technique_id)
+            tarea = await api.post(
+                f"{V2}/{cotizacion}/labor",
+                json={
+                    "v2_quotation_product_id": int(alta.json()["id"]),
+                    "worker_id": worker_id,
+                    "technique_id": technique_id,
+                    "quantity": str(linea["quantity"]),
+                    "final_hours_override": str(horas),
+                    "hourly_rate_override": str(costo / horas),
+                },
+                headers={"X-CSRF-Token": admin_csrf},
+            )
+            assert tarea.status_code == 201, tarea.text
+
+        ilustracion = await api.put(
+            f"{V2}/{cotizacion}/illustration",
+            json={
+                "illustration_enabled": True,
+                "illustration_quantity": str(ILUSTRACION_HORAS),
+                "illustration_hourly_rate_override": str(ILUSTRACION_TARIFA),
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert ilustracion.status_code == 200, ilustracion.text
+        planificacion = await api.put(
+            f"{V2}/{cotizacion}/planning",
+            json={"effective_work_days": 4},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert planificacion.status_code == 200, planificacion.text
+
+        precio = (await api.get(f"{V2}/{cotizacion}/pricing")).json()
+        quema = (await api.get(f"{V2}/{cotizacion}/firing")).json()
+
+        def numero(origen: dict[str, Any], clave: str) -> Decimal:
+            return Decimal(str(origen[clave]))
+
+        # --- 1. Ni un importe perdido, ni uno contado dos veces -------------
+        materiales = numero(precio, "materials_cost")
+        mano_de_obra = numero(precio, "labor_cost")
+        ilustrado = numero(precio, "illustration_cost")
+        espacio = numero(precio, "space_cost")
+        administracion = numero(precio, "administration_cost")
+        directo = numero(precio, "direct_cost")
+        quema_comercial = numero(quema, "commercial_total")
+        gas = numero(quema, "gas_total")
+
+        cerca(materiales, TOTALS["materials"], "materiales")
+        cerca(mano_de_obra, TOTALS["labor"], "mano de obra", QUANTIZE_TOLERANCE)
+        cerca(ilustrado, TOTALS["illustration"], "ilustracion")
+        cerca(espacio, TOTALS["space"], "espacio")
+        cerca(administracion, TOTALS["administration"], "administracion")
+        cerca(quema_comercial, TOTALS["firing_commercial"], "quema comercial")
+        cerca(gas, TOTALS["firing_gas"], "gas")
+
+        # La ilustracion NO esta dentro del costo directo: ese es exactamente
+        # el punto en el que 010D se separa del Excel, y es lo que hace que la
+        # base del reparto sea otra. Si algun dia volviera a entrar ahi, esta
+        # igualdad se rompe y la prueba lo dice.
+        assert directo == materiales + mano_de_obra, (
+            "el costo directo es materiales mas mano de obra: la ilustracion es general"
+        )
+        suma_directos = sum((numero(fila, "direct_cost") for fila in precio["lines"]), Decimal(0))
+        assert suma_directos == directo, (
+            "la suma de los directos de linea tiene que ser el directo de la cotizacion"
+        )
+
+        general = administracion + ilustrado
+        assert numero(precio, "production_cost") == directo + quema_comercial + espacio + general, (
+            "el costo de produccion tiene que llevar la ilustracion una sola vez"
+        )
+        assert numero(precio, "real_cost") == directo + gas + espacio + general, (
+            "el costo real tiene que llevar la ilustracion una sola vez"
+        )
+
+        # --- 2. Antes de redondear, el precio es el MISMO que el del Excel --
+        negociado = numero(precio, "negotiated_price")
+        cerca(negociado, TOTALS["price_target_x3"], "precio objetivo", QUANTIZE_TOLERANCE)
+        suma_precios = sum((numero(fila, "line_price") for fila in precio["lines"]), Decimal(0))
+        assert suma_precios == negociado, (
+            "repartir el precio entre las lineas no puede perder ni crear importe"
+        )
+
+        # --- 3. Toda la diferencia nace en el escalon de S/0,50 -------------
+        escalon = Decimal("0.5")
+        subtotal = numero(precio, "subtotal")
+        for fila in precio["lines"]:
+            unitario = numero(fila, "unit_price")
+            crudo = numero(fila, "unit_price_raw")
+            assert unitario % escalon == 0, f"{fila['product_name']}: {unitario} no cabe en S/0,50"
+            assert crudo <= unitario < crudo + escalon, (
+                f"{fila['product_name']}: el redondeo es al alza y de un solo escalon"
+            )
+
+        # --- 4. El subtotal se reconstruye de los unitarios ya redondeados --
+        suma_subtotales = sum(
+            (numero(fila, "line_subtotal") for fila in precio["lines"]), Decimal(0)
+        )
+        assert suma_subtotales == subtotal, "el documento tiene que cuadrar al sumarlo a mano"
+        alza_sistema = numero(precio, "rounding_adjustment")
+        assert alza_sistema == subtotal - negociado, (
+            "el ajuste publicado tiene que cuadrar con el subtotal y el precio negociado"
+        )
+
+        # --- Y la distancia con el Excel es SOLO la de las dos alzas --------
+        alza_excel = TOTALS["rounding_adjustment"]
+        cerca(
+            TOTALS["subtotal"] - subtotal,
+            alza_excel - alza_sistema,
+            "la diferencia de subtotal es la que hay entre los dos redondeos",
+            QUANTIZE_TOLERANCE,
+        )
+        # El IGV la arrastra y nada mas: el total se separa exactamente lo que
+        # se separa el subtotal, con su impuesto encima.
+        con_impuesto = Decimal(1) + TAX_PERCENT / Decimal(100)
+        cerca(
+            TOTALS["total"] - numero(precio, "total"),
+            (TOTALS["subtotal"] - subtotal) * con_impuesto,
+            "la diferencia de total es la del subtotal con su IGV",
+            QUANTIZE_TOLERANCE,
         )
