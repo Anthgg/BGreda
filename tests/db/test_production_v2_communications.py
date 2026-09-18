@@ -418,9 +418,14 @@ class TestSeguimiento:
         datos = await orden_con_existencia(api, admin_csrf)
         oid = datos["order_id"]
         assert (await api.post(f"{ORDERS}/{oid}/start", headers=h(admin_csrf))).status_code == 200
-        await asyncio.sleep(0.05)
+        # Un segundo de margen a cada lado, no cincuenta milisegundos: el
+        # arranque y el aviso se fechan con el reloj de la aplicacion, y el
+        # consumo con `now()` de PostgreSQL. En local la base corre en Docker
+        # y su reloj puede ir decenas de milisegundos desfasado; con 50 ms la
+        # prueba fallaba de vez en cuando sin que el orden estuviera mal.
+        await asyncio.sleep(1)
         entre = datetime.now(UTC)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(1)
         consumo = await consumir(
             api, admin_csrf, oid, product_id=datos["pasta_id"], quantity="10", key="aviso-orden-c"
         )

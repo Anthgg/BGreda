@@ -126,6 +126,42 @@ class ProductionOrderLineOut(BaseModel):
     required_material_uom: str | None
 
 
+class V2ProductionPieceOut(BaseModel):
+    """Una pieza de la cotizacion V2 de la orden, tal como se congelo. Fase 010I.
+
+    Solo lo necesario para FABRICAR: que, cuantas, de que medidas y con que
+    material se PLANIFICO. **Ni un importe**: ni costos, ni factor, ni precio.
+    Por eso existe este esquema en vez de reenviar la linea de la cotizacion,
+    que es solo de ADMIN justamente porque los lleva.
+
+    Lo planificado no es lo gastado: el consumo real va en `/consumptions`.
+    """
+
+    #: El id de la pieza en la cotizacion. Es el que se manda como
+    #: `v2_quotation_product_id` al imputarle un consumo.
+    id: int
+    sort_order: int
+    product_name: str
+    quantity: int
+    length_cm: Decimal | None
+    width_cm: Decimal | None
+    height_cm: Decimal | None
+    body_material_id: int | None
+    body_material_name: str | None
+    #: Lo que lleva UNA pieza y el total de la linea, en `body_uom`.
+    body_unit_weight: Decimal | None
+    body_total_weight: Decimal
+    body_uom: str | None
+    requires_glaze: bool
+    glaze_material_id: int | None
+    glaze_material_name: str | None
+    #: Si el esmalte fue una referencia de costeo que eligio el sistema: el
+    #: taller puede usar otro.
+    glaze_is_reference: bool
+    #: Lo planificado de esmalte para la linea, en gramos.
+    glaze_total_weight: Decimal
+
+
 class ProductionOrderSummaryOut(BaseModel):
     id: int
     code: str
@@ -148,6 +184,13 @@ class ProductionOrderSummaryOut(BaseModel):
     #: enlace llevara a la cotizacion equivocada.
     v2_quotation_id: int | None = None
     v2_quotation_code: str | None = None
+    #: Fase 010I. El cliente CONGELADO en la cotizacion de origen (Legacy o V2).
+    #: Nulo en las ordenes de muestra, que no lo tenian.
+    customer_name: str | None = None
+    #: Fase 010I. Que se fabrica, de un vistazo: «20 x Taza, 5 x Plato» (con el signo de
+    #: multiplicar). Lo arma
+    #: el backend para que la pantalla no reconstruya nada.
+    pieces_summary: str | None = None
     stock_location_id: int
     stock_location_name: str
     line_count: int
@@ -178,6 +221,9 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     #: para que la pantalla diga que falta; quien decide es `complete`.
     #: Siempre vacia fuera de las ordenes V2.
     pending_consumption_kinds: list[ProductionConsumptionKind] = Field(default_factory=list)
+    #: Fase 010I. Las piezas de la cotizacion V2 congelada, sin importes. Vacia
+    #: en las ordenes Legacy y de muestra, que tienen sus propias `lines`.
+    v2_pieces: list[V2ProductionPieceOut] = Field(default_factory=list)
 
 
 class ProductionOrderPage(BaseModel):

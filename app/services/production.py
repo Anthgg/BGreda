@@ -82,6 +82,7 @@ from app.schemas.production import (
     ProductionTimelineEventType,
     ProductionTimelineOut,
     ReadinessIssueOut,
+    V2ProductionPieceOut,
 )
 from app.services import body_material as body_material_mod
 from app.services.audit import AuditRecorder
@@ -100,6 +101,14 @@ PRODUCTION_ENTITY = "production_order"
 #: las preparaciones: dos claves iguales en modulos distintos no deben
 #: serializarse entre si.
 IDEMPOTENCY_LOCK_NAMESPACE = 90109
+
+#: Cuantas piezas nombra el resumen de una fila del listado antes de «+N mas».
+PIECES_SUMMARY_MAX = 4
+
+#: El separador de cantidad y pieza: el signo de multiplicar (U+00D7) y no una
+#: equis, que es lo que se lee en el taller. Escapado para que en el codigo no
+#: se confunda con una letra.
+POR = f" {chr(0xD7)} "
 
 #: Holgura para el reloj del navegador al fechar una nota: unos minutos por
 #: delante no son el futuro, son dos relojes que no coinciden.
@@ -2429,6 +2438,9 @@ class ProductionOrderService:
             "prototype_quotation_code": None,
             "v2_quotation_id": None,
             "v2_quotation_code": None,
+            # Fase 010I. El cliente CONGELADO en la cotizacion de origen. Una
+            # muestra no lo tenia y no se le inventa.
+            "customer_name": None,
         }
         if order.v2_handoff_id is not None:
             return {
@@ -2436,6 +2448,7 @@ class ProductionOrderService:
                 "origin_type": ProductionOrderOrigin.V2_QUOTATION,
                 "v2_quotation_id": v2_quotation.id if v2_quotation else None,
                 "v2_quotation_code": v2_quotation.code if v2_quotation else None,
+                "customer_name": v2_quotation.customer_name_snapshot if v2_quotation else None,
             }
         if order.prototype_id is not None:
             return {
@@ -2453,6 +2466,7 @@ class ProductionOrderService:
             "origin_type": ProductionOrderOrigin.QUOTATION,
             "quotation_id": order.quotation_id,
             "quotation_code": quotation.code if quotation else None,
+            "customer_name": quotation.customer_name_snapshot if quotation else None,
         }
 
     async def _v2_quotation_of(self, order: ProductionOrder) -> V2Quotation | None:
@@ -2464,6 +2478,82 @@ class ProductionOrderService:
             .join(V2ProductionHandoff, V2ProductionHandoff.v2_quotation_id == V2Quotation.id)
             .where(V2ProductionHandoff.id == order.v2_handoff_id)
         )
+
+    # -- piezas V2 para el taller (Fase 010I) ---------------------------------
+    async def _v2_pieces_for(
+        self, orders: Iterable[ProductionOrder]
+    ) -> dict[int, list[V2QuotationProduct]]:
+        """Las piezas de las cotizaciones V2 de varias ordenes, por id de PUENTE.
+
+        Una sola consulta para toda la pagina. Salen de las lineas de la
+        cotizacion CONFIRMADA, que ya no se editan: son lo que se planifico
+        entonces, no lo que diga hoy el catalogo.
+        """
+        handoff_ids = {order.v2_handoff_id for order in orders if order.v2_handoff_id is not None}
+        if not handoff_ids:
+            return {}
+        filas = await self._session.execute(
+            select(V2ProductionHandoff.id, V2QuotationProduct)
+            .join(
+                V2QuotationProduct,
+                V2QuotationProduct.v2_quotation_id == V2ProductionHandoff.v2_quotation_id,
+            )
+            .where(V2ProductionHandoff.id.in_(handoff_ids))
+            .order_by(V2QuotationProduct.sort_order, V2QuotationProduct.id)
+        )
+        resultado: dict[int, list[V2QuotationProduct]] = {}
+        for handoff_id, pieza in filas.tuples().all():
+            resultado.setdefault(handoff_id, []).append(pieza)
+        return resultado
+
+    @staticmethod
+    def _present_v2_piece(pieza: V2QuotationProduct) -> V2ProductionPieceOut:
+        """Solo lo operacional. Cualquier campo nuevo aqui es una decision."""
+        return V2ProductionPieceOut(
+            id=pieza.id,
+            sort_order=pieza.sort_order,
+            product_name=pieza.product_name_snapshot or "Pieza sin nombre",
+            quantity=pieza.quantity,
+            length_cm=pieza.length_cm,
+            width_cm=pieza.width_cm,
+            height_cm=pieza.height_cm,
+            body_material_id=pieza.body_material_id,
+            body_material_name=pieza.body_material_name_snapshot,
+            body_unit_weight=pieza.body_unit_weight,
+            body_total_weight=pieza.body_total_weight,
+            body_uom=pieza.body_uom_snapshot,
+            requires_glaze=pieza.requires_glaze,
+            glaze_material_id=pieza.glaze_material_id if pieza.requires_glaze else None,
+            glaze_material_name=(
+                pieza.glaze_material_name_snapshot if pieza.requires_glaze else None
+            ),
+            glaze_is_reference=pieza.glaze_is_reference if pieza.requires_glaze else False,
+            glaze_total_weight=pieza.glaze_total_weight if pieza.requires_glaze else Decimal(0),
+        )
+
+    @staticmethod
+    def _pieces_summary(
+        order: ProductionOrder, piezas_v2: dict[int, list[V2QuotationProduct]]
+    ) -> str | None:
+        """«20 x Taza, 5 x Plato». De las piezas V2, o de las lineas propias.
+
+        Se corta a las primeras cuatro con «+N mas»: es un resumen para una
+        fila de listado, y la lista entera esta en la ficha.
+        """
+        partes: list[tuple[int | None, str]]
+        if order.v2_handoff_id is not None:
+            partes = [
+                (pieza.quantity, pieza.product_name_snapshot or "Pieza sin nombre")
+                for pieza in piezas_v2.get(order.v2_handoff_id, [])
+            ]
+        else:
+            partes = [(line.quantity, line.product_name_snapshot) for line in order.lines]
+        if not partes:
+            return None
+        textos = [f"{cantidad}{POR}{nombre}" if cantidad else nombre for cantidad, nombre in partes]
+        visibles = textos[:PIECES_SUMMARY_MAX]
+        resto = len(textos) - len(visibles)
+        return ", ".join(visibles) + (f" +{resto} más" if resto else "")
 
     async def _v2_quotations_for(self, orders: Iterable[ProductionOrder]) -> dict[int, V2Quotation]:
         """Las cotizaciones V2 de una pagina, por id de PUENTE, en una consulta."""
@@ -2564,6 +2654,7 @@ class ProductionOrderService:
         # Fase 010I. El cliente de una orden V2 es el que quedo congelado en su
         # cotizacion V2 al emitirla, no el del maestro de hoy.
         v2_quotation = await self._v2_quotation_of(order)
+        piezas_v2 = await self._v2_pieces_for([order])
         cliente = (
             quotation.customer_name_snapshot
             if quotation
@@ -2587,6 +2678,11 @@ class ProductionOrderService:
             completed_at=order.completed_at,
             cancelled_at=order.cancelled_at,
             qr_token=order.qr_token,
+            pieces_summary=self._pieces_summary(order, piezas_v2),
+            v2_pieces=[
+                self._present_v2_piece(pieza)
+                for pieza in piezas_v2.get(order.v2_handoff_id or 0, [])
+            ],
             lines=[self._present_line(line, prepared) for line in order.lines],
             readiness=ProductionReadinessOut(
                 ready=readiness.ready,
@@ -2643,6 +2739,8 @@ class ProductionOrderService:
         # ficha. Que la lista dijera una cosa y el detalle otra sobre la misma
         # orden seria peor que no decirlo.
         origins = await self._origins_for(orders)
+        # Fase 010I. Las piezas V2 de TODA la pagina en una consulta, no en N.
+        piezas_v2 = await self._v2_pieces_for(orders)
         return ProductionOrderPage(
             items=[
                 ProductionOrderSummaryOut(
@@ -2650,6 +2748,7 @@ class ProductionOrderService:
                     code=order.code,
                     status=order.status,
                     **origins[order.id],  # type: ignore[arg-type]
+                    pieces_summary=self._pieces_summary(order, piezas_v2),
                     stock_location_id=order.stock_location_id,
                     stock_location_name=locations.get(order.stock_location_id, ""),
                     line_count=len(order.lines),
