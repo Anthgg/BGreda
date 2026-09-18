@@ -40,11 +40,19 @@ async def list_production_orders(
     _: CurrentUserDep,
     order_status: StatusFilterDep = None,
     quotation: QuotationFilterDep = None,
+    #: Fase 010I. Filtro PROPIO y no `quotation` reutilizado: el id de una V2 y
+    #: el de una Legacy son espacios distintos, y compartir el parametro haria
+    #: que la misma cifra devolviera la orden de otra cotizacion.
+    v2_quotation_id: QuotationFilterDep = None,
     limit: LimitDep = 50,
     offset: OffsetDep = 0,
 ) -> ProductionOrderPage:
     orders, total = await service.list_orders(
-        status=order_status, quotation_id=quotation, limit=limit, offset=offset
+        status=order_status,
+        quotation_id=quotation,
+        v2_quotation_id=v2_quotation_id,
+        limit=limit,
+        offset=offset,
     )
     return await service.present_page(orders, total=total, limit=limit, offset=offset)
 
@@ -57,7 +65,8 @@ async def create_production_order(
     session: DbSessionDep,
     response: Response,
 ) -> ProductionOrderOut:
-    """Crea la orden de una cotizacion confirmada, o la de una muestra.
+    """Crea la orden de una cotizacion confirmada, de una cotizacion V2 enviada a
+    produccion (Fase 010I) o de una muestra.
 
     **No consume material** en ninguno de los dos casos.
 
@@ -73,6 +82,14 @@ async def create_production_order(
         order, created = await service.create_for_prototype_id(
             payload.prototype_id,
             stock_location_id=payload.stock_location_id,
+            user=actor,
+        )
+    elif payload.v2_quotation_id is not None:
+        # Fase 010I. Una cotizacion V2 que ya paso por «Enviar a produccion».
+        order, created = await service.create_for_v2_quotation(
+            payload.v2_quotation_id,
+            stock_location_id=payload.stock_location_id,
+            idempotency_key=payload.idempotency_key,
             user=actor,
         )
     else:
@@ -157,11 +174,13 @@ async def start_production_order(
     actor: WorkshopUserDep,
     session: DbSessionDep,
 ) -> ProductionOrderOut:
-    """Arranca la orden y descuenta el material preparado.
+    """Arranca la orden. En una Legacy o de muestra, descuenta el material preparado.
 
-    **Es el unico endpoint de toda la fase que mueve inventario.** Consume todo
-    o no consume nada: si un solo material no alcanza, la transaccion se
-    deshace entera y la orden sigue en CREATED.
+    En esas dos consume todo o no consume nada: si un solo material no alcanza,
+    la transaccion se deshace entera y la orden sigue en CREATED.
+
+    Fase 010I: una orden V2 arranca **sin descontar nada**. Su material se
+    registra consumo a consumo, con lo que el taller gasto de verdad.
 
     Arrancar dos veces no consume dos veces.
     """

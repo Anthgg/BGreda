@@ -24,6 +24,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -48,6 +49,7 @@ from app.models.quotations import (
     QuotationPaymentStatus,
     QuotationStatus,
 )
+from app.models.quoter_v2 import V2ProductionHandoff, V2Quotation, V2QuotationStatus
 from app.models.recipes import Recipe
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
@@ -208,6 +210,47 @@ class ProductionOrderQuotationNotPaidError(APIError):
     message = "La cotizacion debe estar pagada para iniciar la produccion"
 
 
+class ProductionOrderV2NotSentError(APIError):
+    """La cotizacion V2 no ha pasado por «Enviar a produccion». Fase 010I.
+
+    Una orden V2 cuelga del PUENTE de 010H, y sin puente no hay de que colgarla.
+    No se crea el puente aqui por su cuenta: enviar a produccion es otra
+    decision, con otro permiso y otras comprobaciones —estado, vigencia—, y
+    saltarsela desde el taller seria el segundo camino a la fabrica que esta
+    fase evita.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_V2_NOT_SENT"
+    message = "La cotizacion V2 todavia no se ha enviado a produccion"
+
+
+class ProductionOrderV2FingerprintMismatchError(APIError):
+    """La cotizacion V2 ya no dice lo que decia al pasar a produccion. Fase 010I.
+
+    El puente guarda una copia de la huella comercial. Si no coincide con la de
+    la cotizacion, alguien ha tocado un documento emitido por debajo, y fabricar
+    a partir de el seria fabricar algo que el cliente no acepto.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_V2_FINGERPRINT_MISMATCH"
+    message = "La cotizacion V2 cambio despues de enviarse a produccion"
+
+
+class ProductionOrderIdempotencyKeyReusedError(APIError):
+    """La clave de idempotencia ya se uso para OTRA orden. Fase 010I.
+
+    Una clave identifica un reintento de la misma peticion. Llegar con ella
+    pidiendo otra cosa es un error del cliente, y devolver la orden que ya
+    tiene esa clave seria darle una orden ajena como si fuera la suya.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_IDEMPOTENCY_KEY_REUSED"
+    message = "Esa clave de idempotencia ya se uso para otra orden de produccion"
+
+
 class ProductionOrderNotStartableError(APIError):
     status_code = 409
     code = "PRODUCTION_ORDER_NOT_STARTABLE"
@@ -301,6 +344,7 @@ class ProductionOrderService:
         *,
         status: ProductionOrderStatus | None = None,
         quotation_id: int | None = None,
+        v2_quotation_id: int | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[ProductionOrder], int]:
@@ -313,6 +357,16 @@ class ProductionOrderService:
             condiciones.append(ProductionOrder.status == status)
         if quotation_id is not None:
             condiciones.append(ProductionOrder.quotation_id == quotation_id)
+        if v2_quotation_id is not None:
+            # A traves del puente: la orden V2 no guarda la cotizacion, guarda su
+            # puente, que es lo unico que la base deja enlazar.
+            condiciones.append(
+                ProductionOrder.v2_handoff_id.in_(
+                    select(V2ProductionHandoff.id).where(
+                        V2ProductionHandoff.v2_quotation_id == v2_quotation_id
+                    )
+                )
+            )
 
         stmt = self._base_query()
         total_stmt = select(func.count()).select_from(ProductionOrder)
@@ -442,6 +496,129 @@ class ProductionOrderService:
         )
         await self._session.refresh(order, ["lines"])
         return order, True
+
+    async def get_by_v2_handoff(self, handoff_id: int) -> ProductionOrder | None:
+        return await self._session.scalar(
+            self._base_query().where(ProductionOrder.v2_handoff_id == handoff_id)
+        )
+
+    async def create_for_v2_quotation(
+        self,
+        v2_quotation_id: int,
+        *,
+        stock_location_id: int,
+        idempotency_key: str | None,
+        user: AuthenticatedUser,
+    ) -> tuple[ProductionOrder, bool]:
+        """Crea la orden de una cotizacion V2 ya enviada a produccion. Fase 010I.
+
+        Devuelve `(orden, es_nueva)`. Es papeleo, igual que la de una cotizacion
+        Legacy: reserva el correlativo, fija el almacen por defecto y no toca ni
+        un gramo de inventario. En una orden V2 ni siquiera ARRANCAR descuenta:
+        el consumo es un registro explicito de lo que el taller gasto de verdad.
+
+        Idempotente por el hecho, en tres capas:
+
+        1. la clave de idempotencia serializa los reintentos que la comparten;
+        2. el bloqueo del PUENTE serializa cualquier creacion para la misma
+           cotizacion, traiga la clave que traiga: la segunda encuentra la orden
+           de la primera y la devuelve;
+        3. el UNIQUE de `v2_handoff_id` es la garantia final, por si una via que
+           no tomara el bloqueo llegara primero.
+
+        No se copian lineas: la cotizacion V2 confirmada ya es inmutable y su
+        huella esta congelada en el puente. Lo que se comprueba es justo eso, que
+        la cotizacion siga diciendo lo que decia al pasar a produccion.
+        """
+        if idempotency_key:
+            await self._lock_idempotency(idempotency_key)
+            existing = await self._session.scalar(
+                self._base_query().where(ProductionOrder.idempotency_key == idempotency_key)
+            )
+            if existing is not None:
+                # La clave es de un reintento de ESTA peticion. Si trae la de
+                # otra orden —otro origen—, devolverla seria entregar una orden
+                # ajena como si fuera la pedida.
+                if not await self._is_order_of_v2_quotation(existing, v2_quotation_id):
+                    raise ProductionOrderIdempotencyKeyReusedError()
+                return existing, False
+
+        handoff = await self._session.scalar(
+            select(V2ProductionHandoff)
+            .where(V2ProductionHandoff.v2_quotation_id == v2_quotation_id)
+            .with_for_update()
+        )
+        if handoff is None:
+            if await self._session.get(V2Quotation, v2_quotation_id) is None:
+                raise ProductionOrderNotFoundError("La cotizacion V2 no existe")
+            raise ProductionOrderV2NotSentError()
+
+        # La unicidad del ORIGEN manda sobre la clave: pedirla otra vez con otra
+        # clave devuelve la misma orden, no una segunda.
+        already = await self.get_by_v2_handoff(handoff.id)
+        if already is not None:
+            return already, False
+
+        quotation = await self._session.get(V2Quotation, handoff.v2_quotation_id)
+        assert quotation is not None  # la FK del puente lo garantiza
+        if quotation.status is not V2QuotationStatus.CONFIRMED:
+            # 010H impide anular una cotizacion con puente, asi que esto no
+            # deberia verse nunca. Se afirma igual: fabricar algo que no esta
+            # confirmado es exactamente lo que no puede pasar por un descuido.
+            raise ProductionOrderQuotationNotConfirmedError()
+        if quotation.commercial_fingerprint != handoff.commercial_fingerprint:
+            raise ProductionOrderV2FingerprintMismatchError()
+
+        location = await self._session.get(StockLocation, stock_location_id)
+        if location is None or not location.active:
+            raise ProductionOrderLocationInvalidError()
+
+        order = ProductionOrder(
+            code=await self._sequences.issue(SequenceType.PRODUCTION_ORDER, user_id=user.id),
+            v2_handoff_id=handoff.id,
+            stock_location_id=location.id,
+            status=ProductionOrderStatus.CREATED,
+            idempotency_key=idempotency_key,
+            qr_token=secrets.token_urlsafe(32),
+            created_by=user.id,
+            created_by_name=user.display_name,
+        )
+        # SAVEPOINT, como en el puente de 010H: el bloqueo ya serializa, pero el
+        # UNIQUE es la garantia final. Si algo llegara primero sin tomar el
+        # bloqueo, aqui se devuelve su orden en vez de un 500.
+        try:
+            async with self._session.begin_nested():
+                self._session.add(order)
+                await self._session.flush()
+        except IntegrityError:
+            ganadora = await self.get_by_v2_handoff(handoff.id)
+            if ganadora is None:
+                raise
+            return ganadora, False
+
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.CREATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "v2_quotation_id": quotation.id,
+                "v2_quotation_code": quotation.code,
+                "v2_handoff_id": handoff.id,
+                "stock_location_id": location.id,
+                "status": order.status.value,
+            },
+        )
+        await self._session.refresh(order, ["lines"])
+        return order, True
+
+    async def _is_order_of_v2_quotation(self, order: ProductionOrder, v2_quotation_id: int) -> bool:
+        if order.v2_handoff_id is None:
+            return False
+        handoff = await self._session.get(V2ProductionHandoff, order.v2_handoff_id)
+        return handoff is not None and handoff.v2_quotation_id == v2_quotation_id
 
     async def get_by_prototype(self, prototype_id: int) -> ProductionOrder | None:
         """La orden de una muestra, si ya se creo."""
@@ -703,6 +880,13 @@ class ProductionOrderService:
         # «alcanza para todos o no arranca ninguno»— vive en `_stock_issues`.
         if order.prototype_id is not None:
             return await self._evaluate_prototype(order, lock=lock)
+
+        # Fase 010I. Arrancar una orden V2 NO descuenta nada: su consumo es un
+        # registro explicito de lo que el taller gasta de verdad, no la receta
+        # entera de golpe. Por eso no hay requerimiento que comprobar aqui, y
+        # tampoco receta: la orden V2 no tiene lineas Legacy de las que derivarla.
+        if order.v2_handoff_id is not None:
+            return issues, []
 
         # ---- 1. Lo que cada linea puede o no puede pedir -------------------
         per_product: dict[int, list[tuple[ProductionOrderLine, Decimal]]] = {}
@@ -1067,6 +1251,16 @@ class ProductionOrderService:
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotStartableError()
 
+        # Fase 010I. Una orden V2 arranca SIN descontar nada: su material se
+        # registra consumo a consumo, con lo que el taller gasto de verdad, y no
+        # como la receta entera de golpe. Tampoco le tocan los guardias de la
+        # rama Legacy: no hay cotizacion Legacy que cobrar —su puerta fue el
+        # puente de 010H— ni muestras que aprobar. Va ANTES de ellos a proposito:
+        # si cayera en la rama Legacy, preguntaria por el cobro de una cotizacion
+        # que no existe y rechazaria siempre con «no pagada».
+        if order.v2_handoff_id is not None:
+            return await self._start_v2(order, user=user)
+
         # Fase 009K.4. Los dos guardias son de la rama de COTIZACION.
         #
         # El de pago porque una orden de muestra nace ya cobrada —se crea
@@ -1180,6 +1374,48 @@ class ProductionOrderService:
                     for requirement in requirements
                 ],
             },
+        )
+        return order, True
+
+    async def _start_v2(
+        self, order: ProductionOrder, *, user: AuthenticatedUser
+    ) -> tuple[ProductionOrder, bool]:
+        """INICIO -> EN PROCESO de una orden V2. Fase 010I. **No mueve inventario.**
+
+        La orden ya viene bloqueada y en CREATED: lo comprobo `start`. El almacen
+        de la orden se sigue exigiendo valido porque es el almacen por defecto de
+        los consumos que vendran; arrancar contra un almacen dado de baja seria
+        preparar consumos que despues no podrian registrarse.
+        """
+        issues, _ = await self._evaluate(order, lock=False)
+        if issues:
+            raise ProductionOrderNotReadyError(issues)
+
+        moment = datetime.now(UTC)
+        order.status = ProductionOrderStatus.STARTED
+        order.started_at = moment
+        order.updated_at = moment
+        await self._session.flush()
+
+        self._audit.record_changes(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            changes={
+                "status": (ProductionOrderStatus.CREATED.value, order.status.value),
+                "started_at": (None, moment.isoformat()),
+            },
+            user_id=user.id,
+            user_display_name=user.display_name,
+        )
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            # `consumed` vacio y dicho: en una orden V2 arrancar no consume, y el
+            # historial tiene que poder contestarlo sin adivinar.
+            metadata={"code": order.code, "transition": "START", "consumed": []},
         )
         return order, True
 
@@ -1308,6 +1544,7 @@ class ProductionOrderService:
         quotation: Quotation | None,
         prototype: Prototype | None,
         prototype_quotation: PrototypeQuotation | None,
+        v2_quotation: V2Quotation | None = None,
     ) -> dict[str, object]:
         """Los campos de origen de una orden. UN solo sitio que los arma.
 
@@ -1318,12 +1555,32 @@ class ProductionOrderService:
         Lo que si difiere entre los dos es COMO se traen los datos —uno a uno
         para una ficha, en bloque para una pagina—, y por eso la busqueda esta
         fuera de esta funcion y no dentro.
+
+        Fase 010I: cada origen se pregunta por SU campo. Antes lo que no era
+        muestra se daba por cotizacion Legacy, y con un tercer origen eso habria
+        presentado una orden V2 como Legacy con la cotizacion en nulo.
         """
+        vacio: dict[str, object] = {
+            "quotation_id": None,
+            "quotation_code": None,
+            "prototype_id": None,
+            "prototype_code": None,
+            "prototype_quotation_id": None,
+            "prototype_quotation_code": None,
+            "v2_quotation_id": None,
+            "v2_quotation_code": None,
+        }
+        if order.v2_handoff_id is not None:
+            return {
+                **vacio,
+                "origin_type": ProductionOrderOrigin.V2_QUOTATION,
+                "v2_quotation_id": v2_quotation.id if v2_quotation else None,
+                "v2_quotation_code": v2_quotation.code if v2_quotation else None,
+            }
         if order.prototype_id is not None:
             return {
+                **vacio,
                 "origin_type": ProductionOrderOrigin.PROTOTYPE,
-                "quotation_id": None,
-                "quotation_code": None,
                 "prototype_id": order.prototype_id,
                 "prototype_code": prototype.code if prototype else None,
                 "prototype_quotation_id": (prototype_quotation.id if prototype_quotation else None),
@@ -1332,14 +1589,33 @@ class ProductionOrderService:
                 ),
             }
         return {
+            **vacio,
             "origin_type": ProductionOrderOrigin.QUOTATION,
             "quotation_id": order.quotation_id,
             "quotation_code": quotation.code if quotation else None,
-            "prototype_id": None,
-            "prototype_code": None,
-            "prototype_quotation_id": None,
-            "prototype_quotation_code": None,
         }
+
+    async def _v2_quotation_of(self, order: ProductionOrder) -> V2Quotation | None:
+        """La cotizacion V2 de una orden, a traves de su puente."""
+        if order.v2_handoff_id is None:
+            return None
+        return await self._session.scalar(
+            select(V2Quotation)
+            .join(V2ProductionHandoff, V2ProductionHandoff.v2_quotation_id == V2Quotation.id)
+            .where(V2ProductionHandoff.id == order.v2_handoff_id)
+        )
+
+    async def _v2_quotations_for(self, orders: Iterable[ProductionOrder]) -> dict[int, V2Quotation]:
+        """Las cotizaciones V2 de una pagina, por id de PUENTE, en una consulta."""
+        handoff_ids = {order.v2_handoff_id for order in orders if order.v2_handoff_id is not None}
+        if not handoff_ids:
+            return {}
+        filas = await self._session.execute(
+            select(V2ProductionHandoff.id, V2Quotation)
+            .join(V2Quotation, V2Quotation.id == V2ProductionHandoff.v2_quotation_id)
+            .where(V2ProductionHandoff.id.in_(handoff_ids))
+        )
+        return dict(filas.tuples().all())
 
     async def _origin(self, order: ProductionOrder) -> dict[str, object]:
         """El origen de UNA orden, para la ficha."""
@@ -1358,7 +1634,13 @@ class ProductionOrderService:
             if order.prototype_id is None and order.quotation_id is not None
             else None
         )
-        return self._origin_fields(order, quotation=ctz, prototype=muestra, prototype_quotation=cpr)
+        return self._origin_fields(
+            order,
+            quotation=ctz,
+            prototype=muestra,
+            prototype_quotation=cpr,
+            v2_quotation=await self._v2_quotation_of(order),
+        )
 
     async def _origins_for(self, orders: Sequence[ProductionOrder]) -> dict[int, dict[str, object]]:
         """El origen de TODA una pagina, en tres consultas y no en N.
@@ -1368,6 +1650,7 @@ class ProductionOrderService:
         """
         quotations = await self._quotations_for(orders)
         prototypes = await self._prototypes_for(orders)
+        v2_quotations = await self._v2_quotations_for(orders)
         cpr_ids = {
             muestra.prototype_quotation_id
             for muestra in prototypes.values()
@@ -1394,6 +1677,11 @@ class ProductionOrderService:
                     if muestra is not None and muestra.prototype_quotation_id is not None
                     else None
                 ),
+                v2_quotation=(
+                    v2_quotations.get(order.v2_handoff_id)
+                    if order.v2_handoff_id is not None
+                    else None
+                ),
             )
         return resultado
 
@@ -1413,13 +1701,23 @@ class ProductionOrderService:
         location = await self._session.get(StockLocation, order.stock_location_id)
         prepared = await self._prepared_products(order)
         readiness = await self.evaluate_readiness(order)
+        # Fase 010I. El cliente de una orden V2 es el que quedo congelado en su
+        # cotizacion V2 al emitirla, no el del maestro de hoy.
+        v2_quotation = await self._v2_quotation_of(order)
+        cliente = (
+            quotation.customer_name_snapshot
+            if quotation
+            else v2_quotation.customer_name_snapshot
+            if v2_quotation
+            else None
+        )
 
         return ProductionOrderOut(
             id=order.id,
             code=order.code,
             status=order.status,
             **await self._origin(order),  # type: ignore[arg-type]
-            quotation_customer_name=quotation.customer_name_snapshot if quotation else None,
+            quotation_customer_name=cliente,
             quotation_payment_status=quotation.payment_status if quotation else None,
             stock_location_id=order.stock_location_id,
             stock_location_name=location.name if location else "",

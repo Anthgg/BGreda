@@ -62,9 +62,14 @@ QR_TOKEN_MIN_LENGTH = 32
 #: No es cortesia: sin esto cabrian una orden sin origen —que no sabria que
 #: fabricar— y una orden con los dos, que tendria dos modelos de material
 #: contradictorios y dos tipos de movimiento para el mismo arranque.
+#:
+#: Fase 010I: el tercer origen es la cotizacion V2, y entra por su PUENTE
+#: (`v2_handoff_id`) y no por la cotizacion. Cada rama nombra los TRES campos:
+#: una rama que solo mirara dos dejaria pasar una fila con el tercero relleno.
 EXACTLY_ONE_ORIGIN = (
-    "(quotation_id IS NOT NULL AND prototype_id IS NULL)"
-    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL)"
+    "(quotation_id IS NOT NULL AND prototype_id IS NULL AND v2_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL AND v2_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NULL AND v2_handoff_id IS NOT NULL)"
 )
 
 
@@ -168,6 +173,20 @@ class ProductionOrder(Base, TimestampMixin):
     #: resto del proyecto: una muestra con orden no se borra por debajo.
     prototype_id: Mapped[int | None] = mapped_column(
         ForeignKey("prototypes.id", ondelete="RESTRICT"), unique=True
+    )
+
+    #: Fase 010I. El puente de una cotizacion V2 aceptada (010H), si la orden
+    #: nace de una.
+    #:
+    #: Cuelga del PUENTE y no de la cotizacion a proposito: la clave foranea
+    #: hace imposible una orden V2 que no haya pasado por «Enviar a
+    #: produccion», asi que no hay un segundo camino hacia la fabrica. Y la
+    #: cadena de unicidades —UNIQUE aqui y UNIQUE de `v2_quotation_id` en el
+    #: puente— es la que garantiza en la base que una cotizacion V2 tenga como
+    #: mucho una orden: el doble clic, el reintento y dos peticiones a la vez
+    #: acaban en la misma fila.
+    v2_handoff_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_production_handoffs.id", ondelete="RESTRICT"), unique=True
     )
 
     #: De donde sale el material. Explicita siempre: no hay ubicacion por

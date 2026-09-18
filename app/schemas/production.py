@@ -32,20 +32,27 @@ class ProductionOrderCreateIn(BaseModel):
     #: una ubicacion: el dia que haya dos, el default silencioso descontaria
     #: del almacen equivocado sin que nadie lo notara.
     stock_location_id: int = Field(gt=0)
+    #: Fase 010I. El tercer origen: una cotizacion V2 ya enviada a produccion.
+    #: Se pide por la cotizacion porque es lo que el taller conoce; el servicio
+    #: resuelve su puente y cuelga la orden de el.
+    v2_quotation_id: int | None = Field(default=None, gt=0)
     #: Solo para reintentos de red. La unicidad de verdad la impone el UNIQUE
-    #: de `quotation_id` en la base.
+    #: del origen en la base (`quotation_id`, `prototype_id` o `v2_handoff_id`).
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
 
     @model_validator(mode="after")
     def _exactamente_un_origen(self) -> ProductionOrderCreateIn:
-        """Uno de los dos, nunca los dos ni ninguno.
+        """Uno de los tres, nunca dos ni ninguno.
 
         Es la misma regla que el CHECK `exactly_one_origin` de la tabla, dicha
         aqui para que quien se equivoque reciba un 422 que explica el error y
         no un 500 con un mensaje de PostgreSQL.
         """
-        if (self.quotation_id is None) == (self.prototype_id is None):
-            raise ValueError("Indica una cotización o una muestra, y solo una de las dos.")
+        origenes = (self.quotation_id, self.prototype_id, self.v2_quotation_id)
+        if sum(origen is not None for origen in origenes) != 1:
+            raise ValueError(
+                "Indica una cotización, una cotización V2 o una muestra, y solo una de ellas."
+            )
         return self
 
 
@@ -79,6 +86,9 @@ class ProductionOrderOrigin(StrEnum):
 
     QUOTATION = "QUOTATION"
     PROTOTYPE = "PROTOTYPE"
+    #: Fase 010I. Ese tercer origen: una cotizacion del Cotizador V2, que entra
+    #: por su puente de 010H.
+    V2_QUOTATION = "V2_QUOTATION"
 
 
 class ProductionOrderLineOut(BaseModel):
@@ -125,6 +135,12 @@ class ProductionOrderSummaryOut(BaseModel):
     #: el documento que el taller reconoce, y por eso viaja al lado del PRT.
     prototype_quotation_id: int | None = None
     prototype_quotation_code: str | None = None
+    #: Fase 010I. Nulos salvo cuando la orden nace de una cotizacion V2. Son
+    #: campos PROPIOS y no `quotation_id` reutilizado: el id de una V2 y el de
+    #: una Legacy son espacios distintos, y compartir el campo haria que un
+    #: enlace llevara a la cotizacion equivocada.
+    v2_quotation_id: int | None = None
+    v2_quotation_code: str | None = None
     stock_location_id: int
     stock_location_name: str
     line_count: int
