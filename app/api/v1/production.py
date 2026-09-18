@@ -1,7 +1,15 @@
 """API de ordenes de produccion.
 
-Solo `POST /{id}/start` mueve inventario. Todo lo demas —crear, listar, leer,
-completar, anular— deja los saldos exactamente como estaban.
+Solo dos rutas mueven inventario:
+
+- `POST /{id}/start` en una orden Legacy o de muestra, que descuenta su
+  material entero al arrancar;
+- `POST /{id}/consumptions` en una orden V2 (Fase 010I), que descuenta un
+  consumo real cada vez que el taller lo registra. Una orden V2 NO descuenta
+  nada al arrancar.
+
+Todo lo demas —crear, listar, leer, completar, anular— deja los saldos
+exactamente como estaban.
 """
 
 from __future__ import annotations
@@ -20,6 +28,9 @@ from app.api.deps import (
 )
 from app.models.production import ProductionOrderStatus
 from app.schemas.production import (
+    ProductionConsumptionCreateIn,
+    ProductionConsumptionOut,
+    ProductionConsumptionPage,
     ProductionOrderCreateIn,
     ProductionOrderOut,
     ProductionOrderPage,
@@ -68,7 +79,7 @@ async def create_production_order(
     """Crea la orden de una cotizacion confirmada, de una cotizacion V2 enviada a
     produccion (Fase 010I) o de una muestra.
 
-    **No consume material** en ninguno de los dos casos.
+    **No consume material** en ninguno de los casos.
 
     Pedirla dos veces para el mismo origen no crea una segunda: devuelve la que
     ya hay, con 200 en vez de 201, para que el cliente sepa que no acaba de
@@ -222,4 +233,46 @@ async def cancel_production_order(
     order, _changed = await service.cancel(order_id, user=admin)
     result = await service.present(order)
     await session.commit()
+    return result
+
+
+# -- Fase 010I: consumo real ------------------------------------------------
+@router.get("/{order_id}/consumptions", response_model=ProductionConsumptionPage)
+async def list_production_consumptions(
+    order_id: int,
+    service: ProductionOrderServiceDep,
+    _: CurrentUserDep,
+) -> ProductionConsumptionPage:
+    """El material real gastado en la orden, del mas antiguo al mas reciente."""
+    return await service.list_consumptions(order_id)
+
+
+@router.post(
+    "/{order_id}/consumptions",
+    response_model=ProductionConsumptionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_production_consumption(
+    order_id: int,
+    payload: ProductionConsumptionCreateIn,
+    service: ProductionOrderServiceDep,
+    actor: WorkshopUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> ProductionConsumptionOut:
+    """Registra material REAL gastado en una orden V2 y lo descuenta del almacen.
+
+    **Mueve inventario**, y solo por esta accion explicita: ni cotizar, ni
+    emitir, ni enviar a produccion, ni crear o arrancar la orden descuentan
+    nada. Es de TALLER (ADMIN u OPERATOR), igual que ajustar existencia.
+
+    Reintentar con la misma `idempotency_key` no descuenta dos veces: devuelve
+    el consumo que ya existe, con 200 en vez de 201. Si falta existencia, no se
+    descuenta nada y responde `NEGATIVE_STOCK_NOT_ALLOWED`.
+    """
+    consumption, created = await service.record_consumption(order_id, payload, user=actor)
+    [result] = await service.present_consumptions([consumption])
+    await session.commit()
+    if not created:
+        response.status_code = status.HTTP_200_OK
     return result

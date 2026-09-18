@@ -30,9 +30,10 @@ from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
 from app.models.audit import AuditAction
-from app.models.inventory import MovementType, StockBalance, StockLocation
+from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
 from app.models.masters import Product, ProductType, UnitOfMeasure, UomDimension
 from app.models.production import (
+    ProductionConsumption,
     ProductionOrder,
     ProductionOrderLine,
     ProductionOrderStatus,
@@ -49,11 +50,19 @@ from app.models.quotations import (
     QuotationPaymentStatus,
     QuotationStatus,
 )
-from app.models.quoter_v2 import V2ProductionHandoff, V2Quotation, V2QuotationStatus
+from app.models.quoter_v2 import (
+    V2ProductionHandoff,
+    V2Quotation,
+    V2QuotationProduct,
+    V2QuotationStatus,
+)
 from app.models.recipes import Recipe
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.production import (
+    ProductionConsumptionCreateIn,
+    ProductionConsumptionOut,
+    ProductionConsumptionPage,
     ProductionOrderLineOut,
     ProductionOrderOrigin,
     ProductionOrderOut,
@@ -249,6 +258,73 @@ class ProductionOrderIdempotencyKeyReusedError(APIError):
     status_code = 409
     code = "PRODUCTION_ORDER_IDEMPOTENCY_KEY_REUSED"
     message = "Esa clave de idempotencia ya se uso para otra orden de produccion"
+
+
+class ProductionConsumptionOrderNotV2Error(APIError):
+    """El consumo explicito es solo de ordenes V2. Fase 010I.
+
+    Una orden Legacy o de muestra ya descuenta su material al ARRANCAR, por
+    receta o por las lineas de la muestra. Registrarle ademas consumos a mano
+    descontaria el mismo material dos veces.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_CONSUMPTION_ORDER_NOT_V2"
+    message = "Solo una orden de una cotizacion V2 registra consumos uno a uno"
+
+
+class ProductionOrderNotConsumableError(APIError):
+    """La orden esta finalizada o anulada. Fase 010I.
+
+    Se consume en INICIO y en EN PROCESO. Una orden cerrada no gasta mas
+    material, y una anulada no deberia haber gastado ninguno.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_NOT_CONSUMABLE"
+    message = "La orden esta finalizada o anulada y ya no admite consumos"
+
+
+class ProductionConsumptionKeyReusedError(APIError):
+    """La clave de idempotencia ya es de OTRO consumo. Fase 010I.
+
+    Una clave identifica los reintentos de UN consumo. Llegar con ella pidiendo
+    otro material u otra cantidad es un error del cliente: devolver el consumo
+    que ya la tiene seria decir «hecho» sobre algo que no se hizo.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_CONSUMPTION_KEY_REUSED"
+    message = "Esa clave de idempotencia ya se uso para otro consumo"
+
+
+class ProductionConsumptionMaterialInvalidError(APIError):
+    status_code = 422
+    code = "PRODUCTION_CONSUMPTION_MATERIAL_INVALID"
+    message = "El material no existe o esta desactivado"
+
+
+class ProductionConsumptionLineInvalidError(APIError):
+    """La pieza indicada no es de la cotizacion de esta orden. Fase 010I."""
+
+    status_code = 422
+    code = "PRODUCTION_CONSUMPTION_LINE_INVALID"
+    message = "La pieza indicada no pertenece a la cotizacion de esta orden"
+
+
+class ProductionOrderHasConsumptionsError(APIError):
+    """Anular una orden que ya gasto material. Fase 010I, decision D1.
+
+    La orden V2 puede consumir en INICIO, antes de arrancar, y anular desde
+    INICIO no preguntaba si ya se habia descontado algo. Ahora se bloquea: anular
+    no devuelve a los sacos lo que ya se uso, y fingir que si convertiria el
+    inventario en una opinion. Si hubo un error, se corrige con un ajuste de
+    inventario, que deja su propia evidencia y su propio responsable.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_HAS_CONSUMPTIONS"
+    message = "La orden ya tiene material consumido y no puede anularse"
 
 
 class ProductionOrderNotStartableError(APIError):
@@ -1419,6 +1495,267 @@ class ProductionOrderService:
         )
         return order, True
 
+    # -- consumo real (Fase 010I) -------------------------------------------
+    async def _consumption_by_key(self, key: str) -> ProductionConsumption | None:
+        return await self._session.scalar(
+            select(ProductionConsumption).where(ProductionConsumption.idempotency_key == key)
+        )
+
+    @staticmethod
+    def _same_consumption(
+        existing: ProductionConsumption,
+        *,
+        order_id: int,
+        location_id: int | None,
+        data: ProductionConsumptionCreateIn,
+    ) -> bool:
+        """¿Es el reintento del MISMO consumo? La nota no cuenta: no mueve stock.
+
+        `location_id` es el almacen EFECTIVO —el pedido o, si no se pidio, el de
+        la orden—. Compararlo sin resolver aceptaria un reintento «sin almacen»
+        como si fuera un consumo que salio de otro.
+        """
+        return (
+            existing.production_order_id == order_id
+            and existing.product_id == data.product_id
+            and existing.stock_location_id == location_id
+            and existing.quantity == data.quantity
+            and existing.kind == data.kind
+            and existing.v2_quotation_product_id == data.v2_quotation_product_id
+        )
+
+    async def _effective_location_id(
+        self, order_id: int, data: ProductionConsumptionCreateIn
+    ) -> int | None:
+        """El almacen del consumo: el pedido o, si no se pidio, el de la orden."""
+        if data.stock_location_id is not None:
+            return data.stock_location_id
+        orden = await self._session.get(ProductionOrder, order_id)
+        return orden.stock_location_id if orden is not None else None
+
+    async def record_consumption(
+        self, order_id: int, data: ProductionConsumptionCreateIn, *, user: AuthenticatedUser
+    ) -> tuple[ProductionConsumption, bool]:
+        """Registra material REAL gastado en una orden V2. `(consumo, es_nuevo)`.
+
+        **Es lo unico que mueve inventario en una orden V2.** No se hace por
+        cotizar, confirmar, generar el PDF, enviar a produccion, crear la orden
+        ni arrancarla: solo cuando alguien registra que ese material salio.
+
+        Todo en una transaccion y en este orden:
+
+        1. bloqueo consultivo sobre la CLAVE: dos peticiones con la misma clave
+           —doble clic, reintento de red— se serializan;
+        2. si la clave ya tiene consumo, se devuelve ese y no se toca el stock
+           (o 409 si la clave llega pidiendo otra cosa);
+        3. bloqueo de la ORDEN: dos consumos de la misma orden se serializan, y
+           nadie la anula o la cierra a la vez;
+        4. validaciones: orden V2, en INICIO o EN PROCESO, material activo,
+           almacen valido, pieza de ESTA cotizacion;
+        5. SAVEPOINT con el movimiento y el registro JUNTOS. `apply_movement`
+           bloquea el saldo y se niega a dejarlo negativo, asi que dos ordenes
+           que piden 700 g de un saldo de 1000 no pueden llevarse las dos. Si el
+           UNIQUE de la clave saltara aun asi, el SAVEPOINT deshace TAMBIEN el
+           movimiento —envolver solo el registro dejaria un doble descuento— y
+           la transaccion sigue utilizable para devolver el consumo ganador.
+        """
+        await self._lock_idempotency(data.idempotency_key)
+
+        existing = await self._consumption_by_key(data.idempotency_key)
+        if existing is not None:
+            if not self._same_consumption(
+                existing,
+                order_id=order_id,
+                location_id=await self._effective_location_id(order_id, data),
+                data=data,
+            ):
+                raise ProductionConsumptionKeyReusedError()
+            return existing, False
+
+        order = await self.get(order_id, for_update=True)
+        location_id = (
+            data.stock_location_id
+            if data.stock_location_id is not None
+            else order.stock_location_id
+        )
+        if order.v2_handoff_id is None:
+            raise ProductionConsumptionOrderNotV2Error()
+        if order.status not in (ProductionOrderStatus.CREATED, ProductionOrderStatus.STARTED):
+            raise ProductionOrderNotConsumableError()
+
+        product = await self._session.get(Product, data.product_id)
+        if product is None or not product.active:
+            raise ProductionConsumptionMaterialInvalidError()
+
+        location = await self._session.get(StockLocation, location_id)
+        if location is None or not location.active:
+            raise ProductionOrderLocationInvalidError()
+
+        if data.v2_quotation_product_id is not None:
+            await self._require_line_of_order(order, data.v2_quotation_product_id)
+
+        consumption: ProductionConsumption | None = None
+        try:
+            async with self._session.begin_nested():
+                movement = await self._inventory.apply_movement(
+                    product=product,
+                    location=location,
+                    quantity=-data.quantity,
+                    movement_type=MovementType.PRODUCTION_OUT,
+                    reason=f"Orden de produccion {order.code} · consumo real",
+                    user_id=user.id,
+                    user_name=user.display_name,
+                    production_order_id=order.id,
+                )
+                consumption = ProductionConsumption(
+                    production_order_id=order.id,
+                    v2_quotation_product_id=data.v2_quotation_product_id,
+                    product_id=product.id,
+                    stock_location_id=location.id,
+                    kind=data.kind,
+                    quantity=data.quantity,
+                    # La unidad del SALDO, que es la del movimiento: la cantidad
+                    # se registro en ella. `apply_movement` ya exige que exista.
+                    uom_code=movement.uom_code,
+                    unit_cost_snapshot=product.cost,
+                    stock_movement_id=movement.id,
+                    idempotency_key=data.idempotency_key,
+                    note=data.note,
+                    created_by=user.id,
+                    created_by_name=user.display_name,
+                )
+                self._session.add(consumption)
+                await self._session.flush()
+        except IntegrityError:
+            ganador = await self._consumption_by_key(data.idempotency_key)
+            if ganador is None:
+                raise
+            if not self._same_consumption(
+                ganador, order_id=order_id, location_id=location_id, data=data
+            ):
+                raise ProductionConsumptionKeyReusedError() from None
+            return ganador, False
+
+        assert consumption is not None
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "event": "CONSUMPTION",
+                "consumption_id": consumption.id,
+                "stock_movement_id": consumption.stock_movement_id,
+                "product_id": product.id,
+                "stock_location_id": location.id,
+                "kind": consumption.kind.value,
+                "quantity": format(consumption.quantity, "f"),
+                "uom": consumption.uom_code,
+                "v2_quotation_product_id": consumption.v2_quotation_product_id,
+            },
+        )
+        return consumption, True
+
+    async def _require_line_of_order(self, order: ProductionOrder, line_id: int) -> None:
+        """La pieza tiene que ser de la cotizacion V2 de ESTA orden."""
+        pertenece = await self._session.scalar(
+            select(V2QuotationProduct.id)
+            .join(
+                V2ProductionHandoff,
+                V2ProductionHandoff.v2_quotation_id == V2QuotationProduct.v2_quotation_id,
+            )
+            .where(
+                V2QuotationProduct.id == line_id,
+                V2ProductionHandoff.id == order.v2_handoff_id,
+            )
+        )
+        if pertenece is None:
+            raise ProductionConsumptionLineInvalidError()
+
+    async def list_consumptions(self, order_id: int) -> ProductionConsumptionPage:
+        """Los consumos de una orden, del mas antiguo al mas reciente."""
+        await self.get(order_id)  # 404 si la orden no existe
+        filas = (
+            (
+                await self._session.execute(
+                    select(ProductionConsumption)
+                    .where(ProductionConsumption.production_order_id == order_id)
+                    .order_by(ProductionConsumption.created_at, ProductionConsumption.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        items = await self.present_consumptions(filas)
+        return ProductionConsumptionPage(items=items, total=len(items))
+
+    async def present_consumptions(
+        self, consumptions: Sequence[ProductionConsumption]
+    ) -> list[ProductionConsumptionOut]:
+        """Material, almacen y saldo resultante de cada consumo, en tres consultas."""
+        if not consumptions:
+            return []
+        productos = {
+            fila.id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(Product).where(Product.id.in_({c.product_id for c in consumptions}))
+                )
+            ).all()
+        }
+        almacenes = {
+            fila.id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(StockLocation).where(
+                        StockLocation.id.in_({c.stock_location_id for c in consumptions})
+                    )
+                )
+            ).all()
+        }
+        movimientos = {
+            fila.id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(StockMovement).where(
+                        StockMovement.id.in_({c.stock_movement_id for c in consumptions})
+                    )
+                )
+            ).all()
+        }
+        return [
+            ProductionConsumptionOut(
+                id=c.id,
+                production_order_id=c.production_order_id,
+                v2_quotation_product_id=c.v2_quotation_product_id,
+                product_id=c.product_id,
+                product_name=productos[c.product_id].name,
+                product_internal_reference=productos[c.product_id].internal_reference,
+                stock_location_id=c.stock_location_id,
+                stock_location_name=almacenes[c.stock_location_id].name,
+                kind=c.kind,
+                quantity=c.quantity,
+                uom_code=c.uom_code,
+                balance_after=movimientos[c.stock_movement_id].balance_after,
+                stock_movement_id=c.stock_movement_id,
+                note=c.note,
+                created_by_name=c.created_by_name,
+                created_at=c.created_at,
+            )
+            for c in consumptions
+        ]
+
+    async def _has_consumptions(self, order_id: int) -> bool:
+        return (
+            await self._session.scalar(
+                select(ProductionConsumption.id)
+                .where(ProductionConsumption.production_order_id == order_id)
+                .limit(1)
+            )
+        ) is not None
+
     # -- cierre y anulacion -------------------------------------------------
     async def complete(
         self, order_id: int, *, user: AuthenticatedUser
@@ -1471,6 +1808,13 @@ class ProductionOrderService:
             return order, False
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotCancellableError()
+        # Fase 010I, decision D1. Una orden V2 puede consumir ya en INICIO, asi
+        # que «esta en CREATED» ha dejado de significar «no gasto nada». Se
+        # pregunta con la orden bloqueada: registrar un consumo toma el mismo
+        # bloqueo, de modo que consumir y anular a la vez no pueden terminar
+        # los dos.
+        if await self._has_consumptions(order.id):
+            raise ProductionOrderHasConsumptionsError()
 
         moment = datetime.now(UTC)
         order.status = ProductionOrderStatus.CANCELLED

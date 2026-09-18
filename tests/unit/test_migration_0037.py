@@ -86,6 +86,10 @@ def test_el_downgrade_esta_protegido_por_las_ordenes_v2() -> None:
     downgrade = _downgrade()
     assert "RAISE EXCEPTION" in downgrade
     assert "WHERE v2_handoff_id IS NOT NULL" in downgrade
+    # Y tambien los consumos: que solo cuelguen de ordenes V2 lo garantiza el
+    # servicio, no la base, asi que la guardia no puede darlo por hecho.
+    assert "FROM production_consumptions" in downgrade
+    assert downgrade.index("RAISE EXCEPTION") < downgrade.index("drop_table")
     # Y la guardia va ANTES de tocar nada.
     assert downgrade.index("RAISE EXCEPTION") < downgrade.index("op.drop_constraint")
 

@@ -361,6 +361,44 @@ async def test_la_vuelta_a_0036_conserva_las_ordenes_de_muestra(
     assert muestras == 1
 
 
+async def test_los_check_del_consumo_no_llevan_doble_prefijo(
+    migration_engine: AsyncEngine,
+) -> None:
+    """Hallazgo de la revision del bloque B: comprobarlo en la base, no en el texto.
+
+    0036 cayo en la trampa de 0024: sus CHECK se llaman
+    `ck_v2_quotation_processes_ck_v2_quotation_processes_...` en la base real. Aqui
+    se fija que los de la tabla nueva salen con UN solo prefijo.
+    """
+    _upgrade("0037")
+    async with migration_engine.connect() as connection:
+        nombres = set(
+            (
+                await connection.scalars(
+                    text(
+                        "SELECT conname FROM pg_constraint"
+                        " WHERE conrelid = 'production_consumptions'::regclass"
+                    )
+                )
+            ).all()
+        )
+    for esperado in (
+        "ck_production_consumptions_quantity_positive",
+        "ck_production_consumptions_kind_allowed",
+        "ck_production_consumptions_uom_not_blank",
+        "ck_production_consumptions_unit_cost_non_negative",
+        "ck_production_consumptions_idempotency_key_long_enough",
+        "uq_production_consumptions_stock_movement_id",
+        "uq_production_consumptions_idempotency_key",
+        "pk_production_consumptions",
+    ):
+        assert esperado in nombres, (esperado, sorted(nombres))
+    # El patron exacto de la trampa, y no «ck_ aparece dos veces»: eso tambien
+    # lo cumplen FK legitimas como `...stock_location_id_stock_locations`.
+    doble = "ck_production_consumptions_ck_"
+    assert not [n for n in nombres if n.startswith(doble)], sorted(nombres)
+
+
 async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0037(
     migration_engine: AsyncEngine,
 ) -> None:

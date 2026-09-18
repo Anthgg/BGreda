@@ -14,7 +14,11 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.production import ProductionOrderStatus, ProductionReadinessCode
+from app.models.production import (
+    ProductionConsumptionKind,
+    ProductionOrderStatus,
+    ProductionReadinessCode,
+)
 from app.models.quotations import QuotationPaymentStatus
 
 
@@ -172,3 +176,60 @@ class ProductionOrderPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ProductionConsumptionCreateIn(BaseModel):
+    """Registrar material REAL gastado en una orden V2. Fase 010I.
+
+    La cantidad va en la unidad base del material —la del saldo— y SIEMPRE en
+    positivo: registrar un consumo es descontar, y el signo lo pone el
+    movimiento. Un cero no es un consumo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_id: int = Field(gt=0)
+    #: Opcional: por defecto el almacen de la orden. Cada consumo dice el suyo
+    #: porque no se asume un almacen unico.
+    stock_location_id: int | None = Field(default=None, gt=0)
+    quantity: Decimal = Field(gt=0)
+    kind: ProductionConsumptionKind
+    #: La pieza a la que se imputa. Nulo = consumo de la orden entera.
+    v2_quotation_product_id: int | None = Field(default=None, gt=0)
+    note: str | None = Field(default=None, max_length=500)
+    #: OBLIGATORIA. La genera el cliente al abrir el formulario de consumo y la
+    #: reutiliza en cada reintento de ESE consumo: es lo que impide que un doble
+    #: clic o un corte de red descuenten dos veces.
+    idempotency_key: str = Field(min_length=8, max_length=64)
+
+
+class ProductionConsumptionOut(BaseModel):
+    """Un consumo real, tal como lo ve el taller.
+
+    Sin el costo: igual que el resto de esta API, una orden de produccion es un
+    papel de taller y no ensena importes. El costo por unidad se guarda solo
+    para comparar despues lo real con lo cotizado.
+    """
+
+    id: int
+    production_order_id: int
+    v2_quotation_product_id: int | None
+    product_id: int
+    product_name: str
+    product_internal_reference: str
+    stock_location_id: int
+    stock_location_name: str
+    kind: ProductionConsumptionKind
+    quantity: Decimal
+    uom_code: str
+    #: Saldo del material en ese almacen justo despues de este consumo.
+    balance_after: Decimal
+    stock_movement_id: int
+    note: str | None
+    created_by_name: str | None
+    created_at: datetime
+
+
+class ProductionConsumptionPage(BaseModel):
+    items: list[ProductionConsumptionOut]
+    total: int

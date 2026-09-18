@@ -14,6 +14,15 @@ justo lo que 009K.4 unifico.
 Lo aditivo:
 
     production_orders.v2_handoff_id   FK a v2_production_handoffs, anulable, UNICA
+    production_consumptions           el material REAL gastado en una orden V2
+
+El consumo es un registro explicito por cada salida de material, y no la receta
+entera descontada al arrancar como en una orden Legacy: en el taller lo cotizado
+y lo gastado no coinciden —otra pasta, otro esmalte, una pieza que se rompe—, y
+el inventario tiene que reflejar lo que de verdad salio. Cada consumo es
+exactamente un movimiento `PRODUCTION_OUT` (UNIQUE sobre el movimiento) y lleva
+una clave de idempotencia obligatoria y UNICA: el doble clic y el reintento de
+red no pueden descontar dos veces.
 
 Cuelga del PUENTE y no de la cotizacion: la clave foranea impide que exista
 una orden V2 que no haya pasado por «Enviar a produccion», asi que no nace un
@@ -98,6 +107,74 @@ def upgrade() -> None:
     op.drop_constraint(_CK_ORIGEN, "production_orders", type_="check")
     op.create_check_constraint(_CK_ORIGEN, "production_orders", _ORIGEN_TRES_RAMAS)
 
+    # Bloque B. El material REAL que el taller gasta en una orden V2.
+    #
+    # Dentro de `create_table` los CHECK van DESNUDOS: la convencion les pone
+    # delante `ck_<tabla>_`. Es la trampa en la que cayo 0036, cuyos CHECK se
+    # llaman `ck_v2_quotation_processes_ck_v2_quotation_processes_...` en la
+    # base real. Las FK se nombran solas con la convencion; los UNIQUE
+    # explicitos se usan tal cual.
+    op.create_table(
+        "production_consumptions",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("production_order_id", sa.Integer(), nullable=False),
+        sa.Column("v2_quotation_product_id", sa.Integer(), nullable=True),
+        sa.Column("product_id", sa.Integer(), nullable=False),
+        sa.Column("stock_location_id", sa.Integer(), nullable=False),
+        sa.Column("kind", sa.String(length=16), nullable=False),
+        sa.Column("quantity", sa.Numeric(precision=24, scale=12), nullable=False),
+        sa.Column("uom_code", sa.String(length=32), nullable=False),
+        sa.Column("unit_cost_snapshot", sa.Numeric(precision=24, scale=12), nullable=True),
+        sa.Column("stock_movement_id", sa.Integer(), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=64), nullable=False),
+        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("created_by", sa.Uuid(), nullable=True),
+        sa.Column("created_by_name", sa.String(length=120), nullable=True),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["production_order_id"], ["production_orders.id"], ondelete="RESTRICT"
+        ),
+        sa.ForeignKeyConstraint(
+            ["v2_quotation_product_id"], ["v2_quotation_products.id"], ondelete="RESTRICT"
+        ),
+        sa.ForeignKeyConstraint(["product_id"], ["products.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(["stock_location_id"], ["stock_locations.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(["stock_movement_id"], ["stock_movements.id"], ondelete="RESTRICT"),
+        sa.CheckConstraint("quantity > 0", name="quantity_positive"),
+        sa.CheckConstraint("kind IN ('BODY', 'GLAZE', 'OTHER')", name="kind_allowed"),
+        sa.CheckConstraint("length(btrim(uom_code)) > 0", name="uom_not_blank"),
+        sa.CheckConstraint(
+            "unit_cost_snapshot IS NULL OR unit_cost_snapshot >= 0",
+            name="unit_cost_non_negative",
+        ),
+        sa.CheckConstraint(
+            "length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"
+        ),
+        # Un movimiento, un consumo; y una clave, un consumo.
+        sa.UniqueConstraint(
+            "stock_movement_id", name="uq_production_consumptions_stock_movement_id"
+        ),
+        sa.UniqueConstraint("idempotency_key", name="uq_production_consumptions_idempotency_key"),
+    )
+    op.create_index(
+        "ix_production_consumptions_production_order_id",
+        "production_consumptions",
+        ["production_order_id"],
+    )
+    op.create_index(
+        "ix_production_consumptions_v2_quotation_product_id",
+        "production_consumptions",
+        ["v2_quotation_product_id"],
+    )
+    op.create_index(
+        "ix_production_consumptions_product_id", "production_consumptions", ["product_id"]
+    )
+
 
 def downgrade() -> None:
     # Bajar solo es posible si no hay ordenes V2. Si las hay, el CHECK de dos
@@ -110,21 +187,31 @@ def downgrade() -> None:
             DO $$
             DECLARE
                 pendientes integer;
+                consumos integer;
             BEGIN
                 SELECT count(*) INTO pendientes
                 FROM production_orders
                 WHERE v2_handoff_id IS NOT NULL;
 
-                IF pendientes > 0 THEN
+                SELECT count(*) INTO consumos
+                FROM production_consumptions;
+
+                IF pendientes > 0 OR consumos > 0 THEN
                     RAISE EXCEPTION
                         '0037 downgrade bloqueado: % orden(es) de produccion nacieron de una '
-                        'cotizacion V2. Volver a 0036 las dejaria sin origen valido. '
-                        'Decide que hacer con ellas antes de bajar.', pendientes;
+                        'cotizacion V2 y hay % consumo(s) real(es) registrado(s). Volver a '
+                        '0036 dejaria ordenes sin origen valido y borraria material gastado '
+                        'que el inventario si refleja. Decide que hacer antes de bajar.',
+                        pendientes, consumos;
                 END IF;
             END $$;
             """
         )
     )
+
+    # La guardia ya exigio que no haya ni un consumo. Se suelta primero porque
+    # apunta a la orden.
+    op.drop_table("production_consumptions")
 
     op.drop_constraint(_CK_ORIGEN, "production_orders", type_="check")
     op.create_check_constraint(_CK_ORIGEN, "production_orders", _ORIGEN_DOS_RAMAS)
