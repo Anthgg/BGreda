@@ -428,6 +428,95 @@ async def test_los_check_de_las_notas_no_llevan_doble_prefijo(
     assert not [n for n in nombres if n.startswith("ck_production_order_notes_ck_")]
 
 
+async def test_los_check_de_las_comunicaciones_no_llevan_doble_prefijo(
+    migration_engine: AsyncEngine,
+) -> None:
+    """Bloque D: la tabla de comunicaciones, con la misma comprobacion."""
+    _upgrade("0037")
+    async with migration_engine.connect() as connection:
+        nombres = set(
+            (
+                await connection.scalars(
+                    text(
+                        "SELECT conname FROM pg_constraint"
+                        " WHERE conrelid = 'production_order_communications'::regclass"
+                    )
+                )
+            ).all()
+        )
+    for esperado in (
+        "ck_production_order_communications_channel_allowed",
+        "ck_production_order_communications_message_valid",
+        "ck_production_order_communications_idempotency_key_long_enough",
+        "uq_production_order_communications_idempotency_key",
+        "pk_production_order_communications",
+    ):
+        assert esperado in nombres, (esperado, sorted(nombres))
+    assert not [n for n in nombres if n.startswith("ck_production_order_communications_ck_")]
+
+
+async def test_las_comunicaciones_de_la_base_migrada_se_comportan(
+    migration_engine: AsyncEngine,
+) -> None:
+    """Hallazgo de Copilot en el bloque D: no basta con los NOMBRES.
+
+    El esquema de las demas pruebas sale del modelo (`create_all`); este sale de
+    la migracion. Aqui se comprueba que la tabla MIGRADA rechaza de verdad lo
+    que dice rechazar —canal ajeno, mensaje en blanco o largo, clave corta,
+    clave repetida— y que una orden con avisos no se puede borrar.
+    """
+    _upgrade("0037")
+    almacen = await _almacen(migration_engine, "Almacen avisos 0037")
+    puente = await _puente(migration_engine, "CTZV2-AVISOS-0037")
+    await _orden(migration_engine, "OP-V2-AVISOS", almacen=almacen, v2_handoff_id=puente)
+    async with migration_engine.connect() as connection:
+        orden = await connection.scalar(
+            text("SELECT id FROM production_orders WHERE code = 'OP-V2-AVISOS'")
+        )
+
+    insertar = text(
+        "INSERT INTO production_order_communications"
+        " (production_order_id, channel, message, sent_at, idempotency_key)"
+        " VALUES (:orden, :canal, :mensaje, now(), :clave)"
+    )
+    valido = {"orden": orden, "canal": "WHATSAPP", "mensaje": "Hola", "clave": "aviso-migrado"}
+    async with migration_engine.begin() as connection:
+        await connection.execute(insertar, valido)
+
+    for cambio, restriccion in (
+        ({"canal": "EMAIL", "clave": "aviso-canal-x"}, "channel_allowed"),
+        ({"mensaje": "   ", "clave": "aviso-blanco-x"}, "message_valid"),
+        ({"mensaje": "x" * 2001, "clave": "aviso-largo-x"}, "message_valid"),
+        ({"clave": "corta"}, "idempotency_key_long_enough"),
+        ({}, "uq_production_order_communications_idempotency_key"),
+    ):
+        with pytest.raises(IntegrityError) as error:
+            async with migration_engine.begin() as connection:
+                await connection.execute(insertar, {**valido, **cambio})
+        assert restriccion in str(error.value), (cambio, str(error.value)[:300])
+
+    # RESTRICT: una orden con avisos registrados no desaparece por debajo.
+    with pytest.raises(IntegrityError) as error:
+        async with migration_engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM production_orders WHERE id = :id"), {"id": orden}
+            )
+    assert "production_order_communications" in str(error.value)
+
+    async with migration_engine.connect() as connection:
+        indices = set(
+            (
+                await connection.scalars(
+                    text(
+                        "SELECT indexname FROM pg_indexes"
+                        " WHERE tablename = 'production_order_communications'"
+                    )
+                )
+            ).all()
+        )
+    assert "ix_production_order_communications_production_order_id" in indices, indices
+
+
 async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0037(
     migration_engine: AsyncEngine,
 ) -> None:

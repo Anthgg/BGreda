@@ -91,6 +91,11 @@ def test_el_downgrade_esta_protegido_por_las_ordenes_v2() -> None:
     assert "FROM production_consumptions" in downgrade
     # Bloque C: las notas y quemas del seguimiento tambien son historia.
     assert "FROM production_order_notes" in downgrade
+    # Bloque D: los avisos registrados tambien.
+    assert "FROM production_order_communications" in downgrade
+    assert downgrade.index('drop_table("production_order_communications")') < downgrade.index(
+        'drop_table("production_order_notes")'
+    )
     assert downgrade.index('drop_table("production_order_notes")') < downgrade.index(
         'drop_table("production_consumptions")'
     )

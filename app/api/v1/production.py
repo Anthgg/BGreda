@@ -28,6 +28,8 @@ from app.api.deps import (
 )
 from app.models.production import ProductionOrderStatus
 from app.schemas.production import (
+    ProductionCommunicationCreateIn,
+    ProductionCommunicationOut,
     ProductionConsumptionCreateIn,
     ProductionConsumptionOut,
     ProductionConsumptionPage,
@@ -314,11 +316,40 @@ async def add_production_note(
     return result
 
 
+@router.post(
+    "/{order_id}/communications",
+    response_model=ProductionCommunicationOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_production_communication(
+    order_id: int,
+    payload: ProductionCommunicationCreateIn,
+    service: ProductionOrderServiceDep,
+    actor: WorkshopUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> ProductionCommunicationOut:
+    """REGISTRA un aviso al cliente que el taller ya hizo. **No envia nada.**
+
+    Fase 010I, decision D2. WhatsApp es el canal declarado: no hay integracion
+    con ningun proveedor. Se guarda el texto final, cuando se aviso y quien
+    tenia la sesion. No cambia estado, inventario ni cotizacion. Se lee en el
+    seguimiento (`/timeline`); no hay un listado aparte que pudiera discrepar.
+    Mismo reintento que las notas: 200 si la clave ya existia.
+    """
+    communication, created = await service.record_communication(order_id, payload, user=actor)
+    result = service.present_communication(communication)
+    await session.commit()
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return result
+
+
 @router.get("/{order_id}/timeline", response_model=ProductionTimelineOut)
 async def get_production_timeline(
     order_id: int,
     service: ProductionOrderServiceDep,
     _: CurrentUserDep,
 ) -> ProductionTimelineOut:
-    """El seguimiento de la orden: estados, consumos, notas y quemas, en orden."""
+    """El seguimiento de la orden: estados, consumos, notas, quemas y avisos, en orden."""
     return await service.timeline(order_id)

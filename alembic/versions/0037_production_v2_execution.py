@@ -16,6 +16,7 @@ Lo aditivo:
     production_orders.v2_handoff_id   FK a v2_production_handoffs, anulable, UNICA
     production_consumptions           el material REAL gastado en una orden V2
     production_order_notes            notas y QUEMAS reales del seguimiento (D4)
+    production_order_communications   avisos al cliente que el taller DECLARA (D2)
 
 El consumo es un registro explicito por cada salida de material, y no la receta
 entera descontada al arrancar como en una orden Legacy: en el taller lo cotizado
@@ -232,6 +233,44 @@ def upgrade() -> None:
         ["production_order_id"],
     )
 
+    # Bloque D. Comunicaciones con el cliente que el taller DECLARA haber hecho
+    # (decision D2). El sistema no envia nada: solo deja constancia.
+    op.create_table(
+        "production_order_communications",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("production_order_id", sa.Integer(), nullable=False),
+        sa.Column("channel", sa.String(length=16), nullable=False),
+        sa.Column("message", sa.Text(), nullable=False),
+        sa.Column("sent_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("sent_by", sa.Uuid(), nullable=True),
+        sa.Column("sent_by_name", sa.String(length=120), nullable=True),
+        sa.Column("idempotency_key", sa.String(length=64), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["production_order_id"], ["production_orders.id"], ondelete="RESTRICT"
+        ),
+        sa.CheckConstraint("channel IN ('WHATSAPP')", name="channel_allowed"),
+        sa.CheckConstraint(
+            "length(btrim(message)) > 0 AND length(message) <= 2000", name="message_valid"
+        ),
+        sa.CheckConstraint(
+            "length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"
+        ),
+        sa.UniqueConstraint(
+            "idempotency_key", name="uq_production_order_communications_idempotency_key"
+        ),
+    )
+    op.create_index(
+        "ix_production_order_communications_production_order_id",
+        "production_order_communications",
+        ["production_order_id"],
+    )
+
 
 def downgrade() -> None:
     # Bajar solo es posible si no hay ordenes V2. Si las hay, el CHECK de dos
@@ -246,6 +285,7 @@ def downgrade() -> None:
                 pendientes integer;
                 consumos integer;
                 notas integer;
+                avisos integer;
             BEGIN
                 SELECT count(*) INTO pendientes
                 FROM production_orders
@@ -257,13 +297,17 @@ def downgrade() -> None:
                 SELECT count(*) INTO notas
                 FROM production_order_notes;
 
-                IF pendientes > 0 OR consumos > 0 OR notas > 0 THEN
+                SELECT count(*) INTO avisos
+                FROM production_order_communications;
+
+                IF pendientes > 0 OR consumos > 0 OR notas > 0 OR avisos > 0 THEN
                     RAISE EXCEPTION
                         '0037 downgrade bloqueado: % orden(es) de produccion nacieron de una '
-                        'cotizacion V2, hay % consumo(s) real(es) y % nota(s) de seguimiento. '
+                        'cotizacion V2, hay % consumo(s) real(es), % nota(s) de seguimiento '
+                        'y % comunicacion(es) registrada(s). '
                         'Volver a 0036 dejaria ordenes sin origen valido y borraria material '
                         'gastado que el inventario si refleja. Decide que hacer antes de bajar.',
-                        pendientes, consumos, notas;
+                        pendientes, consumos, notas, avisos;
                 END IF;
             END $$;
             """
@@ -272,6 +316,7 @@ def downgrade() -> None:
 
     # La guardia ya exigio que no haya ni un consumo ni una nota. Se sueltan
     # primero porque apuntan a la orden.
+    op.drop_table("production_order_communications")
     op.drop_table("production_order_notes")
     op.drop_table("production_consumptions")
 

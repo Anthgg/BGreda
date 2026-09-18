@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.firings import FiringType
 from app.models.production import (
+    ProductionCommunicationChannel,
     ProductionConsumptionKind,
     ProductionNoteKind,
     ProductionOrderStatus,
@@ -292,12 +293,52 @@ class ProductionNoteOut(BaseModel):
     created_at: datetime
 
 
+class ProductionCommunicationCreateIn(BaseModel):
+    """Registrar un aviso al cliente que el taller YA hizo. Fase 010I, decision D2.
+
+    No envia nada. `message` es el texto final que se declara enviado —partiera
+    o no de una plantilla—. No hay campo de autor: lo pone la sesion, y
+    `extra="forbid"` rechaza un `sent_by` que intentara colarse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: ProductionCommunicationChannel
+    message: str = Field(max_length=2000)
+    #: Obligatoria por la misma razon que en las notas: sin ella un reintento
+    #: no puede distinguirse de otro aviso en otro momento.
+    sent_at: datetime
+    idempotency_key: str = Field(min_length=8, max_length=64)
+
+    @model_validator(mode="after")
+    def _mensaje_y_fecha(self) -> ProductionCommunicationCreateIn:
+        # Se recortan solo los extremos: el texto de dentro es el que se envio.
+        self.message = self.message.strip()
+        if not self.message:
+            raise ValueError("El mensaje no puede estar vacio")
+        if self.sent_at.tzinfo is None:
+            raise ValueError("sent_at debe llevar zona horaria")
+        return self
+
+
+class ProductionCommunicationOut(BaseModel):
+    id: int
+    production_order_id: int
+    channel: ProductionCommunicationChannel
+    message: str
+    sent_at: datetime
+    sent_by_name: str | None
+    created_at: datetime
+
+
 class ProductionTimelineEventType(StrEnum):
     #: Un cambio de estado: INICIO, EN PROCESO, FINALIZADO o Anulada.
     STATUS = "STATUS"
     CONSUMPTION = "CONSUMPTION"
     NOTE = "NOTE"
     FIRING_NOTE = "FIRING_NOTE"
+    #: Fase 010I, bloque D. Un aviso al cliente DECLARADO, no enviado por el sistema.
+    COMMUNICATION = "COMMUNICATION"
 
 
 class ProductionTimelineEventOut(BaseModel):
@@ -310,6 +351,7 @@ class ProductionTimelineEventOut(BaseModel):
     status: ProductionOrderStatus | None = None
     consumption: ProductionConsumptionOut | None = None
     note: ProductionNoteOut | None = None
+    communication: ProductionCommunicationOut | None = None
 
 
 class ProductionTimelineOut(BaseModel):

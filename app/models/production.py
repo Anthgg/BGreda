@@ -482,3 +482,50 @@ class ProductionOrderNote(Base, TimestampMixin):
         CheckConstraint("body IS NULL OR length(body) <= 2000", name="body_length"),
         CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
     )
+
+
+class ProductionCommunicationChannel(StrEnum):
+    """Por donde se AVISO al cliente. Fase 010I, decision D2.
+
+    Es el canal DECLARADO, no una integracion: el sistema no envia nada. Una
+    persona del taller escribio al cliente por su cuenta y aqui deja constancia.
+    """
+
+    WHATSAPP = "WHATSAPP"
+
+
+class ProductionOrderCommunication(Base, TimestampMixin):
+    """Una comunicacion con el cliente que el taller DECLARA haber hecho. Fase 010I.
+
+    Solo se anade: no se edita ni se borra. «Se informo X» es un hecho, y
+    cambiarlo despues por «se informo Y» sin rastro reescribiria la historia.
+
+    `message` es el texto FINAL que se declara enviado, tal cual: si partio de
+    una plantilla y se retoco, se guarda el retocado y nunca se reconstruye.
+    `sent_by` es quien tenia la sesion al registrarla, no un dato del
+    formulario: nadie puede atribuirsela a otro.
+    """
+
+    __tablename__ = "production_order_communications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    production_order_id: Mapped[int] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    channel: Mapped[ProductionCommunicationChannel] = mapped_column(
+        StrEnumType(ProductionCommunicationChannel, 16), nullable=False
+    )
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Cuando se AVISO, que no es cuando se registro.
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    sent_by_name: Mapped[str | None] = mapped_column(String(120))
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    __table_args__ = (
+        CheckConstraint("channel IN ('WHATSAPP')", name="channel_allowed"),
+        CheckConstraint(
+            "length(btrim(message)) > 0 AND length(message) <= 2000", name="message_valid"
+        ),
+        CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
+    )

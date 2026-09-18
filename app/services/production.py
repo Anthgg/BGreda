@@ -38,6 +38,7 @@ from app.models.production import (
     ProductionConsumptionKind,
     ProductionNoteKind,
     ProductionOrder,
+    ProductionOrderCommunication,
     ProductionOrderLine,
     ProductionOrderNote,
     ProductionOrderStatus,
@@ -64,6 +65,8 @@ from app.models.recipes import Recipe
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.production import (
+    ProductionCommunicationCreateIn,
+    ProductionCommunicationOut,
     ProductionConsumptionCreateIn,
     ProductionConsumptionOut,
     ProductionConsumptionPage,
@@ -108,6 +111,7 @@ _TIMELINE_RANK = {
     ProductionTimelineEventType.CONSUMPTION: 1,
     ProductionTimelineEventType.FIRING_NOTE: 2,
     ProductionTimelineEventType.NOTE: 3,
+    ProductionTimelineEventType.COMMUNICATION: 4,
 }
 
 #: Unidad en la que la receta expresa el consumo por pieza. No es una eleccion
@@ -403,6 +407,20 @@ class ProductionNoteOccurredAtInvalidError(APIError):
     status_code = 422
     code = "PRODUCTION_NOTE_OCCURRED_AT_INVALID"
     message = "La fecha debe estar entre la creacion de la orden y ahora"
+
+
+class ProductionCommunicationKeyReusedError(APIError):
+    status_code = 409
+    code = "PRODUCTION_COMMUNICATION_KEY_REUSED"
+    message = "Esa clave ya registro otra comunicacion distinta"
+
+
+class ProductionCommunicationSentAtInvalidError(APIError):
+    """El aviso dice haberse hecho en el futuro, o antes de existir la orden."""
+
+    status_code = 422
+    code = "PRODUCTION_COMMUNICATION_SENT_AT_INVALID"
+    message = "La fecha del aviso debe estar entre la creacion de la orden y ahora"
 
 
 class ProductionOrderNotReadyError(APIError):
@@ -2030,12 +2048,126 @@ class ProductionOrderService:
             created_at=note.created_at,
         )
 
+    # -- comunicaciones con el cliente (Fase 010I, decision D2) ----------------
+    async def _communication_by_key(self, key: str) -> ProductionOrderCommunication | None:
+        return await self._session.scalar(
+            select(ProductionOrderCommunication).where(
+                ProductionOrderCommunication.idempotency_key == key
+            )
+        )
+
+    @staticmethod
+    def _same_communication(
+        existing: ProductionOrderCommunication,
+        *,
+        order_id: int,
+        data: ProductionCommunicationCreateIn,
+    ) -> bool:
+        """¿Es el reintento del MISMO aviso? Canal, texto y fecha: todo cuenta."""
+        return (
+            existing.production_order_id == order_id
+            and existing.channel == data.channel
+            and existing.message == data.message
+            and existing.sent_at == data.sent_at
+        )
+
+    async def record_communication(
+        self,
+        order_id: int,
+        data: ProductionCommunicationCreateIn,
+        *,
+        user: AuthenticatedUser,
+    ) -> tuple[ProductionOrderCommunication, bool]:
+        """Deja constancia de un aviso al cliente que el taller YA hizo.
+
+        **No envia nada** ni llama a ningun proveedor: WhatsApp es el canal
+        declarado. Tampoco cambia el estado de la orden, ni el inventario, ni la
+        cotizacion: avisar y fabricar son cosas distintas.
+
+        Vale en CUALQUIER estado. «Puede pasar a recoger» se dice con la orden
+        FINALIZADA, y «su pedido se anulo» con la orden anulada: bloquearlos
+        dejaria sin registrar justo los avisos que mas importan.
+
+        Mismo esquema que las notas: bloqueo sobre la clave, busqueda por
+        clave, bloqueo de la orden, validaciones y SAVEPOINT.
+        """
+        await self._lock_idempotency(data.idempotency_key)
+
+        existing = await self._communication_by_key(data.idempotency_key)
+        if existing is not None:
+            if not self._same_communication(existing, order_id=order_id, data=data):
+                raise ProductionCommunicationKeyReusedError()
+            return existing, False
+
+        order = await self.get(order_id, for_update=True)
+        if order.v2_handoff_id is None:
+            raise ProductionOrderNotV2Error()
+
+        # La misma ventana que las notas del seguimiento (bloque C): ni antes de
+        # que la orden existiera ni en el futuro, salvo el desfase de relojes.
+        if data.sent_at > datetime.now(UTC) + NOTE_CLOCK_SKEW or data.sent_at < order.created_at:
+            raise ProductionCommunicationSentAtInvalidError()
+
+        communication: ProductionOrderCommunication | None = None
+        try:
+            async with self._session.begin_nested():
+                communication = ProductionOrderCommunication(
+                    production_order_id=order.id,
+                    channel=data.channel,
+                    message=data.message,
+                    sent_at=data.sent_at,
+                    sent_by=user.id,
+                    sent_by_name=user.display_name,
+                    idempotency_key=data.idempotency_key,
+                )
+                self._session.add(communication)
+                await self._session.flush()
+        except IntegrityError:
+            ganadora = await self._communication_by_key(data.idempotency_key)
+            if ganadora is None:
+                raise
+            if not self._same_communication(ganadora, order_id=order_id, data=data):
+                raise ProductionCommunicationKeyReusedError() from None
+            return ganadora, False
+
+        assert communication is not None
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "event": "COMMUNICATION",
+                "communication_id": communication.id,
+                "channel": communication.channel.value,
+                "sent_at": communication.sent_at.isoformat(),
+            },
+        )
+        return communication, True
+
+    @staticmethod
+    def present_communication(
+        communication: ProductionOrderCommunication,
+    ) -> ProductionCommunicationOut:
+        return ProductionCommunicationOut(
+            id=communication.id,
+            production_order_id=communication.production_order_id,
+            channel=communication.channel,
+            message=communication.message,
+            sent_at=communication.sent_at,
+            sent_by_name=communication.sent_by_name,
+            created_at=communication.created_at,
+        )
+
     # -- seguimiento ----------------------------------------------------------
     async def timeline(self, order_id: int) -> ProductionTimelineOut:
         """Todo lo que le paso a la orden, en el orden en que paso.
 
         No es una tabla: se arma con lo que ya esta guardado —los estados de la
-        orden, sus consumos, sus notas—, asi que no puede discrepar de ellos.
+        orden, sus consumos, sus notas, sus comunicaciones—, asi que no puede
+        discrepar de ellos.
         Quien hizo cada cambio de estado sale de la auditoria, que ya lo
         registraba; la creacion, de la propia orden.
         """
@@ -2112,6 +2244,23 @@ class ProductionOrderService:
                     occurred_at=nota.occurred_at,
                     actor_name=nota.created_by_name,
                     note=self.present_note(nota),
+                )
+            )
+
+        avisos = (
+            await self._session.scalars(
+                select(ProductionOrderCommunication).where(
+                    ProductionOrderCommunication.production_order_id == order.id
+                )
+            )
+        ).all()
+        for aviso in avisos:
+            eventos.append(
+                ProductionTimelineEventOut(
+                    type=ProductionTimelineEventType.COMMUNICATION,
+                    occurred_at=aviso.sent_at,
+                    actor_name=aviso.sent_by_name,
+                    communication=self.present_communication(aviso),
                 )
             )
 
@@ -2565,5 +2714,5 @@ __all__ = [
 
 def _timeline_key(evento: ProductionTimelineEventOut) -> tuple[datetime, int, int]:
     """Cronologico; a igual instante, estados antes que hechos, y por id."""
-    detalle = evento.consumption or evento.note
+    detalle = evento.consumption or evento.note or evento.communication
     return (evento.occurred_at, _TIMELINE_RANK[evento.type], detalle.id if detalle else 0)
