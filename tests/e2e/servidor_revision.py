@@ -33,6 +33,7 @@ y rechaza `.local`, `.test` o `.localhost`.
 
     GREDA_E2E_REVISION=1 DATABASE_URL=postgresql://.../greda_e2e \\
     E2E_EMAIL=... E2E_PASSWORD=... \\
+    E2E_OPERATOR_EMAIL=... E2E_OPERATOR_PASSWORD=... \\
     python -m tests.e2e.servidor_revision --port 8000
 
 Antes de servir siembra, por la propia API, lo minimo que el flujo necesita para
@@ -68,6 +69,7 @@ from tests.fakes import FakeProfileRepository, FakeSupabaseAuthClient
 #: Identidad fija del administrador de la corrida. No es secreta: sin la
 #: contrasena, que es aleatoria por corrida, no sirve para nada.
 ADMIN_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000010")
+OPERATOR_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000011")
 
 HOSTS_LOCALES = {"localhost", "127.0.0.1", "::1"}
 
@@ -107,7 +109,7 @@ def hosts_de_conexion(url: str) -> list[str | None]:
     return [None if host is None else str(host)]
 
 
-def _comprobar_entorno() -> tuple[str, str]:
+def _comprobar_entorno() -> tuple[str, str, str, str]:
     """Las condiciones sin las cuales este modulo no arranca."""
     if os.environ.get("GREDA_E2E_REVISION") != "1":
         _abortar("GREDA_E2E_REVISION=1 es obligatorio: este backend usa autenticacion simulada.")
@@ -134,23 +136,33 @@ def _comprobar_entorno() -> tuple[str, str]:
     clave = os.environ.get("E2E_PASSWORD", "")
     if not email or not clave:
         _abortar("E2E_EMAIL y E2E_PASSWORD son obligatorios.")
-    return email, clave
+    operator_email = os.environ.get("E2E_OPERATOR_EMAIL", "")
+    operator_clave = os.environ.get("E2E_OPERATOR_PASSWORD", "")
+    if not operator_email or not operator_clave:
+        _abortar("E2E_OPERATOR_EMAIL y E2E_OPERATOR_PASSWORD son obligatorios.")
+    return email, clave, operator_email, operator_clave
 
 
-def construir_app(email: str, clave: str) -> FastAPI:
+def construir_app(email: str, clave: str, operator_email: str, operator_clave: str) -> FastAPI:
     """La aplicacion real de la revision, con los tres dobles externos."""
     get_settings.cache_clear()
     aplicacion = create_app(get_settings())
 
     supabase = FakeSupabaseAuthClient()
     supabase.register(email=email, password=clave, user_id=ADMIN_ID)
+    supabase.register(email=operator_email, password=operator_clave, user_id=OPERATOR_ID)
 
     perfil = Profile()
     perfil.id = ADMIN_ID
     perfil.display_name = "Administrador E2E"
     perfil.role = UserRole.ADMIN
     perfil.active = True
-    perfiles = FakeProfileRepository({ADMIN_ID: perfil})
+    operador = Profile()
+    operador.id = OPERATOR_ID
+    operador.display_name = "Operador E2E"
+    operador.role = UserRole.OPERATOR
+    operador.active = True
+    perfiles = FakeProfileRepository({ADMIN_ID: perfil, OPERATOR_ID: operador})
     almacen = FakeObjectStorage()
 
     aplicacion.dependency_overrides[get_supabase_auth_client] = lambda: supabase
@@ -219,7 +231,7 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             await api.post(
                 "/api/v1/products",
                 json={
-                    "name": "Arcilla E2E",
+                    "name": "Arcilla Terranova",
                     "product_type": "RAW_MATERIAL",
                     "product_category_id": int(categoria.json()["id"]),
                     "base_uom_code": "g",
@@ -228,6 +240,34 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 headers=cabeceras,
             ),
             "pasta",
+        )
+        arcilla_reciclada = await _ok(
+            await api.post(
+                "/api/v1/products",
+                json={
+                    "name": "Arcilla reciclada del taller",
+                    "product_type": "RAW_MATERIAL",
+                    "product_category_id": int(categoria.json()["id"]),
+                    "base_uom_code": "g",
+                    "purchasable": True,
+                },
+                headers=cabeceras,
+            ),
+            "arcilla reciclada",
+        )
+        esmalte = await _ok(
+            await api.post(
+                "/api/v1/products",
+                json={
+                    "name": "Esmalte premium base",
+                    "product_type": "RAW_MATERIAL",
+                    "product_category_id": int(categoria.json()["id"]),
+                    "base_uom_code": "g",
+                    "purchasable": True,
+                },
+                headers=cabeceras,
+            ),
+            "esmalte premium",
         )
         await _ok(
             await api.put(
@@ -243,6 +283,35 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             ),
             "valorizacion de la pasta",
         )
+        await _ok(
+            await api.put(
+                f"/api/v1/quoter-v2/materials/{arcilla_reciclada.json()['id']}",
+                json={
+                    "material_kind": "BODY",
+                    "origin": "PURCHASE",
+                    "purchase_quantity": "1",
+                    "purchase_cost": "0.0012",
+                    "transport_cost": "0",
+                },
+                headers=cabeceras,
+            ),
+            "valorizacion de la arcilla reciclada",
+        )
+        await _ok(
+            await api.put(
+                f"/api/v1/quoter-v2/materials/{esmalte.json()['id']}",
+                json={
+                    "material_kind": "GLAZE",
+                    "origin": "PURCHASE",
+                    "purchase_quantity": "1",
+                    "purchase_cost": "0.12",
+                    "transport_cost": "0",
+                    "ml_per_gram": "1",
+                },
+                headers=cabeceras,
+            ),
+            "valorizacion del esmalte",
+        )
 
         # Fase 010H. Piezas del CATALOGO, como las que ya tiene produccion. Hasta
         # aqui las E2E solo cotizaban piezas de encargo (nombre libre), y el
@@ -257,7 +326,7 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             "categoria de piezas",
         )
         catalogo: dict[str, int] = {}
-        for nombre, gramaje, largo, ancho, alto in PIEZAS_DE_CATALOGO:
+        for nombre, gramaje, largo, ancho, alto in PIEZAS_DE_CATALOGO + PIEZAS_EXCEL:
             pieza = await _ok(
                 await api.post(
                     "/api/v1/products",
@@ -298,8 +367,9 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 nombre,
             )
             tecnicas[codigo] = int(tecnica.json()["id"])
+        trabajadores: dict[str, int] = {}
         for nombre, tipo, jornal, suyas in TRABAJADORES:
-            await _ok(
+            trabajador = await _ok(
                 await api.post(
                     "/api/v1/quoter-v2/workers",
                     json={
@@ -312,6 +382,7 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                 ),
                 nombre,
             )
+            trabajadores[nombre] = int(trabajador.json()["id"])
 
         # Correccion 010H: cada pieza del catalogo declara sus procesos. Es lo
         # que hace que la taza traiga su asa sola en vez de tener que acordarse.
@@ -388,7 +459,13 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             "configuracion del Cotizador V2",
         )
 
-        await sembrar_cotizacion_vencida(api, cabeceras, int(pasta.json()["id"]))
+        await sembrar_cotizacion_vencida(
+            api,
+            cabeceras,
+            int(pasta.json()["id"]),
+            tecnicas["E2E-A-MANO"],
+            trabajadores["E2E-Trabajador taller"],
+        )
     print("[servidor_revision] siembra completa", flush=True)
 
 
@@ -431,6 +508,16 @@ PIEZAS_DE_CATALOGO = (
     ("E2E-Catalogo Fuente oval", "1200", "32", "22", "6"),
 )
 
+#: Piezas del caso canonico del Excel. Se siembran como catalogo porque el
+#: objetivo PRE-010I exige recorrer desde UI con datos equivalentes al libro,
+#: sin inyectar totales. La pasta se elige en la cotizacion, igual que en la
+#: pantalla real.
+PIEZAS_EXCEL = (
+    ("Plato palta", "450", "18", "12", "3"),
+    ("Tasa Buho", "300", "1", "15", "3"),
+    ("PLATOS HONDOS CHICOS", "400", "15", "12", "5"),
+)
+
 #: Que procesos necesita cada pieza del catalogo. El plato se tornea y se
 #: vidria; la taza ademas lleva asa, que es justo el caso que el usuario puso
 #: como ejemplo de proceso que no aparecia solo.
@@ -441,6 +528,9 @@ PROCESOS_DE_LA_PIEZA = (
         ("E2E-TORNO-FACIL", "E2E-ARMADO-ASA", "E2E-VIDRIADO-INMERSION"),
     ),
     ("E2E-Catalogo Fuente oval", ("E2E-COLADA",)),
+    ("Plato palta", ("E2E-A-MANO", "E2E-VIDRIADO-INMERSION")),
+    ("Tasa Buho", ("E2E-TORNO-FACIL",)),
+    ("PLATOS HONDOS CHICOS", ("E2E-TORNO-DIFICIL", "E2E-VIDRIADO-MANO-ALZADA")),
 )
 
 #: Conceptos adicionales del Excel: no son material ni tecnica.
@@ -454,7 +544,11 @@ NOMBRE_VENCIDA = "E2E-SEMILLA-VENCIDA-USD"
 
 
 async def sembrar_cotizacion_vencida(
-    api: httpx.AsyncClient, cabeceras: dict[str, str], pasta_id: int
+    api: httpx.AsyncClient,
+    cabeceras: dict[str, str],
+    pasta_id: int,
+    technique_id: int,
+    worker_id: int,
 ) -> None:
     """Fase 010H. Una cotizacion en dolares EMITIDA hace cuarenta dias.
 
@@ -482,7 +576,7 @@ async def sembrar_cotizacion_vencida(
         "cotizacion vencida",
     )
     qid = int(creada.json()["id"])
-    await _ok(
+    linea = await _ok(
         await api.post(
             f"/api/v1/quotations-v2/{qid}/products",
             json={
@@ -497,6 +591,27 @@ async def sembrar_cotizacion_vencida(
             headers=cabeceras,
         ),
         "linea de la cotizacion vencida",
+    )
+    # Una pieza de encargo tambien la fabrica alguien: sin mano de obra no se
+    # emite, y esta semilla nacio antes de que esa barrera existiera.
+    proceso = await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/processes",
+            json={
+                "v2_quotation_product_id": int(linea.json()["id"]),
+                "technique_id": technique_id,
+            },
+            headers=cabeceras,
+        ),
+        "proceso de la cotizacion vencida",
+    )
+    await _ok(
+        await api.post(
+            f"/api/v1/quotations-v2/{qid}/processes/{int(proceso.json()['id'])}/assign",
+            json={"worker_id": worker_id},
+            headers=cabeceras,
+        ),
+        "trabajador de la cotizacion vencida",
     )
     await _ok(
         await api.put(
@@ -553,8 +668,8 @@ def main() -> None:
     parser.add_argument("--sin-siembra", action="store_true")
     argumentos = parser.parse_args()
 
-    email, clave = _comprobar_entorno()
-    aplicacion = construir_app(email, clave)
+    email, clave, operator_email, operator_clave = _comprobar_entorno()
+    aplicacion = construir_app(email, clave, operator_email, operator_clave)
 
     async def principal() -> None:
         # Siembra y servidor en el MISMO bucle de eventos: el pool de asyncpg

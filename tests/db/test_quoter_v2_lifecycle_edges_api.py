@@ -165,6 +165,27 @@ class TestMaestrosDeBaja:
         )
         assert con_esmalte.status_code == 201, con_esmalte.text
 
+        # Las dos lineas que esta prueba anade tambien son piezas que alguien
+        # fabrica: sin trabajo asignado la cotizacion ya no se emite, y lo que
+        # aqui se comprueba es que los maestros de baja salgan en los avisos al
+        # duplicar, no que una cotizacion incompleta pase la barrera.
+        for creada in (con_catalogo, con_esmalte):
+            proceso = await api.post(
+                f"{V2}/{qid}/processes",
+                json={
+                    "v2_quotation_product_id": int(creada.json()["id"]),
+                    "technique_id": datos["technique_id"],
+                },
+                headers=h(admin_csrf),
+            )
+            assert proceso.status_code == 201, proceso.text
+            asignada = await api.post(
+                f"{V2}/{qid}/processes/{int(proceso.json()['id'])}/assign",
+                json={"worker_id": datos["worker_id"]},
+                headers=h(admin_csrf),
+            )
+            assert asignada.status_code == 200, asignada.text
+
         await emitir(api, admin_csrf, qid)
         await vencer(db_session, qid)
 
