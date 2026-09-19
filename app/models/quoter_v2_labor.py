@@ -70,10 +70,12 @@ if TYPE_CHECKING:
 class V2WorkerType(StrEnum):
     """De donde sale quien trabaja.
 
-    Explicito y persistido, nunca deducido del nombre. Y la distincion no
-    cambia si el tiempo se valoriza: un trabajador interno tiene sueldo y aun
-    asi sus horas cuestan. Saber cuanto es la unica forma de descubrir que una
-    linea de productos daba perdidas.
+    Explicito y persistido, nunca deducido del nombre.
+
+    Fase 010J (Excel final, hoja «Reglas»): el personal INTERNO no suma costo a
+    la cotizacion —su sueldo ya lo paga el taller— y el EXTERNO se paga por las
+    horas reales, a su jornal / horas de jornada. Las horas del interno se
+    siguen contando: reparten el espacio y avisan si no cabe en la jornada.
     """
 
     #: Del taller.

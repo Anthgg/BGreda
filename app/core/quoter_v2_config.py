@@ -77,6 +77,16 @@ DEFAULT_ILLUSTRATION_DAILY_RATE = Decimal("110")
 DEFAULT_ILLUSTRATION_PIECES_PER_WORKDAY = Decimal("50")
 
 # ---------------------------------------------------------------------------
+# Quema (fase 010J)
+# ---------------------------------------------------------------------------
+#: Separacion entre piezas dentro del horno, en cm. Se suma a largo, ancho y
+#: alto de la caja envolvente: (L+s)(A+s)(H+s). Cero es «sin separacion».
+DEFAULT_PIECE_SEPARATION_CM = Decimal("3")
+#: Tope de la separacion que se admite. Mas de 20 cm entre piezas no es una
+#: separacion, es un error de unidades.
+MAX_PIECE_SEPARATION_CM = Decimal("20")
+
+# ---------------------------------------------------------------------------
 # Tarifas de horno de referencia
 # ---------------------------------------------------------------------------
 #: Los numeros aprobados para un horno chico y uno grande.

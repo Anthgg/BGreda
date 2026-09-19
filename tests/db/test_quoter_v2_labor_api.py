@@ -37,9 +37,14 @@ JORNADA = Decimal(8)
 async def crear_trabajador(
     api: httpx.AsyncClient, csrf: str, nombre: str, **overrides: Any
 ) -> dict[str, Any]:
+    """Por defecto EXTERNO: fase 010J, el interno no suma costo.
+
+    Casi todas las pruebas de este archivo miden la aritmetica de horas x
+    tarifa, y esa solo se ve en quien cobra por hora.
+    """
     payload: dict[str, Any] = {
         "name": nombre,
-        "worker_type": "INTERNAL",
+        "worker_type": "EXTERNAL",
         "daily_rate": "120",
     }
     payload.update(overrides)
@@ -140,13 +145,14 @@ class TestTrabajadores:
 
         assert Decimal(worker["hourly_rate"]) == Decimal("13.75")
 
-    async def test_un_trabajador_interno_no_cuesta_cero(
+    async def test_un_trabajador_interno_no_suma_costo(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        """Tener sueldo no hace que su tiempo valga cero.
+        """Fase 010J (Excel final, hoja «Reglas»): el interno no suma costo.
 
-        Es la regla que mas veces se propone romper. No saber cuanto cuesta una
-        hora propia es la forma de descubrir tarde que una linea daba perdidas.
+        010D decidio lo contrario; el Excel final del dueno lo revoca. Las horas
+        se conservan —reparten el espacio y avisan de la jornada— y el costo es
+        cero aunque el trabajador tenga jornal en el maestro.
         """
         worker = await crear_trabajador(api, admin_csrf, "Interno", worker_type="INTERNAL")
         tecnica = await crear_tecnica(api, admin_csrf, "torno")
@@ -161,7 +167,27 @@ class TestTrabajadores:
             final_hours_override="4",
         )
 
-        assert Decimal(tarea["labor_cost"]) == Decimal(60)
+        assert Decimal(tarea["final_hours"]) == Decimal(4)
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
+
+    async def test_un_trabajador_externo_cobra_sus_horas_reales(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Tornero externo: S/220 por 8 h son S/27,50 la hora; 4 h, S/110."""
+        worker = await crear_trabajador(
+            api, admin_csrf, "Tornero", worker_type="EXTERNAL", daily_rate="220"
+        )
+        tecnica = await crear_tecnica(api, admin_csrf, "torno externo")
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        tarea = await anadir_tarea(
+            api,
+            admin_csrf,
+            cotizacion,
+            worker_id=worker["id"],
+            technique_id=tecnica["id"],
+            final_hours_override="4",
+        )
+        assert Decimal(tarea["labor_cost"]) == Decimal(110)
 
     async def test_una_jornada_propia_gana_sobre_la_del_taller(
         self, api: httpx.AsyncClient, admin_csrf: str

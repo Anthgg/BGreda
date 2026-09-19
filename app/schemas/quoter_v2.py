@@ -31,7 +31,8 @@ from app.models.quoter_v2 import (
 #: un error claro: desborda la columna NUMERIC y el fallo llega desde la base,
 #: sin decir que campo lo causo.
 MAX_MONEY = Decimal("1000000")
-MAX_FACTOR = Decimal("100")
+#: Fase 010J. Mismo tope que la configuracion: x10.
+MAX_FACTOR = Decimal("10")
 
 
 def _blank_to_none(value: str | None) -> str | None:

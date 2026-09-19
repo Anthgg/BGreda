@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.quoter_v2_config import MAX_PIECE_SEPARATION_CM
 from app.core.quoter_v2_lifecycle import MAX_VALIDITY_DAYS
 from app.models.firings import FiringType
 from app.models.quoter_v2 import V2CustomerKind, V2ProductionType
@@ -21,7 +22,9 @@ from app.models.quoter_v2 import V2CustomerKind, V2ProductionType
 #: —un cero de mas— no para opinar sobre cuanto puede cobrar el taller.
 MAX_MONEY = Decimal("1000000")
 #: Un factor comercial por encima de x100 es un error de tecleo, no un margen.
-MAX_FACTOR = Decimal("100")
+#: Fase 010J. El maximo configurable del factor comercial. El minimo x2 es
+#: regla cerrada; por encima de x10 ya no es un factor, es un error de dedo.
+MAX_FACTOR = Decimal("10")
 
 
 class V2KilnRateIn(BaseModel):
@@ -104,6 +107,9 @@ class V2SettingsUpdateIn(BaseModel):
     illustration_daily_rate: Decimal | None = Field(default=None, ge=0, le=MAX_MONEY)
     illustration_pieces_per_workday: Decimal | None = Field(default=None, gt=0, le=MAX_MONEY)
 
+    #: Fase 010J. Separacion entre piezas en el horno, en cm (0 = sin separacion).
+    piece_separation_cm: Decimal | None = Field(default=None, ge=0, le=MAX_PIECE_SEPARATION_CM)
+
 
 class V2SettingsOut(BaseModel):
     """La configuracion efectiva, con el origen de cada grupo."""
@@ -130,6 +136,7 @@ class V2SettingsOut(BaseModel):
     high_fire_enabled_default: bool
     illustration_daily_rate: Decimal
     illustration_pieces_per_workday: Decimal
+    piece_separation_cm: Decimal
 
     #: Derivados, no almacenados: guardarlos permitiria que contradijeran a sus
     #: fuentes y habria que decidir cual manda.

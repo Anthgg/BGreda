@@ -182,7 +182,15 @@ async def escenario(
 
     await api.put(
         f"{V2}/{cotizacion}/firing",
-        json={"kiln_id": horno["id"], "customer_kind": "EXTERNAL"},
+        # Fase 010J: una hornada ENTERA y sin separacion, la regla de 010E con
+        # la que se escribieron estos importes (450 de tarifa, 105 de gas). La
+        # quema compartida la cubre el caso canonico del Excel final.
+        json={
+            "kiln_id": horno["id"],
+            "customer_kind": "EXTERNAL",
+            "firing_mode": "EXCLUSIVE",
+            "piece_separation_cm": "0",
+        },
         headers={"X-CSRF-Token": csrf},
     )
     linea = await anadir_linea(
