@@ -3,6 +3,11 @@
 from app.db.base import Base
 from app.models.audit import AuditAction, AuditEvent
 from app.models.catalog import CurrencyCatalog, SequencePatternPreset, UbigeoDistrict
+from app.models.firing_quotation_v2 import (
+    V2FiringQuotation,
+    V2FiringQuotationLine,
+    V2GlazeCostSource,
+)
 from app.models.firings import (
     Firing,
     FiringKilnSession,
@@ -210,6 +215,9 @@ __all__ = [
     "V2CommercialSettings",
     "V2CustomerKind",
     "V2Extra",
+    "V2FiringQuotation",
+    "V2FiringQuotationLine",
+    "V2GlazeCostSource",
     "V2KilnRate",
     "V2MaterialCost",
     "V2MaterialKind",

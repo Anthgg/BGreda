@@ -48,6 +48,7 @@ from app.core.quoter_v2_config import (
     DEFAULT_COMMERCIAL_FACTOR_MAX,
     DEFAULT_COMMERCIAL_FACTOR_MIN,
     DEFAULT_EXCHANGE_RATE,
+    DEFAULT_FIRING_SERVICE_FACTOR,
     DEFAULT_ILLUSTRATION_DAILY_RATE,
     DEFAULT_ILLUSTRATION_PIECES_PER_WORKDAY,
     DEFAULT_PIECE_SEPARATION_CM,
@@ -170,6 +171,13 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         nullable=False,
         server_default=text(str(DEFAULT_PIECE_SEPARATION_CM)),
     )
+    #: Fase 010K. Factor con el que nace una cotizacion de Solo Quema. Entre
+    #: x1,00 y x2,00: el servicio de quema no usa el x2..x10 de fabricacion.
+    firing_service_factor_default: Mapped[Decimal] = mapped_column(
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_FIRING_SERVICE_FACTOR)),
+    )
 
     retail_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[retail_kiln_id])
     wholesale_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[wholesale_kiln_id])
@@ -210,6 +218,10 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         CheckConstraint(
             "piece_separation_cm >= 0 AND piece_separation_cm <= 20",
             name="piece_separation_range",
+        ),
+        CheckConstraint(
+            "firing_service_factor_default >= 1 AND firing_service_factor_default <= 2",
+            name="firing_service_factor_range",
         ),
     )
 

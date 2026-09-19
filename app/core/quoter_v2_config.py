@@ -87,6 +87,13 @@ DEFAULT_PIECE_SEPARATION_CM = Decimal("3")
 MAX_PIECE_SEPARATION_CM = Decimal("20")
 
 # ---------------------------------------------------------------------------
+# Solo Quema V2 (fase 010K)
+# ---------------------------------------------------------------------------
+#: Factor por defecto del servicio de quema (hoja «Configuracion», B15). El
+#: rango [1,00; 2,00] es regla del servicio y vive en el modelo.
+DEFAULT_FIRING_SERVICE_FACTOR = Decimal("1.00")
+
+# ---------------------------------------------------------------------------
 # Tarifas de horno de referencia
 # ---------------------------------------------------------------------------
 #: Los numeros aprobados para un horno chico y uno grande.
