@@ -19,21 +19,28 @@ import secrets
 import zlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
-from app.models.audit import AuditAction
-from app.models.inventory import MovementType, StockBalance, StockLocation
+from app.models.audit import AuditAction, AuditEvent
+from app.models.firings import Kiln
+from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
 from app.models.masters import Product, ProductType, UnitOfMeasure, UomDimension
 from app.models.production import (
+    ProductionConsumption,
+    ProductionConsumptionKind,
+    ProductionNoteKind,
     ProductionOrder,
+    ProductionOrderCommunication,
     ProductionOrderLine,
+    ProductionOrderNote,
     ProductionOrderStatus,
     ProductionReadinessCode,
 )
@@ -48,17 +55,34 @@ from app.models.quotations import (
     QuotationPaymentStatus,
     QuotationStatus,
 )
+from app.models.quoter_v2 import (
+    V2ProductionHandoff,
+    V2Quotation,
+    V2QuotationProduct,
+    V2QuotationStatus,
+)
 from app.models.recipes import Recipe
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.production import (
+    ProductionCommunicationCreateIn,
+    ProductionCommunicationOut,
+    ProductionConsumptionCreateIn,
+    ProductionConsumptionOut,
+    ProductionConsumptionPage,
+    ProductionNoteCreateIn,
+    ProductionNoteOut,
     ProductionOrderLineOut,
     ProductionOrderOrigin,
     ProductionOrderOut,
     ProductionOrderPage,
     ProductionOrderSummaryOut,
     ProductionReadinessOut,
+    ProductionTimelineEventOut,
+    ProductionTimelineEventType,
+    ProductionTimelineOut,
     ReadinessIssueOut,
+    V2ProductionPieceOut,
 )
 from app.services import body_material as body_material_mod
 from app.services.audit import AuditRecorder
@@ -77,6 +101,27 @@ PRODUCTION_ENTITY = "production_order"
 #: las preparaciones: dos claves iguales en modulos distintos no deben
 #: serializarse entre si.
 IDEMPOTENCY_LOCK_NAMESPACE = 90109
+
+#: Cuantas piezas nombra el resumen de una fila del listado antes de «+N mas».
+PIECES_SUMMARY_MAX = 4
+
+#: El separador de cantidad y pieza: el signo de multiplicar (U+00D7) y no una
+#: equis, que es lo que se lee en el taller. Escapado para que en el codigo no
+#: se confunda con una letra.
+POR = f" {chr(0xD7)} "
+
+#: Holgura para el reloj del navegador al fechar una nota: unos minutos por
+#: delante no son el futuro, son dos relojes que no coinciden.
+NOTE_CLOCK_SKEW = timedelta(minutes=5)
+
+#: Orden de presentacion cuando dos hechos del seguimiento comparten instante.
+_TIMELINE_RANK = {
+    ProductionTimelineEventType.STATUS: 0,
+    ProductionTimelineEventType.CONSUMPTION: 1,
+    ProductionTimelineEventType.FIRING_NOTE: 2,
+    ProductionTimelineEventType.NOTE: 3,
+    ProductionTimelineEventType.COMMUNICATION: 4,
+}
 
 #: Unidad en la que la receta expresa el consumo por pieza. No es una eleccion
 #: de este modulo: `material_grams_per_piece` ya viene en gramos desde la
@@ -208,10 +253,183 @@ class ProductionOrderQuotationNotPaidError(APIError):
     message = "La cotizacion debe estar pagada para iniciar la produccion"
 
 
+class ProductionOrderV2NotSentError(APIError):
+    """La cotizacion V2 no ha pasado por «Enviar a produccion». Fase 010I.
+
+    Una orden V2 cuelga del PUENTE de 010H, y sin puente no hay de que colgarla.
+    No se crea el puente aqui por su cuenta: enviar a produccion es otra
+    decision, con otro permiso y otras comprobaciones —estado, vigencia—, y
+    saltarsela desde el taller seria el segundo camino a la fabrica que esta
+    fase evita.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_V2_NOT_SENT"
+    message = "La cotizacion V2 todavia no se ha enviado a produccion"
+
+
+class ProductionOrderV2FingerprintMismatchError(APIError):
+    """La cotizacion V2 ya no dice lo que decia al pasar a produccion. Fase 010I.
+
+    El puente guarda una copia de la huella comercial. Si no coincide con la de
+    la cotizacion, alguien ha tocado un documento emitido por debajo, y fabricar
+    a partir de el seria fabricar algo que el cliente no acepto.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_V2_FINGERPRINT_MISMATCH"
+    message = "La cotizacion V2 cambio despues de enviarse a produccion"
+
+
+class ProductionOrderIdempotencyKeyReusedError(APIError):
+    """La clave de idempotencia ya se uso para OTRA orden. Fase 010I.
+
+    Una clave identifica un reintento de la misma peticion. Llegar con ella
+    pidiendo otra cosa es un error del cliente, y devolver la orden que ya
+    tiene esa clave seria darle una orden ajena como si fuera la suya.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_IDEMPOTENCY_KEY_REUSED"
+    message = "Esa clave de idempotencia ya se uso para otra orden de produccion"
+
+
+class ProductionConsumptionOrderNotV2Error(APIError):
+    """El consumo explicito es solo de ordenes V2. Fase 010I.
+
+    Una orden Legacy o de muestra ya descuenta su material al ARRANCAR, por
+    receta o por las lineas de la muestra. Registrarle ademas consumos a mano
+    descontaria el mismo material dos veces.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_CONSUMPTION_ORDER_NOT_V2"
+    message = "Solo una orden de una cotizacion V2 registra consumos uno a uno"
+
+
+class ProductionOrderNotConsumableError(APIError):
+    """La orden esta finalizada o anulada. Fase 010I.
+
+    Se consume en INICIO y en EN PROCESO. Una orden cerrada no gasta mas
+    material, y una anulada no deberia haber gastado ninguno.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_NOT_CONSUMABLE"
+    message = "La orden esta finalizada o anulada y ya no admite consumos"
+
+
+class ProductionConsumptionKeyReusedError(APIError):
+    """La clave de idempotencia ya es de OTRO consumo. Fase 010I.
+
+    Una clave identifica los reintentos de UN consumo. Llegar con ella pidiendo
+    otro material u otra cantidad es un error del cliente: devolver el consumo
+    que ya la tiene seria decir «hecho» sobre algo que no se hizo.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_CONSUMPTION_KEY_REUSED"
+    message = "Esa clave de idempotencia ya se uso para otro consumo"
+
+
+class ProductionConsumptionMaterialInvalidError(APIError):
+    status_code = 422
+    code = "PRODUCTION_CONSUMPTION_MATERIAL_INVALID"
+    message = "El material no existe o esta desactivado"
+
+
+class ProductionConsumptionLineInvalidError(APIError):
+    """La pieza indicada no es de la cotizacion de esta orden. Fase 010I."""
+
+    status_code = 422
+    code = "PRODUCTION_CONSUMPTION_LINE_INVALID"
+    message = "La pieza indicada no pertenece a la cotizacion de esta orden"
+
+
+class ProductionOrderHasConsumptionsError(APIError):
+    """Anular una orden que ya gasto material. Fase 010I, decision D1.
+
+    La orden V2 puede consumir en INICIO, antes de arrancar, y anular desde
+    INICIO no preguntaba si ya se habia descontado algo. Ahora se bloquea: anular
+    no devuelve a los sacos lo que ya se uso, y fingir que si convertiria el
+    inventario en una opinion. Si hubo un error, se corrige con un ajuste de
+    inventario, que deja su propia evidencia y su propio responsable.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_HAS_CONSUMPTIONS"
+    message = "La orden ya tiene material consumido y no puede anularse"
+
+
 class ProductionOrderNotStartableError(APIError):
     status_code = 409
     code = "PRODUCTION_ORDER_NOT_STARTABLE"
     message = "La orden no esta en un estado que permita arrancarla"
+
+
+class ProductionOrderConsumptionMissingError(APIError):
+    """Finalizar una orden V2 sin el material real que su cotizacion planifico.
+
+    Fase 010I, decision D3. No es «cero consumos, no se puede»: una orden cuya
+    cotizacion no planifico material inventariable termina sin consumir nada.
+    Lo que se exige es que cada CLASE de material inventariable planificada
+    —pasta, esmalte— tenga al menos un consumo real. El detalle dice cual falta.
+    """
+
+    status_code = 409
+    code = "PRODUCTION_ORDER_CONSUMPTION_MISSING"
+    message = "Falta registrar el material real antes de finalizar la orden"
+
+    def __init__(self, kinds: Sequence[ProductionConsumptionKind]) -> None:
+        super().__init__(details=[{"kind": kind.value} for kind in kinds])
+
+
+class ProductionOrderNotV2Error(APIError):
+    status_code = 409
+    code = "PRODUCTION_ORDER_NOT_V2"
+    message = "El seguimiento solo admite notas en ordenes de cotizaciones V2"
+
+
+class ProductionNoteNotAllowedError(APIError):
+    """Una nota en una orden anulada, o una quema antes de arrancar."""
+
+    status_code = 409
+    code = "PRODUCTION_NOTE_NOT_ALLOWED"
+    message = "La orden no admite esta nota en su estado actual"
+
+
+class ProductionNoteKeyReusedError(APIError):
+    status_code = 409
+    code = "PRODUCTION_NOTE_KEY_REUSED"
+    message = "Esa clave ya registro otra nota distinta"
+
+
+class ProductionNoteKilnInvalidError(APIError):
+    status_code = 422
+    code = "PRODUCTION_NOTE_KILN_INVALID"
+    message = "El horno no existe o esta inactivo"
+
+
+class ProductionNoteOccurredAtInvalidError(APIError):
+    """La fecha de lo ocurrido es del futuro, o de antes de crear la orden."""
+
+    status_code = 422
+    code = "PRODUCTION_NOTE_OCCURRED_AT_INVALID"
+    message = "La fecha debe estar entre la creacion de la orden y ahora"
+
+
+class ProductionCommunicationKeyReusedError(APIError):
+    status_code = 409
+    code = "PRODUCTION_COMMUNICATION_KEY_REUSED"
+    message = "Esa clave ya registro otra comunicacion distinta"
+
+
+class ProductionCommunicationSentAtInvalidError(APIError):
+    """El aviso dice haberse hecho en el futuro, o antes de existir la orden."""
+
+    status_code = 422
+    code = "PRODUCTION_COMMUNICATION_SENT_AT_INVALID"
+    message = "La fecha del aviso debe estar entre la creacion de la orden y ahora"
 
 
 class ProductionOrderNotReadyError(APIError):
@@ -301,6 +519,7 @@ class ProductionOrderService:
         *,
         status: ProductionOrderStatus | None = None,
         quotation_id: int | None = None,
+        v2_quotation_id: int | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[ProductionOrder], int]:
@@ -313,6 +532,16 @@ class ProductionOrderService:
             condiciones.append(ProductionOrder.status == status)
         if quotation_id is not None:
             condiciones.append(ProductionOrder.quotation_id == quotation_id)
+        if v2_quotation_id is not None:
+            # A traves del puente: la orden V2 no guarda la cotizacion, guarda su
+            # puente, que es lo unico que la base deja enlazar.
+            condiciones.append(
+                ProductionOrder.v2_handoff_id.in_(
+                    select(V2ProductionHandoff.id).where(
+                        V2ProductionHandoff.v2_quotation_id == v2_quotation_id
+                    )
+                )
+            )
 
         stmt = self._base_query()
         total_stmt = select(func.count()).select_from(ProductionOrder)
@@ -442,6 +671,129 @@ class ProductionOrderService:
         )
         await self._session.refresh(order, ["lines"])
         return order, True
+
+    async def get_by_v2_handoff(self, handoff_id: int) -> ProductionOrder | None:
+        return await self._session.scalar(
+            self._base_query().where(ProductionOrder.v2_handoff_id == handoff_id)
+        )
+
+    async def create_for_v2_quotation(
+        self,
+        v2_quotation_id: int,
+        *,
+        stock_location_id: int,
+        idempotency_key: str | None,
+        user: AuthenticatedUser,
+    ) -> tuple[ProductionOrder, bool]:
+        """Crea la orden de una cotizacion V2 ya enviada a produccion. Fase 010I.
+
+        Devuelve `(orden, es_nueva)`. Es papeleo, igual que la de una cotizacion
+        Legacy: reserva el correlativo, fija el almacen por defecto y no toca ni
+        un gramo de inventario. En una orden V2 ni siquiera ARRANCAR descuenta:
+        el consumo es un registro explicito de lo que el taller gasto de verdad.
+
+        Idempotente por el hecho, en tres capas:
+
+        1. la clave de idempotencia serializa los reintentos que la comparten;
+        2. el bloqueo del PUENTE serializa cualquier creacion para la misma
+           cotizacion, traiga la clave que traiga: la segunda encuentra la orden
+           de la primera y la devuelve;
+        3. el UNIQUE de `v2_handoff_id` es la garantia final, por si una via que
+           no tomara el bloqueo llegara primero.
+
+        No se copian lineas: la cotizacion V2 confirmada ya es inmutable y su
+        huella esta congelada en el puente. Lo que se comprueba es justo eso, que
+        la cotizacion siga diciendo lo que decia al pasar a produccion.
+        """
+        if idempotency_key:
+            await self._lock_idempotency(idempotency_key)
+            existing = await self._session.scalar(
+                self._base_query().where(ProductionOrder.idempotency_key == idempotency_key)
+            )
+            if existing is not None:
+                # La clave es de un reintento de ESTA peticion. Si trae la de
+                # otra orden —otro origen—, devolverla seria entregar una orden
+                # ajena como si fuera la pedida.
+                if not await self._is_order_of_v2_quotation(existing, v2_quotation_id):
+                    raise ProductionOrderIdempotencyKeyReusedError()
+                return existing, False
+
+        handoff = await self._session.scalar(
+            select(V2ProductionHandoff)
+            .where(V2ProductionHandoff.v2_quotation_id == v2_quotation_id)
+            .with_for_update()
+        )
+        if handoff is None:
+            if await self._session.get(V2Quotation, v2_quotation_id) is None:
+                raise ProductionOrderNotFoundError("La cotizacion V2 no existe")
+            raise ProductionOrderV2NotSentError()
+
+        # La unicidad del ORIGEN manda sobre la clave: pedirla otra vez con otra
+        # clave devuelve la misma orden, no una segunda.
+        already = await self.get_by_v2_handoff(handoff.id)
+        if already is not None:
+            return already, False
+
+        quotation = await self._session.get(V2Quotation, handoff.v2_quotation_id)
+        assert quotation is not None  # la FK del puente lo garantiza
+        if quotation.status is not V2QuotationStatus.CONFIRMED:
+            # 010H impide anular una cotizacion con puente, asi que esto no
+            # deberia verse nunca. Se afirma igual: fabricar algo que no esta
+            # confirmado es exactamente lo que no puede pasar por un descuido.
+            raise ProductionOrderQuotationNotConfirmedError()
+        if quotation.commercial_fingerprint != handoff.commercial_fingerprint:
+            raise ProductionOrderV2FingerprintMismatchError()
+
+        location = await self._session.get(StockLocation, stock_location_id)
+        if location is None or not location.active:
+            raise ProductionOrderLocationInvalidError()
+
+        order = ProductionOrder(
+            code=await self._sequences.issue(SequenceType.PRODUCTION_ORDER, user_id=user.id),
+            v2_handoff_id=handoff.id,
+            stock_location_id=location.id,
+            status=ProductionOrderStatus.CREATED,
+            idempotency_key=idempotency_key,
+            qr_token=secrets.token_urlsafe(32),
+            created_by=user.id,
+            created_by_name=user.display_name,
+        )
+        # SAVEPOINT, como en el puente de 010H: el bloqueo ya serializa, pero el
+        # UNIQUE es la garantia final. Si algo llegara primero sin tomar el
+        # bloqueo, aqui se devuelve su orden en vez de un 500.
+        try:
+            async with self._session.begin_nested():
+                self._session.add(order)
+                await self._session.flush()
+        except IntegrityError:
+            ganadora = await self.get_by_v2_handoff(handoff.id)
+            if ganadora is None:
+                raise
+            return ganadora, False
+
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.CREATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "v2_quotation_id": quotation.id,
+                "v2_quotation_code": quotation.code,
+                "v2_handoff_id": handoff.id,
+                "stock_location_id": location.id,
+                "status": order.status.value,
+            },
+        )
+        await self._session.refresh(order, ["lines"])
+        return order, True
+
+    async def _is_order_of_v2_quotation(self, order: ProductionOrder, v2_quotation_id: int) -> bool:
+        if order.v2_handoff_id is None:
+            return False
+        handoff = await self._session.get(V2ProductionHandoff, order.v2_handoff_id)
+        return handoff is not None and handoff.v2_quotation_id == v2_quotation_id
 
     async def get_by_prototype(self, prototype_id: int) -> ProductionOrder | None:
         """La orden de una muestra, si ya se creo."""
@@ -703,6 +1055,13 @@ class ProductionOrderService:
         # «alcanza para todos o no arranca ninguno»— vive en `_stock_issues`.
         if order.prototype_id is not None:
             return await self._evaluate_prototype(order, lock=lock)
+
+        # Fase 010I. Arrancar una orden V2 NO descuenta nada: su consumo es un
+        # registro explicito de lo que el taller gasta de verdad, no la receta
+        # entera de golpe. Por eso no hay requerimiento que comprobar aqui, y
+        # tampoco receta: la orden V2 no tiene lineas Legacy de las que derivarla.
+        if order.v2_handoff_id is not None:
+            return issues, []
 
         # ---- 1. Lo que cada linea puede o no puede pedir -------------------
         per_product: dict[int, list[tuple[ProductionOrderLine, Decimal]]] = {}
@@ -1067,6 +1426,16 @@ class ProductionOrderService:
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotStartableError()
 
+        # Fase 010I. Una orden V2 arranca SIN descontar nada: su material se
+        # registra consumo a consumo, con lo que el taller gasto de verdad, y no
+        # como la receta entera de golpe. Tampoco le tocan los guardias de la
+        # rama Legacy: no hay cotizacion Legacy que cobrar —su puerta fue el
+        # puente de 010H— ni muestras que aprobar. Va ANTES de ellos a proposito:
+        # si cayera en la rama Legacy, preguntaria por el cobro de una cotizacion
+        # que no existe y rechazaria siempre con «no pagada».
+        if order.v2_handoff_id is not None:
+            return await self._start_v2(order, user=user)
+
         # Fase 009K.4. Los dos guardias son de la rama de COTIZACION.
         #
         # El de pago porque una orden de muestra nace ya cobrada —se crea
@@ -1183,6 +1552,730 @@ class ProductionOrderService:
         )
         return order, True
 
+    async def _start_v2(
+        self, order: ProductionOrder, *, user: AuthenticatedUser
+    ) -> tuple[ProductionOrder, bool]:
+        """INICIO -> EN PROCESO de una orden V2. Fase 010I. **No mueve inventario.**
+
+        La orden ya viene bloqueada y en CREATED: lo comprobo `start`. El almacen
+        de la orden se sigue exigiendo valido porque es el almacen por defecto de
+        los consumos que vendran; arrancar contra un almacen dado de baja seria
+        preparar consumos que despues no podrian registrarse.
+        """
+        issues, _ = await self._evaluate(order, lock=False)
+        if issues:
+            raise ProductionOrderNotReadyError(issues)
+
+        moment = datetime.now(UTC)
+        order.status = ProductionOrderStatus.STARTED
+        order.started_at = moment
+        order.updated_at = moment
+        await self._session.flush()
+
+        self._audit.record_changes(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            changes={
+                "status": (ProductionOrderStatus.CREATED.value, order.status.value),
+                "started_at": (None, moment.isoformat()),
+            },
+            user_id=user.id,
+            user_display_name=user.display_name,
+        )
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            # `consumed` vacio y dicho: en una orden V2 arrancar no consume, y el
+            # historial tiene que poder contestarlo sin adivinar.
+            metadata={"code": order.code, "transition": "START", "consumed": []},
+        )
+        return order, True
+
+    # -- consumo real (Fase 010I) -------------------------------------------
+    async def _consumption_by_key(self, key: str) -> ProductionConsumption | None:
+        return await self._session.scalar(
+            select(ProductionConsumption).where(ProductionConsumption.idempotency_key == key)
+        )
+
+    @staticmethod
+    def _same_consumption(
+        existing: ProductionConsumption,
+        *,
+        order_id: int,
+        location_id: int | None,
+        data: ProductionConsumptionCreateIn,
+    ) -> bool:
+        """¿Es el reintento del MISMO consumo? La nota no cuenta: no mueve stock.
+
+        `location_id` es el almacen EFECTIVO —el pedido o, si no se pidio, el de
+        la orden—. Compararlo sin resolver aceptaria un reintento «sin almacen»
+        como si fuera un consumo que salio de otro.
+        """
+        return (
+            existing.production_order_id == order_id
+            and existing.product_id == data.product_id
+            and existing.stock_location_id == location_id
+            and existing.quantity == data.quantity
+            and existing.kind == data.kind
+            and existing.v2_quotation_product_id == data.v2_quotation_product_id
+        )
+
+    async def _effective_location_id(
+        self, order_id: int, data: ProductionConsumptionCreateIn
+    ) -> int | None:
+        """El almacen del consumo: el pedido o, si no se pidio, el de la orden."""
+        if data.stock_location_id is not None:
+            return data.stock_location_id
+        orden = await self._session.get(ProductionOrder, order_id)
+        return orden.stock_location_id if orden is not None else None
+
+    async def record_consumption(
+        self, order_id: int, data: ProductionConsumptionCreateIn, *, user: AuthenticatedUser
+    ) -> tuple[ProductionConsumption, bool]:
+        """Registra material REAL gastado en una orden V2. `(consumo, es_nuevo)`.
+
+        **Es lo unico que mueve inventario en una orden V2.** No se hace por
+        cotizar, confirmar, generar el PDF, enviar a produccion, crear la orden
+        ni arrancarla: solo cuando alguien registra que ese material salio.
+
+        Todo en una transaccion y en este orden:
+
+        1. bloqueo consultivo sobre la CLAVE: dos peticiones con la misma clave
+           —doble clic, reintento de red— se serializan;
+        2. si la clave ya tiene consumo, se devuelve ese y no se toca el stock
+           (o 409 si la clave llega pidiendo otra cosa);
+        3. bloqueo de la ORDEN: dos consumos de la misma orden se serializan, y
+           nadie la anula o la cierra a la vez;
+        4. validaciones: orden V2, en INICIO o EN PROCESO, material activo,
+           almacen valido, pieza de ESTA cotizacion;
+        5. SAVEPOINT con el movimiento y el registro JUNTOS. `apply_movement`
+           bloquea el saldo y se niega a dejarlo negativo, asi que dos ordenes
+           que piden 700 g de un saldo de 1000 no pueden llevarse las dos. Si el
+           UNIQUE de la clave saltara aun asi, el SAVEPOINT deshace TAMBIEN el
+           movimiento —envolver solo el registro dejaria un doble descuento— y
+           la transaccion sigue utilizable para devolver el consumo ganador.
+        """
+        await self._lock_idempotency(data.idempotency_key)
+
+        existing = await self._consumption_by_key(data.idempotency_key)
+        if existing is not None:
+            if not self._same_consumption(
+                existing,
+                order_id=order_id,
+                location_id=await self._effective_location_id(order_id, data),
+                data=data,
+            ):
+                raise ProductionConsumptionKeyReusedError()
+            return existing, False
+
+        order = await self.get(order_id, for_update=True)
+        location_id = (
+            data.stock_location_id
+            if data.stock_location_id is not None
+            else order.stock_location_id
+        )
+        if order.v2_handoff_id is None:
+            raise ProductionConsumptionOrderNotV2Error()
+        if order.status not in (ProductionOrderStatus.CREATED, ProductionOrderStatus.STARTED):
+            raise ProductionOrderNotConsumableError()
+
+        product = await self._session.get(Product, data.product_id)
+        if product is None or not product.active:
+            raise ProductionConsumptionMaterialInvalidError()
+
+        location = await self._session.get(StockLocation, location_id)
+        if location is None or not location.active:
+            raise ProductionOrderLocationInvalidError()
+
+        if data.v2_quotation_product_id is not None:
+            await self._require_line_of_order(order, data.v2_quotation_product_id)
+
+        consumption: ProductionConsumption | None = None
+        try:
+            async with self._session.begin_nested():
+                movement = await self._inventory.apply_movement(
+                    product=product,
+                    location=location,
+                    quantity=-data.quantity,
+                    movement_type=MovementType.PRODUCTION_OUT,
+                    reason=f"Orden de produccion {order.code} · consumo real",
+                    user_id=user.id,
+                    user_name=user.display_name,
+                    production_order_id=order.id,
+                )
+                consumption = ProductionConsumption(
+                    production_order_id=order.id,
+                    v2_quotation_product_id=data.v2_quotation_product_id,
+                    product_id=product.id,
+                    stock_location_id=location.id,
+                    kind=data.kind,
+                    quantity=data.quantity,
+                    # La unidad del SALDO, que es la del movimiento: la cantidad
+                    # se registro en ella. `apply_movement` ya exige que exista.
+                    uom_code=movement.uom_code,
+                    unit_cost_snapshot=product.cost,
+                    stock_movement_id=movement.id,
+                    idempotency_key=data.idempotency_key,
+                    note=data.note,
+                    created_by=user.id,
+                    created_by_name=user.display_name,
+                )
+                self._session.add(consumption)
+                await self._session.flush()
+        except IntegrityError:
+            ganador = await self._consumption_by_key(data.idempotency_key)
+            if ganador is None:
+                raise
+            if not self._same_consumption(
+                ganador, order_id=order_id, location_id=location_id, data=data
+            ):
+                raise ProductionConsumptionKeyReusedError() from None
+            return ganador, False
+
+        assert consumption is not None
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "event": "CONSUMPTION",
+                "consumption_id": consumption.id,
+                "stock_movement_id": consumption.stock_movement_id,
+                "product_id": product.id,
+                "stock_location_id": location.id,
+                "kind": consumption.kind.value,
+                "quantity": format(consumption.quantity, "f"),
+                "uom": consumption.uom_code,
+                "v2_quotation_product_id": consumption.v2_quotation_product_id,
+            },
+        )
+        return consumption, True
+
+    async def _require_line_of_order(self, order: ProductionOrder, line_id: int) -> None:
+        """La pieza tiene que ser de la cotizacion V2 de ESTA orden."""
+        pertenece = await self._session.scalar(
+            select(V2QuotationProduct.id)
+            .join(
+                V2ProductionHandoff,
+                V2ProductionHandoff.v2_quotation_id == V2QuotationProduct.v2_quotation_id,
+            )
+            .where(
+                V2QuotationProduct.id == line_id,
+                V2ProductionHandoff.id == order.v2_handoff_id,
+            )
+        )
+        if pertenece is None:
+            raise ProductionConsumptionLineInvalidError()
+
+    async def list_consumptions(self, order_id: int) -> ProductionConsumptionPage:
+        """Los consumos de una orden, del mas antiguo al mas reciente."""
+        await self.get(order_id)  # 404 si la orden no existe
+        filas = (
+            (
+                await self._session.execute(
+                    select(ProductionConsumption)
+                    .where(ProductionConsumption.production_order_id == order_id)
+                    .order_by(ProductionConsumption.created_at, ProductionConsumption.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        items = await self.present_consumptions(filas)
+        return ProductionConsumptionPage(items=items, total=len(items))
+
+    async def present_consumptions(
+        self, consumptions: Sequence[ProductionConsumption]
+    ) -> list[ProductionConsumptionOut]:
+        """Material, almacen y saldo resultante de cada consumo, en tres consultas."""
+        if not consumptions:
+            return []
+        productos = {
+            fila.id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(Product).where(Product.id.in_({c.product_id for c in consumptions}))
+                )
+            ).all()
+        }
+        almacenes = {
+            fila.id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(StockLocation).where(
+                        StockLocation.id.in_({c.stock_location_id for c in consumptions})
+                    )
+                )
+            ).all()
+        }
+        movimientos = {
+            fila.id: fila
+            for fila in (
+                await self._session.scalars(
+                    select(StockMovement).where(
+                        StockMovement.id.in_({c.stock_movement_id for c in consumptions})
+                    )
+                )
+            ).all()
+        }
+        return [
+            ProductionConsumptionOut(
+                id=c.id,
+                production_order_id=c.production_order_id,
+                v2_quotation_product_id=c.v2_quotation_product_id,
+                product_id=c.product_id,
+                product_name=productos[c.product_id].name,
+                product_internal_reference=productos[c.product_id].internal_reference,
+                stock_location_id=c.stock_location_id,
+                stock_location_name=almacenes[c.stock_location_id].name,
+                kind=c.kind,
+                quantity=c.quantity,
+                uom_code=c.uom_code,
+                balance_after=movimientos[c.stock_movement_id].balance_after,
+                stock_movement_id=c.stock_movement_id,
+                note=c.note,
+                created_by_name=c.created_by_name,
+                created_at=c.created_at,
+            )
+            for c in consumptions
+        ]
+
+    async def _has_consumptions(self, order_id: int) -> bool:
+        return (
+            await self._session.scalar(
+                select(ProductionConsumption.id)
+                .where(ProductionConsumption.production_order_id == order_id)
+                .limit(1)
+            )
+        ) is not None
+
+    # -- preparacion para finalizar (Fase 010I, decision D3) -----------------
+    async def required_consumption_kinds(
+        self, order: ProductionOrder
+    ) -> list[ProductionConsumptionKind]:
+        """Las clases de material INVENTARIABLE que la cotizacion V2 planifico.
+
+        PASTA si alguna pieza con cantidad lleva un material de cuerpo con peso;
+        ESMALTE si alguna pieza con cantidad pide esmalte con material. Un
+        material de tipo SERVICIO no se inventaria y no cuenta: exigir su
+        consumo seria exigir un movimiento de stock que no puede existir.
+
+        Se mira la CLASE y no el material concreto: el taller puede usar otra
+        pasta u otro esmalte que los cotizados, y eso es un consumo real valido.
+        Fuera de las ordenes V2, nada: su cierre sigue como estaba.
+        """
+        if order.v2_handoff_id is None:
+            return []
+        piezas = (
+            await self._session.scalars(
+                select(V2QuotationProduct)
+                .join(
+                    V2ProductionHandoff,
+                    V2ProductionHandoff.v2_quotation_id == V2QuotationProduct.v2_quotation_id,
+                )
+                .where(
+                    V2ProductionHandoff.id == order.v2_handoff_id,
+                    V2QuotationProduct.quantity > 0,
+                )
+            )
+        ).all()
+        materiales = {
+            m
+            for pieza in piezas
+            for m in (pieza.body_material_id, pieza.glaze_material_id)
+            if m is not None
+        }
+        inventariables = (
+            set(
+                (
+                    await self._session.scalars(
+                        select(Product.id).where(
+                            Product.id.in_(materiales),
+                            Product.product_type != ProductType.SERVICE,
+                        )
+                    )
+                ).all()
+            )
+            if materiales
+            else set()
+        )
+        requeridas: list[ProductionConsumptionKind] = []
+        if any(
+            pieza.body_material_id in inventariables
+            and pieza.body_unit_weight is not None
+            and pieza.body_unit_weight > 0
+            for pieza in piezas
+        ):
+            requeridas.append(ProductionConsumptionKind.BODY)
+        if any(
+            pieza.requires_glaze and pieza.glaze_material_id in inventariables for pieza in piezas
+        ):
+            requeridas.append(ProductionConsumptionKind.GLAZE)
+        return requeridas
+
+    async def pending_consumption_kinds(
+        self, order: ProductionOrder
+    ) -> list[ProductionConsumptionKind]:
+        """Las clases requeridas que aun no tienen ni un consumo real."""
+        requeridas = await self.required_consumption_kinds(order)
+        if not requeridas:
+            return []
+        hechas = set(
+            (
+                await self._session.scalars(
+                    select(ProductionConsumption.kind)
+                    .where(ProductionConsumption.production_order_id == order.id)
+                    .distinct()
+                )
+            ).all()
+        )
+        return [kind for kind in requeridas if kind not in hechas]
+
+    # -- notas y quemas (Fase 010I, decision D4) ------------------------------
+    async def _note_by_key(self, key: str) -> ProductionOrderNote | None:
+        return await self._session.scalar(
+            select(ProductionOrderNote).where(ProductionOrderNote.idempotency_key == key)
+        )
+
+    @staticmethod
+    def _same_note(
+        existing: ProductionOrderNote, *, order_id: int, data: ProductionNoteCreateIn
+    ) -> bool:
+        """¿Es el reintento de la MISMA nota? Todo cuenta, tambien la fecha."""
+        return (
+            existing.production_order_id == order_id
+            and existing.kind == data.kind
+            and existing.body == data.body
+            and existing.kiln_id == data.kiln_id
+            and existing.firing_type == data.firing_type
+            and existing.occurred_at == data.occurred_at
+        )
+
+    async def add_note(
+        self, order_id: int, data: ProductionNoteCreateIn, *, user: AuthenticatedUser
+    ) -> tuple[ProductionOrderNote, bool]:
+        """Anade una nota o una quema al seguimiento de una orden V2.
+
+        Mismo esquema que el consumo: bloqueo sobre la clave, busqueda por
+        clave, bloqueo de la orden, validaciones y SAVEPOINT. No toca inventario.
+
+        Una nota vale en INICIO, EN PROCESO y FINALIZADO —lo que pasa despues de
+        terminar tambien es seguimiento—; nunca en una orden anulada. Una quema
+        exige la orden arrancada: antes de arrancar no hay piezas que quemar.
+        """
+        await self._lock_idempotency(data.idempotency_key)
+
+        existing = await self._note_by_key(data.idempotency_key)
+        if existing is not None:
+            if not self._same_note(existing, order_id=order_id, data=data):
+                raise ProductionNoteKeyReusedError()
+            return existing, False
+
+        order = await self.get(order_id, for_update=True)
+        if order.v2_handoff_id is None:
+            raise ProductionOrderNotV2Error()
+        if order.status is ProductionOrderStatus.CANCELLED:
+            raise ProductionNoteNotAllowedError()
+        if (
+            data.kind is ProductionNoteKind.FIRING_NOTE
+            and order.status is ProductionOrderStatus.CREATED
+        ):
+            raise ProductionNoteNotAllowedError()
+
+        ahora = datetime.now(UTC)
+        occurred_at = data.occurred_at
+        if occurred_at > ahora + NOTE_CLOCK_SKEW or occurred_at < order.created_at:
+            raise ProductionNoteOccurredAtInvalidError()
+
+        kiln: Kiln | None = None
+        if data.kiln_id is not None:
+            kiln = await self._session.get(Kiln, data.kiln_id)
+            if kiln is None or not kiln.active:
+                raise ProductionNoteKilnInvalidError()
+
+        note: ProductionOrderNote | None = None
+        try:
+            async with self._session.begin_nested():
+                note = ProductionOrderNote(
+                    production_order_id=order.id,
+                    kind=data.kind,
+                    body=data.body,
+                    kiln_id=kiln.id if kiln else None,
+                    kiln_name_snapshot=kiln.name if kiln else None,
+                    firing_type=data.firing_type,
+                    occurred_at=occurred_at,
+                    idempotency_key=data.idempotency_key,
+                    created_by=user.id,
+                    created_by_name=user.display_name,
+                )
+                self._session.add(note)
+                await self._session.flush()
+        except IntegrityError:
+            ganadora = await self._note_by_key(data.idempotency_key)
+            if ganadora is None:
+                raise
+            if not self._same_note(ganadora, order_id=order_id, data=data):
+                raise ProductionNoteKeyReusedError() from None
+            return ganadora, False
+
+        assert note is not None
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "event": note.kind.value,
+                "note_id": note.id,
+                "kiln_id": note.kiln_id,
+                "firing_type": note.firing_type.value if note.firing_type else None,
+                "occurred_at": note.occurred_at.isoformat(),
+            },
+        )
+        return note, True
+
+    @staticmethod
+    def present_note(note: ProductionOrderNote) -> ProductionNoteOut:
+        return ProductionNoteOut(
+            id=note.id,
+            production_order_id=note.production_order_id,
+            kind=note.kind,
+            body=note.body,
+            kiln_id=note.kiln_id,
+            kiln_name=note.kiln_name_snapshot,
+            firing_type=note.firing_type,
+            occurred_at=note.occurred_at,
+            created_by_name=note.created_by_name,
+            created_at=note.created_at,
+        )
+
+    # -- comunicaciones con el cliente (Fase 010I, decision D2) ----------------
+    async def _communication_by_key(self, key: str) -> ProductionOrderCommunication | None:
+        return await self._session.scalar(
+            select(ProductionOrderCommunication).where(
+                ProductionOrderCommunication.idempotency_key == key
+            )
+        )
+
+    @staticmethod
+    def _same_communication(
+        existing: ProductionOrderCommunication,
+        *,
+        order_id: int,
+        data: ProductionCommunicationCreateIn,
+    ) -> bool:
+        """¿Es el reintento del MISMO aviso? Canal, texto y fecha: todo cuenta."""
+        return (
+            existing.production_order_id == order_id
+            and existing.channel == data.channel
+            and existing.message == data.message
+            and existing.sent_at == data.sent_at
+        )
+
+    async def record_communication(
+        self,
+        order_id: int,
+        data: ProductionCommunicationCreateIn,
+        *,
+        user: AuthenticatedUser,
+    ) -> tuple[ProductionOrderCommunication, bool]:
+        """Deja constancia de un aviso al cliente que el taller YA hizo.
+
+        **No envia nada** ni llama a ningun proveedor: WhatsApp es el canal
+        declarado. Tampoco cambia el estado de la orden, ni el inventario, ni la
+        cotizacion: avisar y fabricar son cosas distintas.
+
+        Vale en CUALQUIER estado. «Puede pasar a recoger» se dice con la orden
+        FINALIZADA, y «su pedido se anulo» con la orden anulada: bloquearlos
+        dejaria sin registrar justo los avisos que mas importan.
+
+        Mismo esquema que las notas: bloqueo sobre la clave, busqueda por
+        clave, bloqueo de la orden, validaciones y SAVEPOINT.
+        """
+        await self._lock_idempotency(data.idempotency_key)
+
+        existing = await self._communication_by_key(data.idempotency_key)
+        if existing is not None:
+            if not self._same_communication(existing, order_id=order_id, data=data):
+                raise ProductionCommunicationKeyReusedError()
+            return existing, False
+
+        order = await self.get(order_id, for_update=True)
+        if order.v2_handoff_id is None:
+            raise ProductionOrderNotV2Error()
+
+        # La misma ventana que las notas del seguimiento (bloque C): ni antes de
+        # que la orden existiera ni en el futuro, salvo el desfase de relojes.
+        if data.sent_at > datetime.now(UTC) + NOTE_CLOCK_SKEW or data.sent_at < order.created_at:
+            raise ProductionCommunicationSentAtInvalidError()
+
+        communication: ProductionOrderCommunication | None = None
+        try:
+            async with self._session.begin_nested():
+                communication = ProductionOrderCommunication(
+                    production_order_id=order.id,
+                    channel=data.channel,
+                    message=data.message,
+                    sent_at=data.sent_at,
+                    sent_by=user.id,
+                    sent_by_name=user.display_name,
+                    idempotency_key=data.idempotency_key,
+                )
+                self._session.add(communication)
+                await self._session.flush()
+        except IntegrityError:
+            ganadora = await self._communication_by_key(data.idempotency_key)
+            if ganadora is None:
+                raise
+            if not self._same_communication(ganadora, order_id=order_id, data=data):
+                raise ProductionCommunicationKeyReusedError() from None
+            return ganadora, False
+
+        assert communication is not None
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "event": "COMMUNICATION",
+                "communication_id": communication.id,
+                "channel": communication.channel.value,
+                "sent_at": communication.sent_at.isoformat(),
+            },
+        )
+        return communication, True
+
+    @staticmethod
+    def present_communication(
+        communication: ProductionOrderCommunication,
+    ) -> ProductionCommunicationOut:
+        return ProductionCommunicationOut(
+            id=communication.id,
+            production_order_id=communication.production_order_id,
+            channel=communication.channel,
+            message=communication.message,
+            sent_at=communication.sent_at,
+            sent_by_name=communication.sent_by_name,
+            created_at=communication.created_at,
+        )
+
+    # -- seguimiento ----------------------------------------------------------
+    async def timeline(self, order_id: int) -> ProductionTimelineOut:
+        """Todo lo que le paso a la orden, en el orden en que paso.
+
+        No es una tabla: se arma con lo que ya esta guardado —los estados de la
+        orden, sus consumos, sus notas, sus comunicaciones—, asi que no puede
+        discrepar de ellos.
+        Quien hizo cada cambio de estado sale de la auditoria, que ya lo
+        registraba; la creacion, de la propia orden.
+        """
+        order = await self.get(order_id)
+        eventos: list[ProductionTimelineEventOut] = [
+            ProductionTimelineEventOut(
+                type=ProductionTimelineEventType.STATUS,
+                occurred_at=order.created_at,
+                actor_name=order.created_by_name,
+                status=ProductionOrderStatus.CREATED,
+            )
+        ]
+        autores = {
+            fila.new_value: fila.user_display_name
+            for fila in (
+                await self._session.scalars(
+                    select(AuditEvent)
+                    .where(
+                        AuditEvent.entity_type == PRODUCTION_ENTITY,
+                        AuditEvent.entity_id == str(order.id),
+                        AuditEvent.field == "status",
+                    )
+                    .order_by(AuditEvent.id)
+                )
+            ).all()
+        }
+        for estado, momento in (
+            (ProductionOrderStatus.STARTED, order.started_at),
+            (ProductionOrderStatus.COMPLETED, order.completed_at),
+            (ProductionOrderStatus.CANCELLED, order.cancelled_at),
+        ):
+            if momento is not None:
+                eventos.append(
+                    ProductionTimelineEventOut(
+                        type=ProductionTimelineEventType.STATUS,
+                        occurred_at=momento,
+                        actor_name=autores.get(estado.value),
+                        status=estado,
+                    )
+                )
+
+        consumos = (
+            await self._session.scalars(
+                select(ProductionConsumption).where(
+                    ProductionConsumption.production_order_id == order.id
+                )
+            )
+        ).all()
+        for consumo in await self.present_consumptions(consumos):
+            eventos.append(
+                ProductionTimelineEventOut(
+                    type=ProductionTimelineEventType.CONSUMPTION,
+                    occurred_at=consumo.created_at,
+                    actor_name=consumo.created_by_name,
+                    consumption=consumo,
+                )
+            )
+
+        notas = (
+            await self._session.scalars(
+                select(ProductionOrderNote).where(
+                    ProductionOrderNote.production_order_id == order.id
+                )
+            )
+        ).all()
+        for nota in notas:
+            eventos.append(
+                ProductionTimelineEventOut(
+                    type=(
+                        ProductionTimelineEventType.FIRING_NOTE
+                        if nota.kind is ProductionNoteKind.FIRING_NOTE
+                        else ProductionTimelineEventType.NOTE
+                    ),
+                    occurred_at=nota.occurred_at,
+                    actor_name=nota.created_by_name,
+                    note=self.present_note(nota),
+                )
+            )
+
+        avisos = (
+            await self._session.scalars(
+                select(ProductionOrderCommunication).where(
+                    ProductionOrderCommunication.production_order_id == order.id
+                )
+            )
+        ).all()
+        for aviso in avisos:
+            eventos.append(
+                ProductionTimelineEventOut(
+                    type=ProductionTimelineEventType.COMMUNICATION,
+                    occurred_at=aviso.sent_at,
+                    actor_name=aviso.sent_by_name,
+                    communication=self.present_communication(aviso),
+                )
+            )
+
+        eventos.sort(key=_timeline_key)
+        return ProductionTimelineOut(items=eventos)
+
     # -- cierre y anulacion -------------------------------------------------
     async def complete(
         self, order_id: int, *, user: AuthenticatedUser
@@ -1198,6 +2291,11 @@ class ProductionOrderService:
             return order, False
         if order.status is not ProductionOrderStatus.STARTED:
             raise ProductionOrderNotCompletableError()
+        # Fase 010I, decision D3. Con la orden bloqueada: registrar un consumo
+        # toma el mismo bloqueo, asi que lo que se ve aqui es lo que hay.
+        pendientes = await self.pending_consumption_kinds(order)
+        if pendientes:
+            raise ProductionOrderConsumptionMissingError(pendientes)
 
         moment = datetime.now(UTC)
         order.status = ProductionOrderStatus.COMPLETED
@@ -1235,6 +2333,13 @@ class ProductionOrderService:
             return order, False
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotCancellableError()
+        # Fase 010I, decision D1. Una orden V2 puede consumir ya en INICIO, asi
+        # que «esta en CREATED» ha dejado de significar «no gasto nada». Se
+        # pregunta con la orden bloqueada: registrar un consumo toma el mismo
+        # bloqueo, de modo que consumir y anular a la vez no pueden terminar
+        # los dos.
+        if await self._has_consumptions(order.id):
+            raise ProductionOrderHasConsumptionsError()
 
         moment = datetime.now(UTC)
         order.status = ProductionOrderStatus.CANCELLED
@@ -1308,6 +2413,7 @@ class ProductionOrderService:
         quotation: Quotation | None,
         prototype: Prototype | None,
         prototype_quotation: PrototypeQuotation | None,
+        v2_quotation: V2Quotation | None = None,
     ) -> dict[str, object]:
         """Los campos de origen de una orden. UN solo sitio que los arma.
 
@@ -1318,12 +2424,36 @@ class ProductionOrderService:
         Lo que si difiere entre los dos es COMO se traen los datos —uno a uno
         para una ficha, en bloque para una pagina—, y por eso la busqueda esta
         fuera de esta funcion y no dentro.
+
+        Fase 010I: cada origen se pregunta por SU campo. Antes lo que no era
+        muestra se daba por cotizacion Legacy, y con un tercer origen eso habria
+        presentado una orden V2 como Legacy con la cotizacion en nulo.
         """
+        vacio: dict[str, object] = {
+            "quotation_id": None,
+            "quotation_code": None,
+            "prototype_id": None,
+            "prototype_code": None,
+            "prototype_quotation_id": None,
+            "prototype_quotation_code": None,
+            "v2_quotation_id": None,
+            "v2_quotation_code": None,
+            # Fase 010I. El cliente CONGELADO en la cotizacion de origen. Una
+            # muestra no lo tenia y no se le inventa.
+            "customer_name": None,
+        }
+        if order.v2_handoff_id is not None:
+            return {
+                **vacio,
+                "origin_type": ProductionOrderOrigin.V2_QUOTATION,
+                "v2_quotation_id": v2_quotation.id if v2_quotation else None,
+                "v2_quotation_code": v2_quotation.code if v2_quotation else None,
+                "customer_name": v2_quotation.customer_name_snapshot if v2_quotation else None,
+            }
         if order.prototype_id is not None:
             return {
+                **vacio,
                 "origin_type": ProductionOrderOrigin.PROTOTYPE,
-                "quotation_id": None,
-                "quotation_code": None,
                 "prototype_id": order.prototype_id,
                 "prototype_code": prototype.code if prototype else None,
                 "prototype_quotation_id": (prototype_quotation.id if prototype_quotation else None),
@@ -1332,14 +2462,110 @@ class ProductionOrderService:
                 ),
             }
         return {
+            **vacio,
             "origin_type": ProductionOrderOrigin.QUOTATION,
             "quotation_id": order.quotation_id,
             "quotation_code": quotation.code if quotation else None,
-            "prototype_id": None,
-            "prototype_code": None,
-            "prototype_quotation_id": None,
-            "prototype_quotation_code": None,
+            "customer_name": quotation.customer_name_snapshot if quotation else None,
         }
+
+    async def _v2_quotation_of(self, order: ProductionOrder) -> V2Quotation | None:
+        """La cotizacion V2 de una orden, a traves de su puente."""
+        if order.v2_handoff_id is None:
+            return None
+        return await self._session.scalar(
+            select(V2Quotation)
+            .join(V2ProductionHandoff, V2ProductionHandoff.v2_quotation_id == V2Quotation.id)
+            .where(V2ProductionHandoff.id == order.v2_handoff_id)
+        )
+
+    # -- piezas V2 para el taller (Fase 010I) ---------------------------------
+    async def _v2_pieces_for(
+        self, orders: Iterable[ProductionOrder]
+    ) -> dict[int, list[V2QuotationProduct]]:
+        """Las piezas de las cotizaciones V2 de varias ordenes, por id de PUENTE.
+
+        Una sola consulta para toda la pagina. Salen de las lineas de la
+        cotizacion CONFIRMADA, que ya no se editan: son lo que se planifico
+        entonces, no lo que diga hoy el catalogo.
+        """
+        handoff_ids = {order.v2_handoff_id for order in orders if order.v2_handoff_id is not None}
+        if not handoff_ids:
+            return {}
+        filas = await self._session.execute(
+            select(V2ProductionHandoff.id, V2QuotationProduct)
+            .join(
+                V2QuotationProduct,
+                V2QuotationProduct.v2_quotation_id == V2ProductionHandoff.v2_quotation_id,
+            )
+            .where(V2ProductionHandoff.id.in_(handoff_ids))
+            .order_by(V2QuotationProduct.sort_order, V2QuotationProduct.id)
+        )
+        resultado: dict[int, list[V2QuotationProduct]] = {}
+        for handoff_id, pieza in filas.tuples().all():
+            resultado.setdefault(handoff_id, []).append(pieza)
+        return resultado
+
+    @staticmethod
+    def _present_v2_piece(pieza: V2QuotationProduct) -> V2ProductionPieceOut:
+        """Solo lo operacional. Cualquier campo nuevo aqui es una decision."""
+        return V2ProductionPieceOut(
+            id=pieza.id,
+            sort_order=pieza.sort_order,
+            product_name=pieza.product_name_snapshot or "Pieza sin nombre",
+            quantity=pieza.quantity,
+            length_cm=pieza.length_cm,
+            width_cm=pieza.width_cm,
+            height_cm=pieza.height_cm,
+            body_material_id=pieza.body_material_id,
+            body_material_name=pieza.body_material_name_snapshot,
+            body_unit_weight=pieza.body_unit_weight,
+            body_total_weight=pieza.body_total_weight,
+            body_uom=pieza.body_uom_snapshot,
+            requires_glaze=pieza.requires_glaze,
+            glaze_material_id=pieza.glaze_material_id if pieza.requires_glaze else None,
+            glaze_material_name=(
+                pieza.glaze_material_name_snapshot if pieza.requires_glaze else None
+            ),
+            glaze_is_reference=pieza.glaze_is_reference if pieza.requires_glaze else False,
+            glaze_total_weight=pieza.glaze_total_weight if pieza.requires_glaze else Decimal(0),
+        )
+
+    @staticmethod
+    def _pieces_summary(
+        order: ProductionOrder, piezas_v2: dict[int, list[V2QuotationProduct]]
+    ) -> str | None:
+        """«20 x Taza, 5 x Plato». De las piezas V2, o de las lineas propias.
+
+        Se corta a las primeras cuatro con «+N mas»: es un resumen para una
+        fila de listado, y la lista entera esta en la ficha.
+        """
+        partes: list[tuple[int | None, str]]
+        if order.v2_handoff_id is not None:
+            partes = [
+                (pieza.quantity, pieza.product_name_snapshot or "Pieza sin nombre")
+                for pieza in piezas_v2.get(order.v2_handoff_id, [])
+            ]
+        else:
+            partes = [(line.quantity, line.product_name_snapshot) for line in order.lines]
+        if not partes:
+            return None
+        textos = [f"{cantidad}{POR}{nombre}" if cantidad else nombre for cantidad, nombre in partes]
+        visibles = textos[:PIECES_SUMMARY_MAX]
+        resto = len(textos) - len(visibles)
+        return ", ".join(visibles) + (f" +{resto} más" if resto else "")
+
+    async def _v2_quotations_for(self, orders: Iterable[ProductionOrder]) -> dict[int, V2Quotation]:
+        """Las cotizaciones V2 de una pagina, por id de PUENTE, en una consulta."""
+        handoff_ids = {order.v2_handoff_id for order in orders if order.v2_handoff_id is not None}
+        if not handoff_ids:
+            return {}
+        filas = await self._session.execute(
+            select(V2ProductionHandoff.id, V2Quotation)
+            .join(V2Quotation, V2Quotation.id == V2ProductionHandoff.v2_quotation_id)
+            .where(V2ProductionHandoff.id.in_(handoff_ids))
+        )
+        return dict(filas.tuples().all())
 
     async def _origin(self, order: ProductionOrder) -> dict[str, object]:
         """El origen de UNA orden, para la ficha."""
@@ -1358,7 +2584,13 @@ class ProductionOrderService:
             if order.prototype_id is None and order.quotation_id is not None
             else None
         )
-        return self._origin_fields(order, quotation=ctz, prototype=muestra, prototype_quotation=cpr)
+        return self._origin_fields(
+            order,
+            quotation=ctz,
+            prototype=muestra,
+            prototype_quotation=cpr,
+            v2_quotation=await self._v2_quotation_of(order),
+        )
 
     async def _origins_for(self, orders: Sequence[ProductionOrder]) -> dict[int, dict[str, object]]:
         """El origen de TODA una pagina, en tres consultas y no en N.
@@ -1368,6 +2600,7 @@ class ProductionOrderService:
         """
         quotations = await self._quotations_for(orders)
         prototypes = await self._prototypes_for(orders)
+        v2_quotations = await self._v2_quotations_for(orders)
         cpr_ids = {
             muestra.prototype_quotation_id
             for muestra in prototypes.values()
@@ -1394,6 +2627,11 @@ class ProductionOrderService:
                     if muestra is not None and muestra.prototype_quotation_id is not None
                     else None
                 ),
+                v2_quotation=(
+                    v2_quotations.get(order.v2_handoff_id)
+                    if order.v2_handoff_id is not None
+                    else None
+                ),
             )
         return resultado
 
@@ -1413,13 +2651,24 @@ class ProductionOrderService:
         location = await self._session.get(StockLocation, order.stock_location_id)
         prepared = await self._prepared_products(order)
         readiness = await self.evaluate_readiness(order)
+        # Fase 010I. El cliente de una orden V2 es el que quedo congelado en su
+        # cotizacion V2 al emitirla, no el del maestro de hoy.
+        v2_quotation = await self._v2_quotation_of(order)
+        piezas_v2 = await self._v2_pieces_for([order])
+        cliente = (
+            quotation.customer_name_snapshot
+            if quotation
+            else v2_quotation.customer_name_snapshot
+            if v2_quotation
+            else None
+        )
 
         return ProductionOrderOut(
             id=order.id,
             code=order.code,
             status=order.status,
             **await self._origin(order),  # type: ignore[arg-type]
-            quotation_customer_name=quotation.customer_name_snapshot if quotation else None,
+            quotation_customer_name=cliente,
             quotation_payment_status=quotation.payment_status if quotation else None,
             stock_location_id=order.stock_location_id,
             stock_location_name=location.name if location else "",
@@ -1429,6 +2678,11 @@ class ProductionOrderService:
             completed_at=order.completed_at,
             cancelled_at=order.cancelled_at,
             qr_token=order.qr_token,
+            pieces_summary=self._pieces_summary(order, piezas_v2),
+            v2_pieces=[
+                self._present_v2_piece(pieza)
+                for pieza in piezas_v2.get(order.v2_handoff_id or 0, [])
+            ],
             lines=[self._present_line(line, prepared) for line in order.lines],
             readiness=ProductionReadinessOut(
                 ready=readiness.ready,
@@ -1436,6 +2690,11 @@ class ProductionOrderService:
                     ReadinessIssueOut.model_validate(issue.as_detail())
                     for issue in readiness.issues
                 ],
+            ),
+            pending_consumption_kinds=(
+                await self.pending_consumption_kinds(order)
+                if order.status in (ProductionOrderStatus.CREATED, ProductionOrderStatus.STARTED)
+                else []
             ),
         )
 
@@ -1480,6 +2739,8 @@ class ProductionOrderService:
         # ficha. Que la lista dijera una cosa y el detalle otra sobre la misma
         # orden seria peor que no decirlo.
         origins = await self._origins_for(orders)
+        # Fase 010I. Las piezas V2 de TODA la pagina en una consulta, no en N.
+        piezas_v2 = await self._v2_pieces_for(orders)
         return ProductionOrderPage(
             items=[
                 ProductionOrderSummaryOut(
@@ -1487,6 +2748,7 @@ class ProductionOrderService:
                     code=order.code,
                     status=order.status,
                     **origins[order.id],  # type: ignore[arg-type]
+                    pieces_summary=self._pieces_summary(order, piezas_v2),
                     stock_location_id=order.stock_location_id,
                     stock_location_name=locations.get(order.stock_location_id, ""),
                     line_count=len(order.lines),
@@ -1547,3 +2809,9 @@ __all__ = [
     "ProductionReadiness",
     "ReadinessIssue",
 ]
+
+
+def _timeline_key(evento: ProductionTimelineEventOut) -> tuple[datetime, int, int]:
+    """Cronologico; a igual instante, estados antes que hechos, y por id."""
+    detalle = evento.consumption or evento.note or evento.communication
+    return (evento.occurred_at, _TIMELINE_RANK[evento.type], detalle.id if detalle else 0)

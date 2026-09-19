@@ -26,6 +26,12 @@ ESPERADAS = {
     ("/production-orders/{order_id}/start", "POST"),
     ("/production-orders/{order_id}/complete", "POST"),
     ("/production-orders/{order_id}/cancel", "POST"),
+    # Fase 010I: consumo real, notas y quemas, seguimiento.
+    ("/production-orders/{order_id}/consumptions", "GET"),
+    ("/production-orders/{order_id}/consumptions", "POST"),
+    ("/production-orders/{order_id}/notes", "POST"),
+    ("/production-orders/{order_id}/communications", "POST"),
+    ("/production-orders/{order_id}/timeline", "GET"),
 }
 
 
@@ -56,11 +62,13 @@ def test_el_escaneo_del_qr_se_declara_antes_que_el_detalle() -> None:
     )
 
 
-def test_solo_arrancar_completar_y_anular_son_escrituras_sobre_una_orden() -> None:
+def test_la_superficie_de_escritura_sobre_una_orden_es_cerrada() -> None:
     """La superficie mutante del modulo, escrita como lista cerrada.
 
     Anadir aqui un POST nuevo obliga a mirar esta prueba y a preguntarse si esa
-    ruta puede o no mover inventario. De las tres, solo `start` lo hace.
+    ruta puede o no mover inventario. Mueven inventario `start` en una orden
+    Legacy o de muestra y `consumptions` en una V2 (Fase 010I); `notes` y
+    `communications` no.
     """
     escrituras = {ruta for ruta, metodo in _rutas() if metodo == "POST"}
     assert escrituras == {
@@ -68,6 +76,9 @@ def test_solo_arrancar_completar_y_anular_son_escrituras_sobre_una_orden() -> No
         "/production-orders/{order_id}/start",
         "/production-orders/{order_id}/complete",
         "/production-orders/{order_id}/cancel",
+        "/production-orders/{order_id}/consumptions",
+        "/production-orders/{order_id}/notes",
+        "/production-orders/{order_id}/communications",
     }
 
 
@@ -94,6 +105,12 @@ PERMISOS_ESPERADOS = {
     # Anular deshace un compromiso ya tomado y deja la cotizacion de origen
     # ocupada para siempre. Es decision administrativa.
     "cancel_production_order": "admin",
+    # Fase 010I. Registrar lo que paso en el taller es de taller (D2 y D4).
+    "record_production_consumption": "taller",
+    "add_production_note": "taller",
+    "record_production_communication": "taller",
+    "list_production_consumptions": "cualquier sesion",
+    "get_production_timeline": "cualquier sesion",
 }
 
 
@@ -148,3 +165,25 @@ def test_anular_no_se_amplia_al_taller_por_descuido() -> None:
     lado de los otros tres y parece del mismo tipo.
     """
     assert _dependencias()["cancel_production_order"] == "admin"
+
+
+async def test_un_rol_ajeno_al_taller_no_registra_comunicaciones() -> None:
+    """Fase 010I, bloque D. Hoy solo existen ADMIN y OPERATOR, y los dos pueden;
+    el 403 se comprueba sobre la dependencia real con un rol que no es de taller,
+    para que un tercer rol futuro no herede el permiso sin decidirlo."""
+    import uuid
+
+    import pytest
+
+    from app.api.deps import require_roles
+    from app.core.errors import APIError
+    from app.models.profile import UserRole
+    from app.schemas.auth import AuthenticatedUser
+
+    taller = require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ajeno = AuthenticatedUser.model_construct(
+        id=uuid.uuid4(), email="x@example.com", display_name="Visita", role="VIEWER"
+    )
+    with pytest.raises(APIError) as error:
+        await taller(ajeno)
+    assert error.value.status_code == 403

@@ -39,14 +39,16 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.precision import quantity_numeric, stock_quantity_numeric
+from app.core.precision import quantity_numeric, stock_quantity_numeric, unit_cost_numeric
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
+from app.models.firings import FiringType
 
 #: Longitud de la columna del token opaco del QR. `secrets.token_urlsafe(32)`
 #: rinde 43 caracteres; se deja holgura por si la generacion cambia.
@@ -62,9 +64,14 @@ QR_TOKEN_MIN_LENGTH = 32
 #: No es cortesia: sin esto cabrian una orden sin origen —que no sabria que
 #: fabricar— y una orden con los dos, que tendria dos modelos de material
 #: contradictorios y dos tipos de movimiento para el mismo arranque.
+#:
+#: Fase 010I: el tercer origen es la cotizacion V2, y entra por su PUENTE
+#: (`v2_handoff_id`) y no por la cotizacion. Cada rama nombra los TRES campos:
+#: una rama que solo mirara dos dejaria pasar una fila con el tercero relleno.
 EXACTLY_ONE_ORIGIN = (
-    "(quotation_id IS NOT NULL AND prototype_id IS NULL)"
-    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL)"
+    "(quotation_id IS NOT NULL AND prototype_id IS NULL AND v2_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL AND v2_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NULL AND v2_handoff_id IS NOT NULL)"
 )
 
 
@@ -168,6 +175,20 @@ class ProductionOrder(Base, TimestampMixin):
     #: resto del proyecto: una muestra con orden no se borra por debajo.
     prototype_id: Mapped[int | None] = mapped_column(
         ForeignKey("prototypes.id", ondelete="RESTRICT"), unique=True
+    )
+
+    #: Fase 010I. El puente de una cotizacion V2 aceptada (010H), si la orden
+    #: nace de una.
+    #:
+    #: Cuelga del PUENTE y no de la cotizacion a proposito: la clave foranea
+    #: hace imposible una orden V2 que no haya pasado por «Enviar a
+    #: produccion», asi que no hay un segundo camino hacia la fabrica. Y la
+    #: cadena de unicidades —UNIQUE aqui y UNIQUE de `v2_quotation_id` en el
+    #: puente— es la que garantiza en la base que una cotizacion V2 tenga como
+    #: mucho una orden: el doble clic, el reintento y dos peticiones a la vez
+    #: acaban en la misma fila.
+    v2_handoff_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_production_handoffs.id", ondelete="RESTRICT"), unique=True
     )
 
     #: De donde sale el material. Explicita siempre: no hay ubicacion por
@@ -308,3 +329,203 @@ class ProductionOrderLine(Base, TimestampMixin):
     )
 
     order: Mapped[ProductionOrder] = relationship("ProductionOrder", back_populates="lines")
+
+
+class ProductionConsumptionKind(StrEnum):
+    """Que clase de material se consumio. Fase 010I.
+
+    Se distingue la PASTA del ESMALTE porque la cotizacion los planifico por
+    separado —cuerpo por linea, esmalte aparte— y la comparacion entre lo
+    cotizado y lo real solo tiene sentido pieza con pieza. OTHER cubre lo que
+    no es ninguno de los dos: un aditivo, un engobe, un insumo de acabado.
+    """
+
+    BODY = "BODY"
+    GLAZE = "GLAZE"
+    OTHER = "OTHER"
+
+
+class ProductionConsumption(Base, TimestampMixin):
+    """Material REAL que el taller gasto en una orden. Fase 010I.
+
+    Es un hecho, no un plan: lo que salio del almacen, de que material, en que
+    cantidad y quien lo registro. Puede no coincidir con lo cotizado —otra
+    pasta, otro esmalte, mas gramos por una pieza rota— y eso NO toca la
+    cotizacion: la cotizacion guarda lo que se prometio y esta tabla lo que se
+    hizo.
+
+    Cada consumo es exactamente un movimiento de inventario (`PRODUCTION_OUT`),
+    y la relacion es 1:1 y la impone la base. Un consumo sin movimiento seria un
+    gasto que el inventario no refleja; dos consumos para el mismo movimiento,
+    un descuento contado dos veces.
+
+    No se edita ni se borra. Un error se corrige con un ajuste de inventario,
+    que deja su propia evidencia y su propio responsable, igual que el resto
+    del inventario de este proyecto.
+    """
+
+    __tablename__ = "production_consumptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: RESTRICT: una orden con material gastado no desaparece por debajo.
+    production_order_id: Mapped[int] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: La pieza de la cotizacion V2 a la que se imputa. NULO significa consumo
+    #: de la orden entera: un esmalte preparado para todas las piezas no es de
+    #: ninguna en concreto, y forzarlo a una duplicaria o falsearia su costo.
+    v2_quotation_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_quotation_products.id", ondelete="RESTRICT"), index=True
+    )
+    #: El material que se uso DE VERDAD. Puede no ser el cotizado.
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: De donde salio. Por defecto el almacen de la orden, pero cada consumo
+    #: dice el suyo: no se asume un almacen unico.
+    stock_location_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_locations.id", ondelete="RESTRICT"), nullable=False
+    )
+    kind: Mapped[ProductionConsumptionKind] = mapped_column(
+        StrEnumType(ProductionConsumptionKind, 16), nullable=False
+    )
+    #: En la unidad base del material, la misma del saldo. Siempre positiva: el
+    #: signo lo pone el movimiento, que es un descuento.
+    quantity: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
+    uom_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Costo por unidad base del material EN ESE MOMENTO, copiado del maestro.
+    #: Solo para comparar despues lo real con lo cotizado: no alimenta ningun
+    #: precio ni ninguna cotizacion. Nulo cuando el maestro no tenia costo.
+    unit_cost_snapshot: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    #: El movimiento que lo respalda. UNICO: un movimiento, un consumo.
+    stock_movement_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_movements.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    #: Identifica el REGISTRO, no la peticion. Obligatoria: sin ella el doble
+    #: clic o un reintento de red descontarian dos veces. UNICA como garantia
+    #: final; el servicio ademas serializa las peticiones que la comparten.
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    note: Mapped[str | None] = mapped_column(Text)
+
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    created_by_name: Mapped[str | None] = mapped_column(String(120))
+
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="quantity_positive"),
+        CheckConstraint("kind IN ('BODY', 'GLAZE', 'OTHER')", name="kind_allowed"),
+        CheckConstraint("length(btrim(uom_code)) > 0", name="uom_not_blank"),
+        CheckConstraint(
+            "unit_cost_snapshot IS NULL OR unit_cost_snapshot >= 0",
+            name="unit_cost_non_negative",
+        ),
+        CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
+    )
+
+
+class ProductionNoteKind(StrEnum):
+    """Que clase de nota se deja en la orden. Fase 010I, decision D4.
+
+    NOTE es texto libre del taller. FIRING_NOTE es la QUEMA real: en que horno,
+    de que tipo y cuando. Es una nota y no una tabla de quemas por orden porque
+    una hornada lleva piezas de varias ordenes; la quema pertenece al horno, y
+    la orden solo deja constancia de que sus piezas pasaron por ella.
+    """
+
+    NOTE = "NOTE"
+    FIRING_NOTE = "FIRING_NOTE"
+
+
+class ProductionOrderNote(Base, TimestampMixin):
+    """Una nota o una quema en el seguimiento de la orden. Fase 010I.
+
+    Solo se anade: no se edita ni se borra. El seguimiento es el historial de
+    lo que paso, y una nota que cambia despues ya no es historial.
+    """
+
+    __tablename__ = "production_order_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    production_order_id: Mapped[int] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kind: Mapped[ProductionNoteKind] = mapped_column(
+        StrEnumType(ProductionNoteKind, 16), nullable=False
+    )
+    body: Mapped[str | None] = mapped_column(Text)
+    #: Solo en FIRING_NOTE. El nombre se copia: un horno renombrado despues no
+    #: debe reescribir en que horno se quemo.
+    kiln_id: Mapped[int | None] = mapped_column(ForeignKey("kilns.id", ondelete="RESTRICT"))
+    kiln_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    firing_type: Mapped[FiringType | None] = mapped_column(StrEnumType(FiringType, 8))
+    #: Cuando OCURRIO, que no es cuando se anoto: la quema se apunta a menudo al
+    #: dia siguiente, al abrir el horno.
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    created_by_name: Mapped[str | None] = mapped_column(String(120))
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('NOTE', 'FIRING_NOTE')", name="kind_allowed"),
+        CheckConstraint(
+            "firing_type IS NULL OR firing_type IN ('LOW', 'HIGH')", name="firing_type_allowed"
+        ),
+        # Una nota dice algo; una quema dice donde y de que tipo. Ninguna de las
+        # dos se hace pasar por la otra.
+        CheckConstraint(
+            "(kind = 'NOTE' AND body IS NOT NULL AND length(btrim(body)) > 0"
+            " AND kiln_id IS NULL AND kiln_name_snapshot IS NULL AND firing_type IS NULL)"
+            " OR (kind = 'FIRING_NOTE' AND kiln_id IS NOT NULL"
+            " AND kiln_name_snapshot IS NOT NULL AND firing_type IS NOT NULL)",
+            name="kind_fields_consistent",
+        ),
+        CheckConstraint("body IS NULL OR length(body) <= 2000", name="body_length"),
+        CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
+    )
+
+
+class ProductionCommunicationChannel(StrEnum):
+    """Por donde se AVISO al cliente. Fase 010I, decision D2.
+
+    Es el canal DECLARADO, no una integracion: el sistema no envia nada. Una
+    persona del taller escribio al cliente por su cuenta y aqui deja constancia.
+    """
+
+    WHATSAPP = "WHATSAPP"
+
+
+class ProductionOrderCommunication(Base, TimestampMixin):
+    """Una comunicacion con el cliente que el taller DECLARA haber hecho. Fase 010I.
+
+    Solo se anade: no se edita ni se borra. «Se informo X» es un hecho, y
+    cambiarlo despues por «se informo Y» sin rastro reescribiria la historia.
+
+    `message` es el texto FINAL que se declara enviado, tal cual: si partio de
+    una plantilla y se retoco, se guarda el retocado y nunca se reconstruye.
+    `sent_by` es quien tenia la sesion al registrarla, no un dato del
+    formulario: nadie puede atribuirsela a otro.
+    """
+
+    __tablename__ = "production_order_communications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    production_order_id: Mapped[int] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    channel: Mapped[ProductionCommunicationChannel] = mapped_column(
+        StrEnumType(ProductionCommunicationChannel, 16), nullable=False
+    )
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Cuando se AVISO, que no es cuando se registro.
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    sent_by_name: Mapped[str | None] = mapped_column(String(120))
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    __table_args__ = (
+        CheckConstraint("channel IN ('WHATSAPP')", name="channel_allowed"),
+        CheckConstraint(
+            "length(btrim(message)) > 0 AND length(message) <= 2000", name="message_valid"
+        ),
+        CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
+    )

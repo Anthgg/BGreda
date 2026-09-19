@@ -185,9 +185,11 @@ class TestSubirYBajar:
 
 
 async def test_toda_la_cadena_deja_una_sola_cabeza(migration_engine: AsyncEngine) -> None:
+    """Una sola cabeza. CUAL es la cabeza lo fija la migracion mas nueva
+    (`test_migration_0037_runs.py`), no esta."""
     _upgrade("head")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0036"]
+    assert len(cabezas) == 1

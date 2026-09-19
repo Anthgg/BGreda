@@ -75,9 +75,14 @@ def test_el_downgrade_esta_protegido() -> None:
     assert "RuntimeError" in _codigo().split("def downgrade()")[1]
 
 
-def test_0036_es_la_unica_cabeza() -> None:
+def test_0036_sigue_en_una_cadena_de_una_sola_cabeza() -> None:
+    """La cabeza se la lleva la migracion mas nueva; el eslabon es lo que importa.
+
+    Fijar aqui que la cabeza ERA 0036 obligaba a reescribir esta prueba en cada
+    fase. Esa afirmacion vive ahora en `test_migration_0037.py`.
+    """
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0036"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("0036").down_revision == "0035"
 
 

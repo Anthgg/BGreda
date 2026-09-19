@@ -14,7 +14,14 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.production import ProductionOrderStatus, ProductionReadinessCode
+from app.models.firings import FiringType
+from app.models.production import (
+    ProductionCommunicationChannel,
+    ProductionConsumptionKind,
+    ProductionNoteKind,
+    ProductionOrderStatus,
+    ProductionReadinessCode,
+)
 from app.models.quotations import QuotationPaymentStatus
 
 
@@ -32,20 +39,27 @@ class ProductionOrderCreateIn(BaseModel):
     #: una ubicacion: el dia que haya dos, el default silencioso descontaria
     #: del almacen equivocado sin que nadie lo notara.
     stock_location_id: int = Field(gt=0)
+    #: Fase 010I. El tercer origen: una cotizacion V2 ya enviada a produccion.
+    #: Se pide por la cotizacion porque es lo que el taller conoce; el servicio
+    #: resuelve su puente y cuelga la orden de el.
+    v2_quotation_id: int | None = Field(default=None, gt=0)
     #: Solo para reintentos de red. La unicidad de verdad la impone el UNIQUE
-    #: de `quotation_id` en la base.
+    #: del origen en la base (`quotation_id`, `prototype_id` o `v2_handoff_id`).
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
 
     @model_validator(mode="after")
     def _exactamente_un_origen(self) -> ProductionOrderCreateIn:
-        """Uno de los dos, nunca los dos ni ninguno.
+        """Uno de los tres, nunca dos ni ninguno.
 
         Es la misma regla que el CHECK `exactly_one_origin` de la tabla, dicha
         aqui para que quien se equivoque reciba un 422 que explica el error y
         no un 500 con un mensaje de PostgreSQL.
         """
-        if (self.quotation_id is None) == (self.prototype_id is None):
-            raise ValueError("Indica una cotización o una muestra, y solo una de las dos.")
+        origenes = (self.quotation_id, self.prototype_id, self.v2_quotation_id)
+        if sum(origen is not None for origen in origenes) != 1:
+            raise ValueError(
+                "Indica una cotización, una cotización V2 o una muestra, y solo una de ellas."
+            )
         return self
 
 
@@ -79,6 +93,9 @@ class ProductionOrderOrigin(StrEnum):
 
     QUOTATION = "QUOTATION"
     PROTOTYPE = "PROTOTYPE"
+    #: Fase 010I. Ese tercer origen: una cotizacion del Cotizador V2, que entra
+    #: por su puente de 010H.
+    V2_QUOTATION = "V2_QUOTATION"
 
 
 class ProductionOrderLineOut(BaseModel):
@@ -109,6 +126,42 @@ class ProductionOrderLineOut(BaseModel):
     required_material_uom: str | None
 
 
+class V2ProductionPieceOut(BaseModel):
+    """Una pieza de la cotizacion V2 de la orden, tal como se congelo. Fase 010I.
+
+    Solo lo necesario para FABRICAR: que, cuantas, de que medidas y con que
+    material se PLANIFICO. **Ni un importe**: ni costos, ni factor, ni precio.
+    Por eso existe este esquema en vez de reenviar la linea de la cotizacion,
+    que es solo de ADMIN justamente porque los lleva.
+
+    Lo planificado no es lo gastado: el consumo real va en `/consumptions`.
+    """
+
+    #: El id de la pieza en la cotizacion. Es el que se manda como
+    #: `v2_quotation_product_id` al imputarle un consumo.
+    id: int
+    sort_order: int
+    product_name: str
+    quantity: int
+    length_cm: Decimal | None
+    width_cm: Decimal | None
+    height_cm: Decimal | None
+    body_material_id: int | None
+    body_material_name: str | None
+    #: Lo que lleva UNA pieza y el total de la linea, en `body_uom`.
+    body_unit_weight: Decimal | None
+    body_total_weight: Decimal
+    body_uom: str | None
+    requires_glaze: bool
+    glaze_material_id: int | None
+    glaze_material_name: str | None
+    #: Si el esmalte fue una referencia de costeo que eligio el sistema: el
+    #: taller puede usar otro.
+    glaze_is_reference: bool
+    #: Lo planificado de esmalte para la linea, en gramos.
+    glaze_total_weight: Decimal
+
+
 class ProductionOrderSummaryOut(BaseModel):
     id: int
     code: str
@@ -125,6 +178,19 @@ class ProductionOrderSummaryOut(BaseModel):
     #: el documento que el taller reconoce, y por eso viaja al lado del PRT.
     prototype_quotation_id: int | None = None
     prototype_quotation_code: str | None = None
+    #: Fase 010I. Nulos salvo cuando la orden nace de una cotizacion V2. Son
+    #: campos PROPIOS y no `quotation_id` reutilizado: el id de una V2 y el de
+    #: una Legacy son espacios distintos, y compartir el campo haria que un
+    #: enlace llevara a la cotizacion equivocada.
+    v2_quotation_id: int | None = None
+    v2_quotation_code: str | None = None
+    #: Fase 010I. El cliente CONGELADO en la cotizacion de origen (Legacy o V2).
+    #: Nulo en las ordenes de muestra, que no lo tenian.
+    customer_name: str | None = None
+    #: Fase 010I. Que se fabrica, de un vistazo: «20 x Taza, 5 x Plato» (con el signo de
+    #: multiplicar). Lo arma
+    #: el backend para que la pantalla no reconstruya nada.
+    pieces_summary: str | None = None
     stock_location_id: int
     stock_location_name: str
     line_count: int
@@ -149,6 +215,15 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     quotation_payment_status: QuotationPaymentStatus | None
     lines: list[ProductionOrderLineOut]
     readiness: ProductionReadinessOut
+    #: Fase 010I, decision D3. Las clases de material que la cotizacion V2 de
+    #: esta orden planifico como inventariables y que aun no tienen ningun
+    #: consumo real. Mientras no este vacia, la orden no puede FINALIZAR. Viaja
+    #: para que la pantalla diga que falta; quien decide es `complete`.
+    #: Siempre vacia fuera de las ordenes V2.
+    pending_consumption_kinds: list[ProductionConsumptionKind] = Field(default_factory=list)
+    #: Fase 010I. Las piezas de la cotizacion V2 congelada, sin importes. Vacia
+    #: en las ordenes Legacy y de muestra, que tienen sus propias `lines`.
+    v2_pieces: list[V2ProductionPieceOut] = Field(default_factory=list)
 
 
 class ProductionOrderPage(BaseModel):
@@ -156,3 +231,176 @@ class ProductionOrderPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ProductionConsumptionCreateIn(BaseModel):
+    """Registrar material REAL gastado en una orden V2. Fase 010I.
+
+    La cantidad va en la unidad base del material —la del saldo— y SIEMPRE en
+    positivo: registrar un consumo es descontar, y el signo lo pone el
+    movimiento. Un cero no es un consumo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_id: int = Field(gt=0)
+    #: Opcional: por defecto el almacen de la orden. Cada consumo dice el suyo
+    #: porque no se asume un almacen unico.
+    stock_location_id: int | None = Field(default=None, gt=0)
+    quantity: Decimal = Field(gt=0)
+    kind: ProductionConsumptionKind
+    #: La pieza a la que se imputa. Nulo = consumo de la orden entera.
+    v2_quotation_product_id: int | None = Field(default=None, gt=0)
+    note: str | None = Field(default=None, max_length=500)
+    #: OBLIGATORIA. La genera el cliente al abrir el formulario de consumo y la
+    #: reutiliza en cada reintento de ESE consumo: es lo que impide que un doble
+    #: clic o un corte de red descuenten dos veces.
+    idempotency_key: str = Field(min_length=8, max_length=64)
+
+
+class ProductionConsumptionOut(BaseModel):
+    """Un consumo real, tal como lo ve el taller.
+
+    Sin el costo: igual que el resto de esta API, una orden de produccion es un
+    papel de taller y no ensena importes. El costo por unidad se guarda solo
+    para comparar despues lo real con lo cotizado.
+    """
+
+    id: int
+    production_order_id: int
+    v2_quotation_product_id: int | None
+    product_id: int
+    product_name: str
+    product_internal_reference: str
+    stock_location_id: int
+    stock_location_name: str
+    kind: ProductionConsumptionKind
+    quantity: Decimal
+    uom_code: str
+    #: Saldo del material en ese almacen justo despues de este consumo.
+    balance_after: Decimal
+    stock_movement_id: int
+    note: str | None
+    created_by_name: str | None
+    created_at: datetime
+
+
+class ProductionConsumptionPage(BaseModel):
+    items: list[ProductionConsumptionOut]
+    total: int
+
+
+class ProductionNoteCreateIn(BaseModel):
+    """Anadir una nota o una quema al seguimiento de la orden. Fase 010I, D4.
+
+    NOTE: solo texto. FIRING_NOTE: horno y tipo de quema obligatorios, texto
+    opcional. `occurred_at` es cuando paso, y es OBLIGATORIA: la pantalla la
+    propone en «ahora» y la manda siempre. Si fuera opcional, un reintento sin
+    fecha no podria distinguirse de una nota fechada en otro momento
+    (hallazgo de Copilot en el bloque C).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ProductionNoteKind
+    body: str | None = Field(default=None, max_length=2000)
+    kiln_id: int | None = Field(default=None, gt=0)
+    firing_type: FiringType | None = None
+    occurred_at: datetime
+    #: OBLIGATORIA, como en el consumo: un doble clic no debe dejar dos notas.
+    idempotency_key: str = Field(min_length=8, max_length=64)
+
+    @model_validator(mode="after")
+    def _campos_de_su_clase(self) -> ProductionNoteCreateIn:
+        texto = (self.body or "").strip()
+        self.body = texto or None
+        if self.kind is ProductionNoteKind.NOTE:
+            if self.body is None:
+                raise ValueError("Una nota necesita texto")
+            if self.kiln_id is not None or self.firing_type is not None:
+                raise ValueError("Una nota no lleva horno ni tipo de quema")
+        elif self.kiln_id is None or self.firing_type is None:
+            raise ValueError("Una quema necesita horno y tipo de quema")
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("occurred_at debe llevar zona horaria")
+        return self
+
+
+class ProductionNoteOut(BaseModel):
+    id: int
+    production_order_id: int
+    kind: ProductionNoteKind
+    body: str | None
+    kiln_id: int | None
+    kiln_name: str | None
+    firing_type: FiringType | None
+    occurred_at: datetime
+    created_by_name: str | None
+    created_at: datetime
+
+
+class ProductionCommunicationCreateIn(BaseModel):
+    """Registrar un aviso al cliente que el taller YA hizo. Fase 010I, decision D2.
+
+    No envia nada. `message` es el texto final que se declara enviado —partiera
+    o no de una plantilla—. No hay campo de autor: lo pone la sesion, y
+    `extra="forbid"` rechaza un `sent_by` que intentara colarse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: ProductionCommunicationChannel
+    message: str = Field(max_length=2000)
+    #: Obligatoria por la misma razon que en las notas: sin ella un reintento
+    #: no puede distinguirse de otro aviso en otro momento.
+    sent_at: datetime
+    idempotency_key: str = Field(min_length=8, max_length=64)
+
+    @model_validator(mode="after")
+    def _mensaje_y_fecha(self) -> ProductionCommunicationCreateIn:
+        # Se recortan solo los extremos: el texto de dentro es el que se envio.
+        self.message = self.message.strip()
+        if not self.message:
+            raise ValueError("El mensaje no puede estar vacio")
+        if self.sent_at.tzinfo is None:
+            raise ValueError("sent_at debe llevar zona horaria")
+        return self
+
+
+class ProductionCommunicationOut(BaseModel):
+    id: int
+    production_order_id: int
+    channel: ProductionCommunicationChannel
+    message: str
+    sent_at: datetime
+    sent_by_name: str | None
+    created_at: datetime
+
+
+class ProductionTimelineEventType(StrEnum):
+    #: Un cambio de estado: INICIO, EN PROCESO, FINALIZADO o Anulada.
+    STATUS = "STATUS"
+    CONSUMPTION = "CONSUMPTION"
+    NOTE = "NOTE"
+    FIRING_NOTE = "FIRING_NOTE"
+    #: Fase 010I, bloque D. Un aviso al cliente DECLARADO, no enviado por el sistema.
+    COMMUNICATION = "COMMUNICATION"
+
+
+class ProductionTimelineEventOut(BaseModel):
+    """Un hecho del seguimiento. Solo viaja el detalle de su tipo."""
+
+    type: ProductionTimelineEventType
+    occurred_at: datetime
+    actor_name: str | None
+    #: Solo en STATUS: el estado al que se llego.
+    status: ProductionOrderStatus | None = None
+    consumption: ProductionConsumptionOut | None = None
+    note: ProductionNoteOut | None = None
+    communication: ProductionCommunicationOut | None = None
+
+
+class ProductionTimelineOut(BaseModel):
+    """El seguimiento de la orden, del hecho mas antiguo al mas reciente."""
+
+    items: list[ProductionTimelineEventOut]
