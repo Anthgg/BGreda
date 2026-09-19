@@ -11,6 +11,7 @@ from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    LegacyQuotationCreationGuardDep,
     QuotationPdfServiceDep,
     QuotationServiceDep,
 )
@@ -239,6 +240,7 @@ async def create_quotation(
     service: QuotationServiceDep,
     admin: AdminUserDep,
     session: DbSessionDep,
+    _legacy: LegacyQuotationCreationGuardDep,
 ) -> QuotationOut:
     result = await service.create(payload, user=admin)
     await session.commit()

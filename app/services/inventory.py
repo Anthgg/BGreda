@@ -11,6 +11,7 @@ import uuid
 from decimal import Decimal
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
@@ -172,6 +173,23 @@ class InventoryService:
         if product.base_uom_code is None:
             raise MissingUomError()
 
+        # Fase 010J (DEFERRED_01). El saldo se CREA antes de bloquearlo, y de
+        # forma que dos transacciones a la vez no choquen: `FOR UPDATE` sobre
+        # una fila que todavia no existe no bloquea nada, asi que dos primeras
+        # entradas simultaneas insertaban las dos y la segunda salia con un 500
+        # por el UNIQUE `(product_id, location_id)`, perdiendo su movimiento.
+        #
+        # Con `ON CONFLICT DO NOTHING` la segunda ESPERA a que la primera
+        # confirme y no inserta; el `FOR UPDATE` de despues la deja leyendo el
+        # saldo ya confirmado y aplicando su delta encima. Sin reintentos: es
+        # el propio PostgreSQL el que serializa. Si la operacion falla despues
+        # —existencia insuficiente—, la fila en cero se va con el rollback de
+        # la transaccion o del SAVEPOINT que la envuelve.
+        await self._session.execute(
+            pg_insert(StockBalance)
+            .values(product_id=product.id, location_id=location.id, quantity=Decimal(0))
+            .on_conflict_do_nothing(index_elements=["product_id", "location_id"])
+        )
         balance = await self._session.scalar(
             select(StockBalance)
             .where(
@@ -179,12 +197,12 @@ class InventoryService:
                 StockBalance.location_id == location.id,
             )
             .with_for_update()
+            # Si esta sesion ya tenia el saldo en memoria, el `FOR UPDATE` tiene
+            # que devolver el valor de la base, no el de su copia.
+            .execution_options(populate_existing=True)
         )
-        if balance is None:
-            balance = StockBalance(
-                product_id=product.id, location_id=location.id, quantity=Decimal(0)
-            )
-            self._session.add(balance)
+        if balance is None:  # pragma: no cover - el INSERT de arriba lo garantiza
+            raise RuntimeError("El saldo no existe tras crearlo")
 
         if movement_type is MovementType.PROTOTYPE_OUT and prototype_id is None:
             # Un consumo de muestra sin muestra detras seria un gasto sin
