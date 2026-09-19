@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     #: documento inexistente gastaria dos cuotas sin obtener informacion.
     IDENTITY_FALLBACK_ON_NOT_FOUND: bool = False
 
+    #: Fase 010J. Crear cotizaciones LEGACY nuevas por las rutas generales
+    #: (`POST /quotations`, `POST /quotation-builder`, su duplicado). APAGADO
+    #: por defecto: el Cotizador V2 es el flujo vigente y el Legacy queda solo
+    #: para consultar lo historico. Un interruptor explicito y no un borrado:
+    #: si hiciera falta volver atras, se enciende en el servicio sin desplegar.
+    #:
+    #: No afecta a la cotizacion final de una muestra aprobada
+    #: (`POST /prototypes/{id}/final-quotation`): es una excepcion temporal
+    #: documentada, porque las muestras todavia no tienen camino V2.
+    LEGACY_QUOTATION_CREATION_ENABLED: bool = False
+
     #: Cuotas administrativas, solo para observabilidad/avisos. La cuota real
     #: la impone el proveedor con su propio 429; esto nunca bloquea una
     #: consulta legitima por su cuenta.

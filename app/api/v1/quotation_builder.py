@@ -8,6 +8,7 @@ from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    LegacyQuotationCreationGuardDep,
     QuotationBuilderServiceDep,
 )
 from app.schemas.quotation_builder import (
@@ -119,6 +120,7 @@ async def create_quotation_builder(
     service: QuotationBuilderServiceDep,
     admin: AdminUserDep,
     session: DbSessionDep,
+    _legacy: LegacyQuotationCreationGuardDep,
 ) -> QuotationBuilderOut:
     result = await service.create(payload, user=admin)
     await session.commit()
@@ -207,6 +209,7 @@ async def duplicate_quotation_builder(
     service: QuotationBuilderServiceDep,
     admin: AdminUserDep,
     session: DbSessionDep,
+    _legacy: LegacyQuotationCreationGuardDep,
 ) -> QuotationBuilderOut:
     result = await service.duplicate(quotation_id, user=admin)
     await session.commit()
