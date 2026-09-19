@@ -5,7 +5,7 @@
 3. una cotizacion V2 no admite dos ordenes, lo garantiza la base;
 4. bajar se niega si hay ordenes V2, y cuando no las hay deja las de muestra
    intactas: 0037 no deshace lo que es de 0027;
-5. la cadena entera deja una sola cabeza, y es 0037.
+5. la cadena entera deja una sola cabeza.
 """
 
 from __future__ import annotations
@@ -517,12 +517,13 @@ async def test_las_comunicaciones_de_la_base_migrada_se_comportan(
     assert "ix_production_order_communications_production_order_id" in indices, indices
 
 
-async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0037(
+async def test_toda_la_cadena_deja_una_sola_cabeza(
     migration_engine: AsyncEngine,
 ) -> None:
+    """La cabeza se la lleva la migracion mas nueva; esa afirmacion vive en 0038."""
     _upgrade("head")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0037"]
+    assert len(cabezas) == 1
