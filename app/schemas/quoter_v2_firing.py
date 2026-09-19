@@ -22,7 +22,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.quoter_v2 import V2CustomerKind
+from app.core.quoter_v2_config import MAX_PIECE_SEPARATION_CM
+from app.models.quoter_v2 import V2CustomerKind, V2FiringMode
 
 #: Topes holgados. Frenan un cero de mas al teclear, no opinan sobre el negocio.
 MAX_MONEY = Decimal("10000000")
@@ -49,6 +50,10 @@ class V2FiringIn(BaseModel):
     #: ambas: no hay una regla rigida y no se inventa aqui.
     low_fire_enabled: bool | None = None
     high_fire_enabled: bool | None = None
+    #: Fase 010J. Compartida (defecto) o exclusiva/urgente.
+    firing_mode: V2FiringMode | None = None
+    #: Separacion entre piezas, en cm; 0 = sin separacion.
+    piece_separation_cm: Decimal | None = Field(default=None, ge=0, le=MAX_PIECE_SEPARATION_CM)
 
     #: Los cuatro importes por hornada, pactados DENTRO de esta cotizacion. El
     #: maestro no se toca: CTZ-001 puede usar 40 mientras el maestro dice 35 y
@@ -75,9 +80,23 @@ class V2KilnOptionOut(BaseModel):
     occupancy_percent: Decimal
     #: Y cuantas hornadas pediria. Es la informacion con la que se decide.
     firing_count: int
+    #: Fase 010J. Lo que costaria la quema en este horno con el mismo modo,
+    #: cliente y ciclos. `None` si le falta alguna tarifa necesaria.
+    billed_load: Decimal
+    commercial_total: Decimal | None
+    gas_total: Decimal | None
     #: Si tiene tarifas V2 configuradas. Sin ellas no se puede costear, y la
     #: pantalla tiene que poder decirlo antes de que alguien lo elija.
     has_rates: bool
+
+
+class V2CheaperKilnOut(BaseModel):
+    """Otro horno que cobraria menos por la misma quema. Solo una sugerencia."""
+
+    kiln_id: int
+    name: str
+    commercial_total: Decimal
+    savings: Decimal
 
 
 class V2FiringLineOut(BaseModel):
@@ -111,13 +130,19 @@ class V2FiringOut(BaseModel):
 
     total_volume_cm3: Decimal
     occupancy_percent: Decimal
+    #: Hornadas FISICAS: cuantas veces se enciende el horno.
     firing_count: int
+    #: Fase 010J. Compartida o exclusiva, la separacion con la que se midio y la
+    #: carga que se COBRA (ocupacion/100 en compartida, hornadas en exclusiva).
+    firing_mode: V2FiringMode
+    piece_separation_cm: Decimal
+    billed_load: Decimal
     low_fire_enabled: bool
     high_fire_enabled: bool
     low_fire_count: int
     high_fire_count: int
-    #: Con cuanta carga va cada hornada. Es informacion de pantalla: la ultima,
-    #: al 60 %, cuesta exactamente lo mismo que las demas.
+    #: Con cuanta carga va cada hornada: la primera al 100 %, la ultima con el
+    #: resto. Informacion de operacion; lo que se cobra es `billed_load`.
     batch_loads: list[Decimal]
 
     #: Lo que cuesta encender, por hornada. COSTO.
@@ -140,6 +165,8 @@ class V2FiringOut(BaseModel):
 
     #: El horno que el sistema recomendaria. RECOMIENDA: no se aplica solo.
     recommended_kiln_id: int | None
+    #: Fase 010J. Otro horno que cobraria menos. SUGERENCIA: no se aplica sola.
+    cheaper_kiln: V2CheaperKilnOut | None = None
     kilns: list[V2KilnOptionOut]
     lines: list[V2FiringLineOut]
 

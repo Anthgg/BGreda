@@ -408,9 +408,15 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             )
 
         # Dos hornos con sus tarifas: el chico para por menor, el grande para
-        # por mayor. Son los numeros del Excel aprobado.
+        # por mayor. Son los numeros del Excel FINAL (fase 010J): gas, externo
+        # y alumno por ciclo, baja y alta.
+        tarifas_por_horno = {
+            "Horno chico E2E": (("35", "70"), ("200", "250"), ("90", "180")),
+            "Horno grande E2E": (("55", "110"), ("700", "1200"), ("1000", "2000")),
+        }
         hornos: dict[str, int] = {}
         for nombre, capacidad in (("Horno chico E2E", 17000), ("Horno grande E2E", 200000)):
+            gas, externo, alumno = tarifas_por_horno[nombre]
             horno = await _ok(
                 await api.post(
                     "/api/v1/kilns",
@@ -425,9 +431,9 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                     await api.put(
                         f"/api/v1/quoter-v2/settings/kiln-rates/{horno.json()['id']}/{tipo}",
                         json={
-                            "gas_cost": ("35", "70")[indice],
-                            "external_rate": ("200", "250")[indice],
-                            "student_rate": ("90", "180")[indice],
+                            "gas_cost": gas[indice],
+                            "external_rate": externo[indice],
+                            "student_rate": alumno[indice],
                         },
                         headers=cabeceras,
                     ),
@@ -445,11 +451,13 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
                     "administrative_cost_per_quote": "200",
                     "commercial_factor_min": "2",
                     "commercial_factor_default": "3",
-                    "commercial_factor_max": "3",
+                    "commercial_factor_max": "10",
                     "retail_kiln_id": hornos["Horno chico E2E"],
                     "wholesale_kiln_id": hornos["Horno grande E2E"],
-                    "illustration_daily_rate": "88",
-                    "illustration_pieces_per_workday": "8",
+                    # Excel final: S/110 por jornada de 8 h y 50 piezas.
+                    "illustration_daily_rate": "110",
+                    "illustration_pieces_per_workday": "50",
+                    "piece_separation_cm": "3",
                     # Fase 010H: el tipo de cambio con el que se emite la
                     # cotizacion que despues se hace vencer.
                     "default_exchange_rate": "3.70",
@@ -489,15 +497,20 @@ TRABAJADORES = (
         "E2E-Trabajador taller",
         "INTERNAL",
         "110",
+        # Excel final: el caso canonico lo hace entero el trabajador del taller,
+        # torno incluido.
         (
             "E2E-A-MANO",
+            "E2E-TORNO-FACIL",
+            "E2E-TORNO-DIFICIL",
             "E2E-COLADA",
             "E2E-ARMADO-ASA",
             "E2E-VIDRIADO-INMERSION",
             "E2E-VIDRIADO-MANO-ALZADA",
         ),
     ),
-    ("E2E-Tornero", "INTERNAL", "220", ("E2E-TORNO-FACIL", "E2E-TORNO-DIFICIL")),
+    # «Tornero Externo» de la hoja «Configuracion»: S/220 por 8 h.
+    ("E2E-Tornero", "EXTERNAL", "220", ("E2E-TORNO-FACIL", "E2E-TORNO-DIFICIL")),
     ("E2E-Personal externo", "EXTERNAL", "120", ("E2E-PERSONAL-ADICIONAL",)),
 )
 

@@ -50,6 +50,7 @@ from app.core.quoter_v2_config import (
     DEFAULT_EXCHANGE_RATE,
     DEFAULT_ILLUSTRATION_DAILY_RATE,
     DEFAULT_ILLUSTRATION_PIECES_PER_WORKDAY,
+    DEFAULT_PIECE_SEPARATION_CM,
     DEFAULT_QUOTATION_VALIDITY_DAYS,
     DEFAULT_SPACE_SERVICE_COST_PER_DAY,
     DEFAULT_WORKDAY_HOURS,
@@ -162,6 +163,13 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         nullable=False,
         server_default=text(str(DEFAULT_ILLUSTRATION_PIECES_PER_WORKDAY)),
     )
+    #: Fase 010J. Separacion entre piezas en el horno, en cm, sumada a cada
+    #: medida. Default 3; cero es «sin separacion». Cada cotizacion la congela.
+    piece_separation_cm: Mapped[Decimal] = mapped_column(
+        quantity_numeric(),
+        nullable=False,
+        server_default=text(str(DEFAULT_PIECE_SEPARATION_CM)),
+    )
 
     retail_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[retail_kiln_id])
     wholesale_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[wholesale_kiln_id])
@@ -198,6 +206,10 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         CheckConstraint("illustration_daily_rate >= 0", name="illustration_rate_non_negative"),
         CheckConstraint(
             "illustration_pieces_per_workday > 0", name="illustration_capacity_positive"
+        ),
+        CheckConstraint(
+            "piece_separation_cm >= 0 AND piece_separation_cm <= 20",
+            name="piece_separation_range",
         ),
     )
 

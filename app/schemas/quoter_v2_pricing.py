@@ -118,6 +118,8 @@ class V2PricingOut(BaseModel):
     commercial_factor: Decimal | None
     factor_min: Decimal | None
     factor_max: Decimal | None
+    #: Fase 010J. El factor del precio objetivo (x3 por defecto).
+    factor_target: Decimal | None = None
     #: Costo de produccion por el suelo, por el techo y por el factor de hoy.
     price_min: Decimal
     price_target: Decimal
@@ -146,4 +148,26 @@ class V2PricingOut(BaseModel):
     lines: list[V2PricingLineOut]
     #: Lo que conviene mirar. Avisos, nunca bloqueos: un borrador a medias
     #: tiene que poder guardarse.
+    warnings: list[str] = []
+
+
+class V2ReductionOut(BaseModel):
+    """Una palanca para bajar el precio y el subtotal que dejaria. Fase 010J."""
+
+    code: str
+    applicable: bool
+    cost_reduction: Decimal
+    savings: Decimal
+    estimated_subtotal: Decimal
+    suggestion: str | None = None
+
+
+class V2ReductionsOut(BaseModel):
+    """Reducciones sugeridas. Estimaciones antes del redondeo; nada se aplica."""
+
+    current_subtotal: Decimal
+    commercial_factor: Decimal | None
+    #: En moneda base (PEN), como los costos.
+    currency_code: str
+    items: list[V2ReductionOut]
     warnings: list[str] = []

@@ -105,6 +105,22 @@ class V2CustomerKind(StrEnum):
     STUDENT = "STUDENT"
 
 
+class V2FiringMode(StrEnum):
+    """Como se cobra la quema. Fase 010J, hoja «Quema V2» del Excel final.
+
+    - COMPARTIDA (por defecto): la pieza viaja con otras en hornadas que el
+      taller llena. Se cobra la parte del horno que ocupa: 30 % de ocupacion
+      es 0,30 de la tarifa completa, en precio y en gas.
+    - EXCLUSIVA / URGENTE: el horno se enciende solo para este pedido. Se cobra
+      cada hornada entera: 30 % es una hornada completa.
+
+    Lo elige quien cotiza; nunca se deduce del volumen ni de la fecha.
+    """
+
+    SHARED = "SHARED"
+    EXCLUSIVE = "EXCLUSIVE"
+
+
 #: Tipo de produccion con el que nace una cotizacion V2 si nadie dice otra cosa.
 DEFAULT_V2_PRODUCTION_TYPE = V2ProductionType.RETAIL
 
@@ -240,6 +256,10 @@ class V2Quotation(Base, TimestampMixin):
     commercial_factor: Mapped[Decimal | None] = mapped_column(quantity_numeric())
     commercial_factor_min_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
     commercial_factor_max_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    #: El factor OBJETIVO (x3 por defecto) congelado al crear. El precio
+    #: objetivo es costo de produccion x este factor. Fase 010J: antes era el
+    #: maximo del rango.
+    commercial_factor_target_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
 
     #: A quien se cotiza, a efectos de tarifa de horno. Explicito y persistido:
     #: jamas se deduce del nombre del cliente.
@@ -321,9 +341,25 @@ class V2Quotation(Base, TimestampMixin):
     firing_occupancy_percent: Mapped[Decimal] = mapped_column(
         quantity_numeric(), nullable=False, server_default=text("0")
     )
-    #: Hornadas que pide el volumen: techo de volumen/capacidad. No se
-    #: prorratea ninguna: la segunda hornada al 60 % cuesta una entera.
+    #: Hornadas FISICAS que pide el volumen: techo de volumen/capacidad. Es
+    #: dato de operacion (cuantas veces se enciende). Lo que se COBRA depende
+    #: del modo y va en `firing_billed_load`. Fase 010J.
     firing_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    #: Compartida o exclusiva/urgente. Fase 010J.
+    firing_mode: Mapped[V2FiringMode] = mapped_column(
+        StrEnumType(V2FiringMode, 16), nullable=False, server_default=text("'SHARED'")
+    )
+    #: La carga que se factura, en hornadas: ocupacion/100 exacta en compartida
+    #: (5,018823529412 para un 501,88 %) y el techo en exclusiva (6). Tarifa y
+    #: gas se multiplican por ESTE numero, por cada ciclo encendido.
+    firing_billed_load: Mapped[Decimal] = mapped_column(
+        unit_cost_numeric(), nullable=False, server_default=text("0")
+    )
+    #: La separacion entre piezas con la que se midio, en cm. Se suma a largo,
+    #: ancho y alto: (L+s)(A+s)(H+s). Cero es «sin separacion».
+    piece_separation_cm_snapshot: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("3")
+    )
     low_fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     high_fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
@@ -681,6 +717,16 @@ class V2Quotation(Base, TimestampMixin):
         CheckConstraint("firing_total_volume_cm3 >= 0", name="firing_volume_non_negative"),
         CheckConstraint("firing_occupancy_percent >= 0", name="firing_occupancy_non_negative"),
         CheckConstraint("firing_count >= 0", name="firing_count_non_negative"),
+        CheckConstraint("firing_mode IN ('SHARED', 'EXCLUSIVE')", name="firing_mode_allowed"),
+        CheckConstraint("firing_billed_load >= 0", name="firing_billed_load_non_negative"),
+        CheckConstraint(
+            "piece_separation_cm_snapshot >= 0 AND piece_separation_cm_snapshot <= 20",
+            name="piece_separation_snapshot_range",
+        ),
+        CheckConstraint(
+            "commercial_factor_target_snapshot IS NULL OR commercial_factor_target_snapshot >= 2",
+            name="commercial_factor_target_snapshot_floor",
+        ),
         # Una quema no puede pedir mas hornadas de las que pide el volumen: el
         # numero de hornadas lo fija la carga, y baja y alta se hacen sobre la
         # MISMA carga. Un conteo mayor seria cobrar un encendido que nadie hizo.
@@ -860,6 +906,19 @@ class V2QuotationProduct(Base, TimestampMixin):
         calculation_numeric(), nullable=False, server_default=text("0")
     )
 
+    # ---- Ilustracion de ESTE producto (fase 010J) -----------------------
+    #: Hoja «Ilustracion» del Excel: una fila por producto. Su costo entra en
+    #: el costo directo de la linea, no en lo general.
+    illustration_quantity: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    illustration_hours: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    illustration_cost: Mapped[Decimal] = mapped_column(
+        money_numeric(), nullable=False, server_default=text("0")
+    )
+
     # ---- Pasta -----------------------------------------------------------
     body_material_id: Mapped[int | None] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), index=True
@@ -1031,6 +1090,11 @@ class V2QuotationProduct(Base, TimestampMixin):
         CheckConstraint("unit_volume_cm3 >= 0", name="unit_volume_non_negative"),
         CheckConstraint("total_volume_cm3 >= 0", name="total_volume_non_negative"),
         CheckConstraint("firing_occupancy_percent >= 0", name="line_firing_occupancy_non_negative"),
+        CheckConstraint(
+            "illustration_quantity >= 0", name="line_illustration_quantity_non_negative"
+        ),
+        CheckConstraint("illustration_hours >= 0", name="line_illustration_hours_non_negative"),
+        CheckConstraint("illustration_cost >= 0", name="line_illustration_cost_non_negative"),
         CheckConstraint(
             "firing_volume_share_percent >= 0 AND firing_volume_share_percent <= 100",
             name="line_volume_share_range",
