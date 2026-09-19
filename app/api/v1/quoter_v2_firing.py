@@ -20,6 +20,7 @@ from fastapi import APIRouter, Path
 
 from app.api.deps import AdminUserDep, DbSessionDep, V2FiringServiceDep
 from app.schemas.quoter_v2_firing import (
+    V2CheaperKilnOut,
     V2FiringIn,
     V2FiringLineOut,
     V2FiringOut,
@@ -41,6 +42,9 @@ def _out(estado: FiringState) -> V2FiringOut:
         total_volume_cm3=quotation.firing_total_volume_cm3,
         occupancy_percent=quotation.firing_occupancy_percent,
         firing_count=quotation.firing_count,
+        firing_mode=quotation.firing_mode,
+        piece_separation_cm=quotation.piece_separation_cm_snapshot,
+        billed_load=quotation.firing_billed_load,
         # Una cotizacion de 010A tiene los dos en NULL: nacio antes de que
         # existiera la quema. Hacia fuera eso es «apagada», que es lo que de
         # hecho ocurre —no tiene hornadas ni costo—.
@@ -65,6 +69,16 @@ def _out(estado: FiringState) -> V2FiringOut:
         # diferencia que no corresponde a los dos totales que la acompanan.
         difference=quotation.firing_commercial_total - quotation.firing_gas_total,
         recommended_kiln_id=estado.recommended_kiln_id,
+        cheaper_kiln=(
+            V2CheaperKilnOut(
+                kiln_id=estado.cheaper_kiln.kiln_id,
+                name=estado.cheaper_kiln.name,
+                commercial_total=estado.cheaper_kiln.commercial_total,
+                savings=estado.cheaper_kiln.savings,
+            )
+            if estado.cheaper_kiln is not None
+            else None
+        ),
         kilns=[
             V2KilnOptionOut(
                 kiln_id=horno.kiln_id,
@@ -74,6 +88,9 @@ def _out(estado: FiringState) -> V2FiringOut:
                 active=horno.active,
                 occupancy_percent=horno.occupancy_percent,
                 firing_count=horno.firing_count,
+                billed_load=horno.billed_load,
+                commercial_total=horno.commercial_total,
+                gas_total=horno.gas_total,
                 has_rates=horno.has_rates,
             )
             for horno in estado.kilns

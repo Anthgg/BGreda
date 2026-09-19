@@ -427,7 +427,7 @@ class V2MaterialService:
             quantity=int(data.get("quantity") or 0),
         )
         self._session.add(linea)
-        avisos = await self._fill_line(linea, data)
+        avisos = await self._fill_line(linea, data, quotation.piece_separation_cm_snapshot)
         await self._session.flush()
         # Correccion 010H. La pieza trae sus procesos: torno, asa, acabado. Que
         # aparezcan solos es justo el punto de la correccion; si el catalogo no
@@ -467,7 +467,7 @@ class V2MaterialService:
         cantidad_antes = linea.quantity
         if "quantity" in data:
             linea.quantity = int(data["quantity"] or 0)
-        avisos = await self._fill_line(linea, data)
+        avisos = await self._fill_line(linea, data, quotation.piece_separation_cm_snapshot)
         await self._session.flush()
         if linea.product_id != producto_antes:
             # Otra pieza son OTROS procesos: los de la anterior se van con sus
@@ -523,7 +523,9 @@ class V2MaterialService:
 
         return V2ProcessService(self._session, self._audit)
 
-    async def _fill_line(self, linea: V2QuotationProduct, data: dict[str, Any]) -> list[str]:
+    async def _fill_line(
+        self, linea: V2QuotationProduct, data: dict[str, Any], separation_cm: Decimal
+    ) -> list[str]:
         """Rellena la pieza y recalcula el material entero.
 
         Se recalcula SIEMPRE, aunque el cambio parezca no afectar al material:
@@ -567,7 +569,7 @@ class V2MaterialService:
         # por el mismo motivo: subir la cantidad cambia el volumen total, y un
         # volumen que no se recalcula deja de corresponder a su linea —y con
         # el, las hornadas de toda la cotizacion—.
-        apply_line_geometry(linea, data)
+        apply_line_geometry(linea, data, separation_cm)
         return await self.apply_materials(linea, data)
 
     async def _draft(self, quotation_id: int) -> V2Quotation:

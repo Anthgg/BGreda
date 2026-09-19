@@ -15,8 +15,10 @@ Fase 010E. Cuatro responsabilidades, y conviene separarlas al leer:
 poco horno, hasta x3. En V2 eso no existe bajo ningun nombre: la ocupacion dice
 cuanto cabe y cuantas veces hay que encender, nada mas.
 
-**No prorratea una hornada incompleta.** Una segunda hornada al 60 % cuesta una
-hornada entera, de tarifa y de gas: el horno se enciende completo.
+**No decide el modo.** Fase 010J: en quema COMPARTIDA (la de siempre) se cobra
+la fraccion de horno que ocupa el pedido; en EXCLUSIVA/URGENTE, cada hornada
+entera. Precio y gas se mueven con la misma carga. El modo lo elige quien
+cotiza; el volumen solo dice cuanto ocupa.
 
 **No cambia el horno ni el tipo de produccion por su cuenta.** Calcula
 recomendaciones y las devuelve como avisos. Que una produccion por menor no
@@ -40,18 +42,21 @@ from app.core.quoter_v2_firing import (
     FiringMathError,
     allocate_by_volume,
     batch_loads,
-    firing_cost,
+    billed_load,
+    firing_amount,
     firing_count,
     occupancy_percent,
     piece_volume,
     total_volume,
     volume_share_percent,
 )
+from app.core.quoter_v2_pricing import quantize_money
 from app.models.audit import AuditAction
 from app.models.firings import FiringType, Kiln
 from app.models.masters import Product
 from app.models.quoter_v2 import (
     V2CustomerKind,
+    V2FiringMode,
     V2ProductionType,
     V2Quotation,
     V2QuotationProduct,
@@ -136,11 +141,32 @@ class KilnOption:
     active: bool
     occupancy_percent: Decimal
     firing_count: int
+    #: Fase 010J. Lo que costaria la quema en ESTE horno con el mismo modo,
+    #: cliente y ciclos: la carga que se cobraria, la tarifa y el gas. `None`
+    #: si al horno le falta alguna tarifa de las que la cotizacion necesita:
+    #: comparar contra un cero inventado sugeriria el horno equivocado.
+    billed_load: Decimal
+    commercial_total: Decimal | None
+    gas_total: Decimal | None
     #: Si tiene configuradas las tarifas que ESTA cotizacion necesita. Un horno
     #: con solo la baja puesta sirve para una cotizacion que solo hace baja y
     #: no sirve para una que ademas hace alta: decirlo con un unico «tiene
     #: tarifas» ofreceria como elegible un horno que costearia a medias.
     has_rates: bool
+
+
+@dataclass(frozen=True)
+class CheaperKiln:
+    """Otro horno que haria la misma quema por menos. Fase 010J.
+
+    Es una SUGERENCIA: el horno no se cambia solo. «Grande reduce la quema
+    estimada en S/ 1447,93» es informacion para quien cotiza.
+    """
+
+    kiln_id: int
+    name: str
+    commercial_total: Decimal
+    savings: Decimal
 
 
 @dataclass(frozen=True)
@@ -153,10 +179,14 @@ class FiringState:
     kilns: list[KilnOption]
     #: El horno que el sistema recomendaria. RECOMIENDA: no se aplica solo.
     recommended_kiln_id: int | None
+    #: Fase 010J. El horno mas barato para esta misma quema, si no es el elegido.
+    cheaper_kiln: CheaperKiln | None
     warnings: list[str]
 
 
-def apply_line_geometry(line: V2QuotationProduct, data: dict[str, Any]) -> None:
+def apply_line_geometry(
+    line: V2QuotationProduct, data: dict[str, Any], separation_cm: Decimal
+) -> None:
     """Deja en la linea sus medidas y el volumen que ocupa.
 
     Se recalcula SIEMPRE, aunque el cambio parezca no afectar al volumen: subir
@@ -171,7 +201,17 @@ def apply_line_geometry(line: V2QuotationProduct, data: dict[str, Any]) -> None:
         if campo in data:
             setattr(line, campo, data[campo])
 
-    line.unit_volume_cm3 = piece_volume(line.length_cm, line.width_cm, line.height_cm)
+    _measure(line, separation_cm)
+
+
+def _measure(line: V2QuotationProduct, separation_cm: Decimal) -> None:
+    """Volumen de la linea con la separacion que la cotizacion congelo."""
+    try:
+        line.unit_volume_cm3 = piece_volume(
+            line.length_cm, line.width_cm, line.height_cm, separation_cm
+        )
+    except FiringMathError as error:
+        raise V2FiringInputInvalid(str(error)) from error
     line.total_volume_cm3 = total_volume(line.unit_volume_cm3, line.quantity)
 
 
@@ -219,10 +259,34 @@ def _commercial_rate(rate: V2KilnRate, customer_kind: V2CustomerKind) -> Decimal
     return rate.external_rate
 
 
+def _cost_in_kiln(
+    load: Decimal,
+    rates: dict[FiringType, V2KilnRate],
+    cycles: set[FiringType],
+    customer_kind: V2CustomerKind,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Precio y gas de la quema en un horno que NO es el elegido. Fase 010J.
+
+    Mismas reglas que la quema de verdad: la carga se cobra por cada ciclo
+    encendido, a la tarifa del tipo de cliente. Sin alguna tarifa necesaria no
+    hay comparacion posible y se devuelve `None`.
+    """
+    if any(ciclo not in rates for ciclo in cycles):
+        return None, None
+    comercial = ZERO
+    gas = ZERO
+    for ciclo in cycles:
+        fila = rates[ciclo]
+        comercial += firing_amount(load, _commercial_rate(fila, customer_kind))
+        gas += firing_amount(load, fila.gas_cost)
+    return quantize_money(comercial), quantize_money(gas)
+
+
 def _reset_firing(quotation: V2Quotation, lines: list[V2QuotationProduct]) -> None:
     """Deja la quema en cero. Sin horno no hay hornada ni importe que valga."""
     quotation.firing_occupancy_percent = ZERO
     quotation.firing_count = 0
+    quotation.firing_billed_load = ZERO
     quotation.low_fire_count = 0
     quotation.high_fire_count = 0
     quotation.firing_gas_total = ZERO
@@ -265,6 +329,14 @@ async def _recalculate(
     session: AsyncSession, quotation: V2Quotation, lineas: list[V2QuotationProduct]
 ) -> list[str]:
     avisos: list[str] = []
+    # Fase 010J. El volumen se vuelve a medir con la separacion de ESTA
+    # cotizacion: cambiarla (3 cm -> 0) mueve el volumen de todas las lineas a
+    # la vez, y una linea medida con la separacion vieja repartiria mal.
+    separacion = quotation.piece_separation_cm_snapshot
+    if separacion is None:
+        separacion = ZERO
+    for linea in lineas:
+        _measure(linea, separacion)
     volumen = sum((linea.total_volume_cm3 for linea in lineas), ZERO)
     quotation.firing_total_volume_cm3 = volumen
 
@@ -297,12 +369,15 @@ async def _recalculate(
         quotation.kiln_name_snapshot = horno.name
     capacidad = quotation.kiln_capacity_snapshot
 
+    modo = quotation.firing_mode or V2FiringMode.SHARED
     try:
         quotation.firing_occupancy_percent = occupancy_percent(volumen, capacidad)
         hornadas = firing_count(volumen, capacidad)
+        carga = billed_load(volumen, capacidad, modo.value)
     except FiringMathError as error:
         raise V2FiringInputInvalid(str(error)) from error
     quotation.firing_count = hornadas
+    quotation.firing_billed_load = carga
 
     baja = bool(quotation.low_fire_enabled)
     alta = bool(quotation.high_fire_enabled)
@@ -363,13 +438,17 @@ async def _recalculate(
     com_baja = quotation.commercial_rate_low_snapshot or ZERO
     com_alta = quotation.commercial_rate_high_snapshot or ZERO
 
+    # Cada ciclo encendido cobra la MISMA carga por su propia tarifa y su
+    # propio gas. Apagado es cero, sin importes escondidos.
+    carga_baja = carga if baja else ZERO
+    carga_alta = carga if alta else ZERO
     try:
-        quotation.firing_gas_total = firing_cost(quotation.low_fire_count, gas_baja) + firing_cost(
-            quotation.high_fire_count, gas_alta
+        quotation.firing_gas_total = quantize_money(
+            firing_amount(carga_baja, gas_baja) + firing_amount(carga_alta, gas_alta)
         )
-        quotation.firing_commercial_total = firing_cost(
-            quotation.low_fire_count, com_baja
-        ) + firing_cost(quotation.high_fire_count, com_alta)
+        quotation.firing_commercial_total = quantize_money(
+            firing_amount(carga_baja, com_baja) + firing_amount(carga_alta, com_alta)
+        )
     except FiringMathError as error:
         raise V2FiringInputInvalid(str(error)) from error
 
@@ -446,7 +525,38 @@ class V2FiringService:
             batch_loads=batch_loads(quotation.firing_occupancy_percent, quotation.firing_count),
             kilns=hornos,
             recommended_kiln_id=recomendado,
+            cheaper_kiln=self._cheaper_kiln(quotation, hornos),
             warnings=avisos,
+        )
+
+    @staticmethod
+    def _cheaper_kiln(quotation: V2Quotation, kilns: list[KilnOption]) -> CheaperKiln | None:
+        """El horno activo que cobraria menos por esta misma quema. Fase 010J.
+
+        Compara el precio de quema (lo que se cobra), con el mismo modo, cliente
+        y ciclos: es lo que el Excel compara para sugerir el horno. Solo
+        sugiere; el horno elegido no se toca.
+        """
+        if quotation.kiln_id is None or (quotation.firing_total_volume_cm3 or ZERO) <= ZERO:
+            return None
+        actual = quotation.firing_commercial_total or ZERO
+        candidatos = [
+            horno
+            for horno in kilns
+            if horno.active
+            and horno.kiln_id != quotation.kiln_id
+            and horno.commercial_total is not None
+            and horno.commercial_total < actual
+        ]
+        if not candidatos:
+            return None
+        mejor = min(candidatos, key=lambda horno: (horno.commercial_total, horno.kiln_id))
+        assert mejor.commercial_total is not None
+        return CheaperKiln(
+            kiln_id=mejor.kiln_id,
+            name=mejor.name,
+            commercial_total=mejor.commercial_total,
+            savings=actual - mejor.commercial_total,
         )
 
     async def _kiln_options(self, quotation: V2Quotation) -> list[KilnOption]:
@@ -475,12 +585,16 @@ class V2FiringService:
             necesarios.add(FiringType.HIGH)
 
         tarifas_por_horno: dict[int, set[FiringType]] = {}
+        filas_por_horno: dict[int, dict[FiringType, V2KilnRate]] = {}
         for fila in (
             await self._session.scalars(
                 select(V2KilnRate).where(V2KilnRate.kiln_id.in_([horno.id for horno in hornos]))
             )
         ).all():
             tarifas_por_horno.setdefault(fila.kiln_id, set()).add(fila.firing_type)
+            filas_por_horno.setdefault(fila.kiln_id, {})[fila.firing_type] = fila
+        modo = (quotation.firing_mode or V2FiringMode.SHARED).value
+        cliente = quotation.customer_kind or V2CustomerKind.EXTERNAL
         # `or ZERO`: el valor por defecto de la columna lo pone la base, asi
         # que una cotizacion recien creada y todavia no releida lo tiene en
         # NULL en memoria. Compararlo o dividirlo ahi seria un 500.
@@ -495,6 +609,17 @@ class V2FiringService:
                 if horno.id == quotation.kiln_id and quotation.kiln_capacity_snapshot is not None
                 else horno.capacity_volume_cm3
             )
+            carga = billed_load(volumen, capacidad, modo)
+            if horno.id == quotation.kiln_id:
+                # El elegido se valora con lo que la cotizacion YA cobra,
+                # acuerdos de tarifa incluidos: comparar su tarifa de maestro
+                # sugeriria un ahorro que no existe.
+                comercial: Decimal | None = quotation.firing_commercial_total
+                gas: Decimal | None = quotation.firing_gas_total
+            else:
+                comercial, gas = _cost_in_kiln(
+                    carga, filas_por_horno.get(horno.id, {}), necesarios, cliente
+                )
             opciones.append(
                 KilnOption(
                     kiln_id=horno.id,
@@ -504,6 +629,9 @@ class V2FiringService:
                     active=horno.active,
                     occupancy_percent=occupancy_percent(volumen, capacidad),
                     firing_count=firing_count(volumen, capacidad),
+                    billed_load=carga,
+                    commercial_total=comercial,
+                    gas_total=gas,
                     has_rates=(
                         necesarios <= tarifas_por_horno.get(horno.id, set())
                         if necesarios
@@ -571,6 +699,12 @@ class V2FiringService:
             quotation.low_fire_enabled = bool(data["low_fire_enabled"])
         if "high_fire_enabled" in data and data["high_fire_enabled"] is not None:
             quotation.high_fire_enabled = bool(data["high_fire_enabled"])
+        # Fase 010J. El modo y la separacion son de ESTA cotizacion: cambiarlos
+        # no toca la configuracion ni ninguna otra.
+        if "firing_mode" in data and data["firing_mode"] is not None:
+            quotation.firing_mode = V2FiringMode(data["firing_mode"])
+        if "piece_separation_cm" in data and data["piece_separation_cm"] is not None:
+            quotation.piece_separation_cm_snapshot = data["piece_separation_cm"]
 
         if cambia_cliente and not cambia_horno:
             # Cambiar a quien se cotiza reevalua lo que se COBRA y solo eso. El
@@ -601,7 +735,10 @@ class V2FiringService:
             user_display_name=user.display_name,
             metadata={
                 "kiln_id": str(quotation.kiln_id),
+                "firing_mode": str(quotation.firing_mode),
+                "piece_separation_cm": str(quotation.piece_separation_cm_snapshot),
                 "firing_count": str(quotation.firing_count),
+                "billed_load": str(quotation.firing_billed_load),
                 "commercial_total": str(quotation.firing_commercial_total),
                 "gas_total": str(quotation.firing_gas_total),
             },

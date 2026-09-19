@@ -16,6 +16,15 @@ Lo que aqui se comprueba, por orden de gravedad:
 
 Los numeros son los del Excel aprobado: horno chico 17.000 cm3, gas 35/70,
 externo 200/250, alumno 90/180.
+
+## Fase 010J
+
+El Excel final distingue quema COMPARTIDA (defecto: se cobra la fraccion de
+horno) y EXCLUSIVA/URGENTE (hornadas enteras), y mide las piezas con 3 cm de
+separacion. Los casos de este archivo son los de 010E, que describen justo la
+quema EXCLUSIVA sin separacion: `crear_cotizacion` la fija asi de forma
+explicita. La compartida y la separacion las cubren la prueba del caso
+canonico (`test_quoter_v2_excel_smoke.py`) y `TestModoCompartido`.
 """
 
 from __future__ import annotations
@@ -79,12 +88,27 @@ async def crear_horno(
     return horno
 
 
-async def crear_cotizacion(api: httpx.AsyncClient, csrf: str, **overrides: Any) -> int:
+async def crear_cotizacion(
+    api: httpx.AsyncClient,
+    csrf: str,
+    *,
+    modo: str = "EXCLUSIVE",
+    separacion: str = "0",
+    **overrides: Any,
+) -> int:
+    """Una cotizacion en quema exclusiva sin separacion: la regla de 010E."""
     payload: dict[str, Any] = {"name": "Quema 010E"}
     payload.update(overrides)
     response = await api.post(V2, json=payload, headers={"X-CSRF-Token": csrf})
     assert response.status_code == 201, response.text
-    return int(response.json()["id"])
+    quotation_id = int(response.json()["id"])
+    fijado = await api.put(
+        f"{V2}/{quotation_id}/firing",
+        json={"firing_mode": modo, "piece_separation_cm": separacion},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert fijado.status_code == 200, fijado.text
+    return quotation_id
 
 
 async def anadir_linea(
@@ -1169,3 +1193,64 @@ class TestDiferencia:
                 {"id": cotizacion},
             )
         await db_session.rollback()
+
+
+class TestModoCompartido:
+    """Fase 010J. El mismo 160 % en compartida cobra 1,6 hornadas, no 2."""
+
+    async def test_compartida_cobra_la_fraccion_y_exclusiva_la_hornada(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        horno = await crear_horno(api, admin_csrf, "Chico compartido", CHICO)
+        cotizacion = await crear_cotizacion(api, admin_csrf, modo="SHARED")
+        await con_ocupacion(api, admin_csrf, cotizacion, CHICO, "160")
+        respuesta = await poner_quema(api, admin_csrf, cotizacion, kiln_id=horno["id"])
+        assert respuesta.status_code == 200, respuesta.text
+        compartida = respuesta.json()
+        assert compartida["firing_mode"] == "SHARED"
+        assert compartida["firing_count"] == 2
+        assert Decimal(compartida["billed_load"]) == Decimal("1.6")
+        assert Decimal(compartida["commercial_total"]) == Decimal(720)
+        assert Decimal(compartida["gas_total"]) == Decimal(168)
+
+        exclusiva = (await poner_quema(api, admin_csrf, cotizacion, firing_mode="EXCLUSIVE")).json()
+        assert Decimal(exclusiva["billed_load"]) == Decimal(2)
+        assert Decimal(exclusiva["commercial_total"]) == Decimal(900)
+        assert Decimal(exclusiva["gas_total"]) == Decimal(210)
+
+    async def test_la_separacion_se_suma_a_cada_medida_y_se_puede_quitar(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        cotizacion = await crear_cotizacion(api, admin_csrf, modo="SHARED", separacion="3")
+        await anadir_linea(
+            api,
+            admin_csrf,
+            cotizacion,
+            product_name="Plato palta",
+            quantity=20,
+            length_cm="18",
+            width_cm="12",
+            height_cm="3",
+        )
+        assert Decimal((await quema(api, cotizacion))["total_volume_cm3"]) == Decimal(37800)
+        sin = (await poner_quema(api, admin_csrf, cotizacion, piece_separation_cm="0")).json()
+        assert Decimal(sin["total_volume_cm3"]) == Decimal(12960)
+
+    async def test_una_separacion_fuera_de_rango_se_rechaza(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        cotizacion = await crear_cotizacion(api, admin_csrf)
+        for valor in ("-1", "21"):
+            respuesta = await poner_quema(api, admin_csrf, cotizacion, piece_separation_cm=valor)
+            assert respuesta.status_code == 422, respuesta.text
+
+    async def test_la_nueva_cotizacion_nace_compartida_con_la_separacion_de_la_casa(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        response = await api.post(
+            V2, json={"name": "Nace 010J"}, headers={"X-CSRF-Token": admin_csrf}
+        )
+        assert response.status_code == 201, response.text
+        nacida = await quema(api, int(response.json()["id"]))
+        assert nacida["firing_mode"] == "SHARED"
+        assert Decimal(nacida["piece_separation_cm"]) == Decimal(3)

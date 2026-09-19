@@ -646,7 +646,7 @@ class V2LifecycleService:
         procesos = await self._copy_processes(original, nueva, mapa, avisos)
         await self._copy_labor(original, nueva, mapa, procesos, avisos, user)
         await self._copy_extras(original, nueva, mapa, avisos)
-        await self._copy_planning(original, nueva, avisos, user)
+        await self._copy_planning(original, nueva, mapa, avisos, user)
 
         await refresh_firing(self._session, nueva)
         await refresh_pricing(self._session, nueva)
@@ -686,6 +686,10 @@ class V2LifecycleService:
         datos: dict[str, Any] = {
             "low_fire_enabled": original.low_fire_enabled,
             "high_fire_enabled": original.high_fire_enabled,
+            # Fase 010J. El modo y la separacion son decisiones sobre el
+            # pedido, no economia: se copian.
+            "firing_mode": original.firing_mode,
+            "piece_separation_cm": original.piece_separation_cm_snapshot,
         }
         if original.kiln_id is not None and original.kiln_id != nueva.kiln_id:
             datos["kiln_id"] = original.kiln_id
@@ -987,6 +991,7 @@ class V2LifecycleService:
         self,
         original: V2Quotation,
         nueva: V2Quotation,
+        mapa: dict[int, int],
         avisos: list[dict[str, Any]],
         user: AuthenticatedUser,
     ) -> None:
@@ -1002,6 +1007,14 @@ class V2LifecycleService:
             except APIError:
                 avisos.append({"code": DUP_PLANNING_UNAVAILABLE, "name": None})
         if original.illustration_enabled:
+            # Fase 010J. La de cada producto viaja a la linea nueva que le
+            # corresponde; la de una linea que no se pudo copiar se pierde con
+            # ella, igual que su material.
+            por_linea = [
+                {"line_id": mapa[linea.id], "quantity": linea.illustration_quantity}
+                for linea in await self._labor.illustration_lines(original.id)
+                if linea.illustration_quantity > 0 and linea.id in mapa
+            ]
             try:
                 async with self._session.begin_nested():
                     await self._labor.set_illustration(
@@ -1010,6 +1023,7 @@ class V2LifecycleService:
                             "illustration_enabled": True,
                             "illustration_quantity": original.illustration_quantity,
                             "illustration_notes": original.illustration_notes,
+                            "lines": por_linea,
                         },
                         user=user,
                     )

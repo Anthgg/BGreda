@@ -29,9 +29,10 @@ def _downgrade() -> str:
     return _codigo().split("def downgrade()")[1]
 
 
-def test_0037_es_la_unica_cabeza() -> None:
+def test_0037_sigue_en_una_cadena_de_una_sola_cabeza() -> None:
+    """La cabeza se la lleva la migracion mas nueva; esa afirmacion vive en 0038."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0037"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("0037").down_revision == "0036"
 
 

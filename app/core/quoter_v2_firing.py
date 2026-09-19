@@ -1,42 +1,46 @@
-"""Fase 010E — la aritmetica de la quema del Cotizador V2.
+"""Fase 010E, reescrita en 010J — la aritmetica de la quema del Cotizador V2.
 
 Funciones puras, sin base de datos y sin sesion. Viven aparte por el mismo
 motivo que las de 010D: son las que deciden cuanto cuesta encender el horno, y
 una formula que solo existe dentro de un servicio asincrono es una formula que
 nadie puede fijar con una prueba de una linea.
 
-## El principio de la fase
+## La regla (Excel final, hoja «Quema V2»)
 
-**El horno se enciende entero.** Una hornada al 60 % cuesta lo mismo que una al
-100 %: el gas se quema igual y la tarifa se cobra igual. De ahi la unica regla
-que gobierna todo este modulo:
+010E cobraba cada hornada ENTERA. El Excel corregido del dueno distingue dos
+modos, y el modo lo elige quien cotiza:
 
-    hornadas = techo(volumen / capacidad)
-    costo    = hornadas x tarifa_completa
+    ocupacion = volumen / capacidad x 100          (puede pasar de 100)
+    hornadas  = techo(ocupacion / 100)              (fisicas: cuantas veces se enciende)
+
+    COMPARTIDA (defecto)   carga = ocupacion / 100  (30 % -> 0,30 de hornada)
+    EXCLUSIVA / URGENTE    carga = hornadas         (30 % -> 1 hornada entera)
+
+    precio de quema = carga x tarifa completa del ciclo   (por cada ciclo encendido)
+    gas             = carga x gas completo del ciclo
+
+Baja y alta son independientes: cada una cobra su tarifa y su gas si esta
+encendida. Mas de 100 % se muestra como hornada 1 al 100 % y hornada 2 con el
+resto; en compartida esa segunda hornada se cobra por lo que ocupa.
+
+El volumen de una pieza es su CAJA ENVOLVENTE con la separacion entre piezas
+sumada a cada medida: (L+s)(A+s)(H+s), s = 3 cm por defecto, 0 = sin
+separacion. No hay algoritmo de acomodo: rotar la pieza no cambia el volumen,
+porque el producto no depende del orden de las medidas.
 
 ## Lo que este modulo NO hace, y no es un olvido
 
 **No existe el factor por ocupacion.** El motor historico multiplica el costo
 de una linea por un factor que crece cuando la pieza ocupa poco horno —hasta
-x3—. En V2 eso desaparecio: la ocupacion sirve para saber cuanto cabe, cuantas
-hornadas hacen falta y como repartir el costo entre productos, jamas para
-multiplicar un precio. Aqui no se importan `occupancy_bracket` ni
+x3—. En V2 eso no existe: la ocupacion decide la CARGA que se cobra, jamas
+multiplica un precio. Aqui no se importan `occupancy_bracket` ni
 `resolve_factor`, y hay una prueba que lo comprueba leyendo el codigo.
 
-**No prorratea.** Ni la tarifa ni el gas. La segunda hornada de una produccion
-al 160 % va al 60 % de carga y cuesta una hornada COMPLETA.
+**No usa float.** Ni para la ocupacion ni para la carga: Decimal de punta a
+punta, y el techo de hornadas sale de volumenes, no del porcentaje redondeado.
 
-**No decide por nadie.** Calcula recomendaciones —«esto cabria en un horno mas
-chico»— y las devuelve como datos. Cambiar el horno o el tipo de produccion es
-una decision humana.
-
-## Lo que si se reutiliza
-
-La geometria y el conteo de hornadas ya existian y estaban validados en
-`app.core.firings`: volumen de una pieza, ocupacion fisica y techo exacto de
-hornadas. Reescribirlos habria significado mantener dos versiones de la misma
-division y descubrir tarde que no coinciden. Lo que NO se reutiliza de ese
-modulo es su mitad comercial, que es justo la que esta fase elimina.
+**No decide por nadie.** Compara hornos y sugiere el mas barato, pero cambiar
+el horno o el modo es una decision humana.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from app.core.firings import (
     physical_occupancy_percentage,
     required_batches,
 )
-from app.core.precision import QUANTITY_SCALE
+from app.core.precision import QUANTITY_SCALE, UNIT_COST_SCALE
 from app.core.quoter_v2_pricing import allocate_by_weight
 
 ZERO = Decimal(0)
@@ -58,6 +62,13 @@ HUNDRED = Decimal(100)
 #: Pasos de redondeo, uno por columna donde se guarda cada cosa.
 _VOLUME_STEP = Decimal(1).scaleb(-QUANTITY_SCALE)
 _PERCENT_STEP = Decimal(1).scaleb(-QUANTITY_SCALE)
+#: La carga facturada se guarda con doce decimales: 85320/17000 = 5,0188235294...
+#: y un redondeo a seis moveria el importe en milesimas de centimo.
+_LOAD_STEP = Decimal(1).scaleb(-UNIT_COST_SCALE)
+
+#: Los dos modos, como texto: el nucleo no depende del modelo.
+SHARED = "SHARED"
+EXCLUSIVE = "EXCLUSIVE"
 
 #: Tope de hornadas que se detallan una a una en la respuesta. El calculo no se
 #: limita —una produccion enorme sigue costando lo que cueste—; lo que se acota
@@ -86,9 +97,16 @@ def quantize_percent(value: Decimal) -> Decimal:
 
 
 def piece_volume(
-    length_cm: Decimal | None, width_cm: Decimal | None, height_cm: Decimal | None
+    length_cm: Decimal | None,
+    width_cm: Decimal | None,
+    height_cm: Decimal | None,
+    separation_cm: Decimal = ZERO,
 ) -> Decimal:
-    """Volumen de UNA pieza, en cm3. Cero si falta o no sirve alguna medida.
+    """Volumen que ocupa UNA pieza en el horno, en cm3. Cero si falta una medida.
+
+    Caja envolvente con la separacion sumada a cada medida: (L+s)(A+s)(H+s).
+    Las medidas se comprueban ANTES de sumar la separacion: una linea sin alto
+    no ocupa s al cubo, ocupa cero y se avisa.
 
     Cero y no un error: un borrador a medio llenar es legitimo —se anade la
     linea, se elige la pasta y las medidas llegan despues— y reventar ahi
@@ -98,7 +116,11 @@ def piece_volume(
         return ZERO
     if length_cm <= ZERO or width_cm <= ZERO or height_cm <= ZERO:
         return ZERO
-    unitario, _total = line_volume(1, length_cm, width_cm, height_cm)
+    if separation_cm < ZERO:
+        raise FiringMathError("La separacion entre piezas no puede ser negativa")
+    unitario, _total = line_volume(
+        1, length_cm + separation_cm, width_cm + separation_cm, height_cm + separation_cm
+    )
     return quantize_volume(unitario)
 
 
@@ -143,10 +165,9 @@ def firing_count(volume_cm3: Decimal, capacity_cm3: Decimal) -> int:
 def batch_loads(occupancy: Decimal, count: int) -> tuple[Decimal, ...]:
     """Con cuanta carga va cada hornada, para poder verlo.
 
-    La primera se llena, la segunda recibe lo que sobra. Es informacion de
-    pantalla y nada mas: la ultima hornada, al 60 %, cuesta lo mismo que las
-    demas. Si alguien intentara cobrar con estos numeros estaria prorrateando,
-    que es justo lo que la fase prohibe.
+    La primera se llena, la segunda recibe lo que sobra:
+    MAX(0, MIN(100, ocupacion - (n-1) x 100)), la misma formula del Excel. Es
+    informacion de operacion: lo que se cobra sale de `billed_load`.
     """
     if count <= 0:
         return ()
@@ -157,17 +178,39 @@ def batch_loads(occupancy: Decimal, count: int) -> tuple[Decimal, ...]:
     return tuple(cargas)
 
 
-def firing_cost(count: int, rate_per_batch: Decimal) -> Decimal:
-    """Lo que cuestan N hornadas a tarifa completa.
+def billed_load(volume_cm3: Decimal, capacity_cm3: Decimal, mode: str) -> Decimal:
+    """Cuantas hornadas se COBRAN. Fase 010J.
 
-    Sin prorrateo y sin descuento por hornada incompleta. Es la regla economica
-    de la fase escrita como una multiplicacion.
+    COMPARTIDA: la fraccion exacta de horno que ocupa el pedido,
+    volumen/capacidad (0,30 para un 30 %; 5,0188... para un 501,88 %).
+    EXCLUSIVA: las hornadas enteras, el techo (1 para un 30 %; 6 para 501,88 %).
+
+    Se calcula sobre VOLUMENES y no sobre el porcentaje ya redondeado, por el
+    mismo motivo que `firing_count`.
     """
-    if count < 0:
-        raise FiringMathError("El numero de hornadas no puede ser negativo")
-    if rate_per_batch < ZERO:
+    if capacity_cm3 <= ZERO:
+        raise FiringMathError("La capacidad del horno tiene que ser mayor que cero")
+    if mode not in (SHARED, EXCLUSIVE):
+        raise FiringMathError(f"Modo de quema desconocido: {mode}")
+    if volume_cm3 <= ZERO:
+        return ZERO
+    if mode == EXCLUSIVE:
+        return Decimal(firing_count(volume_cm3, capacity_cm3))
+    return (volume_cm3 / capacity_cm3).quantize(_LOAD_STEP, rounding=ROUND_HALF_UP)
+
+
+def firing_amount(load: Decimal, full_rate: Decimal) -> Decimal:
+    """Carga facturada x tarifa (o gas) de una hornada completa.
+
+    Es la unica multiplicacion de la quema, igual para el precio y para el gas:
+    los dos se mueven con la misma carga, asi que la diferencia de la quema es
+    siempre carga x (tarifa - gas).
+    """
+    if load < ZERO:
+        raise FiringMathError("La carga facturada no puede ser negativa")
+    if full_rate < ZERO:
         raise FiringMathError("La tarifa no puede ser negativa")
-    return Decimal(count) * rate_per_batch
+    return load * full_rate
 
 
 def firing_difference(commercial_total: Decimal, gas_total: Decimal) -> Decimal:
@@ -217,11 +260,14 @@ def volume_share_percent(line_volume_cm3: Decimal, total_volume_cm3: Decimal) ->
 
 
 __all__ = [
+    "EXCLUSIVE",
     "MAX_DETAILED_BATCHES",
+    "SHARED",
     "FiringMathError",
     "allocate_by_volume",
     "batch_loads",
-    "firing_cost",
+    "billed_load",
+    "firing_amount",
     "firing_count",
     "firing_difference",
     "occupancy_percent",

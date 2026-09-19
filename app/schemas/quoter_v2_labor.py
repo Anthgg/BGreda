@@ -257,6 +257,23 @@ class V2PlanningIn(BaseModel):
     effective_work_days: int | None = Field(default=None, ge=0, le=3650)
 
 
+class V2IllustrationLineIn(BaseModel):
+    """Cuantas piezas de UN producto se ilustran. Fase 010J."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: int = Field(ge=1)
+    quantity: Decimal = Field(ge=0, le=MAX_QUANTITY)
+
+
+class V2IllustrationLineOut(BaseModel):
+    line_id: int
+    product_name: str | None
+    quantity: Decimal
+    hours: Decimal
+    cost: Decimal
+
+
 class V2IllustrationIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -265,6 +282,9 @@ class V2IllustrationIn(BaseModel):
     illustration_notes: str | None = Field(default=None, max_length=2000)
     #: Acuerdo para esta cotizacion. La configuracion global no se toca.
     illustration_hourly_rate_override: Decimal | None = Field(default=None, ge=0, le=MAX_UNIT_COST)
+    #: Fase 010J. Ilustracion por producto; las lineas que no vienen quedan en
+    #: cero. Ausente: se conserva lo que hubiera.
+    lines: list[V2IllustrationLineIn] | None = Field(default=None, max_length=500)
 
 
 class V2IllustrationOut(BaseModel):
@@ -279,8 +299,14 @@ class V2IllustrationOut(BaseModel):
     workday_hours: Decimal | None
     capacity_per_workday: Decimal | None
     hourly_rate: Decimal | None
+    #: La ilustracion NO asignada a un producto (se reparte como general).
     hours: Decimal
     cost: Decimal
+    #: Fase 010J. La de cada producto, que entra en su costo directo.
+    lines: list[V2IllustrationLineOut] = []
+    #: General + productos.
+    total_hours: Decimal
+    total_cost: Decimal
 
 
 class V2LoadWorkerIn(BaseModel):

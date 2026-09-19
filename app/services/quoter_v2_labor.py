@@ -51,6 +51,7 @@ from app.core.quoter_v2_labor import (
     quantize_hours,
     quantize_rate,
 )
+from app.core.quoter_v2_pricing import quantize_money
 from app.models.audit import AuditAction
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
 from app.models.quoter_v2_labor import (
@@ -872,6 +873,12 @@ class V2LaborService:
         elif not tarea.hours_overridden:
             tarea.final_hours = tarea.calculated_hours
 
+        if tarea.worker_type_snapshot is V2WorkerType.INTERNAL:
+            # Fase 010J, regla del Excel final: el personal INTERNO no suma
+            # costo a la cotizacion —su sueldo ya lo paga el taller—. Las horas
+            # se conservan: reparten el espacio y dicen si cabe en la jornada.
+            tarea.labor_cost = ZERO
+            return []
         try:
             tarea.labor_cost = labor_cost(tarea.final_hours, tarea.hourly_rate_snapshot)
         except LaborMathError as error:
@@ -973,6 +980,10 @@ class V2LaborService:
         —rendimiento por trabajador, jornada compartida— que no son suyas.
         """
         quotation = await self._draft(quotation_id)
+        # Las lineas se leen ANTES de tocar la cabecera: leerlas despues haria
+        # un autoflush con la ilustracion apagada y los costos aun puestos, que
+        # es justo lo que el CHECK `illustration_off_costs_nothing` prohibe.
+        lineas = await self.illustration_lines(quotation.id)
 
         if "illustration_quantity" in data and data["illustration_quantity"] is not None:
             quotation.illustration_quantity = data["illustration_quantity"]
@@ -981,11 +992,25 @@ class V2LaborService:
         if "illustration_enabled" in data:
             quotation.illustration_enabled = bool(data["illustration_enabled"])
 
+        # Fase 010J. La ilustracion es POR PRODUCTO (hoja «Ilustracion» del
+        # Excel). `lines` fija la cantidad de cada linea; las que no vienen
+        # quedan en cero. La cantidad de la cabecera queda como ilustracion no
+        # asignada a ningun producto, que se reparte como costo general.
+        if "lines" in data and data["lines"] is not None:
+            pedidas = {item["line_id"]: item["quantity"] for item in data["lines"]}
+            if set(pedidas) - {linea.id for linea in lineas}:
+                raise V2LaborInputInvalid("La linea a ilustrar no pertenece a esta cotizacion")
+            for linea in lineas:
+                linea.illustration_quantity = pedidas.get(linea.id, ZERO)
+
         if not quotation.illustration_enabled:
             # Apagada es apagada. El CHECK de la tabla lo vuelve a exigir por si
             # alguien escribe por otra via.
             quotation.illustration_hours = ZERO
             quotation.illustration_cost = ZERO
+            for linea in lineas:
+                linea.illustration_hours = ZERO
+                linea.illustration_cost = ZERO
             await self._session.flush()
             await refresh_pricing(self._session, quotation)
             # Apagarla tambien se audita. Sin esto, el rastro solo recogia
@@ -1048,6 +1073,20 @@ class V2LaborService:
                 quotation.illustration_hours,
                 _required(quotation.illustration_hourly_rate_snapshot),
             )
+            for linea in lineas:
+                linea.illustration_hours = quantize_hours(
+                    hours_required(
+                        linea.illustration_quantity,
+                        _required(quotation.illustration_capacity_snapshot),
+                        _required(quotation.illustration_workday_hours_snapshot),
+                    )
+                )
+                linea.illustration_cost = quantize_money(
+                    labor_cost(
+                        linea.illustration_hours,
+                        _required(quotation.illustration_hourly_rate_snapshot),
+                    )
+                )
         except LaborMathError as error:
             raise V2LaborInputInvalid(str(error)) from error
 
@@ -1066,9 +1105,26 @@ class V2LaborService:
                 "quantity": str(quotation.illustration_quantity),
                 "hours": str(quotation.illustration_hours),
                 "cost": str(quotation.illustration_cost),
+                "lines": ",".join(
+                    f"{linea.id}:{linea.illustration_quantity}"
+                    for linea in lineas
+                    if linea.illustration_quantity > ZERO
+                ),
             },
         )
         return quotation
+
+    async def illustration_lines(self, quotation_id: int) -> list[V2QuotationProduct]:
+        """Las lineas de la cotizacion, con su ilustracion. Fase 010J."""
+        return list(
+            (
+                await self._session.scalars(
+                    select(V2QuotationProduct)
+                    .where(V2QuotationProduct.v2_quotation_id == quotation_id)
+                    .order_by(V2QuotationProduct.sort_order, V2QuotationProduct.id)
+                )
+            ).all()
+        )
 
     async def set_planning(
         self, quotation_id: int, effective_work_days: int | None, *, user: AuthenticatedUser

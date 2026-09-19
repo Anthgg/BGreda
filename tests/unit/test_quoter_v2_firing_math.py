@@ -1,4 +1,4 @@
-"""Fase 010E — la aritmetica de la quema, con los ejemplos aprobados.
+"""Fase 010E, actualizada en 010J — la aritmetica de la quema.
 
 Cada numero sale de una regla cerrada del proyecto o de la hoja «Quema V2» del
 Excel «Cotizador Greda V2». No son casos inventados para que el codigo pase:
@@ -17,11 +17,14 @@ from decimal import Decimal
 import pytest
 
 from app.core.quoter_v2_firing import (
+    EXCLUSIVE,
     MAX_DETAILED_BATCHES,
+    SHARED,
     FiringMathError,
     allocate_by_volume,
     batch_loads,
-    firing_cost,
+    billed_load,
+    firing_amount,
     firing_count,
     firing_difference,
     occupancy_percent,
@@ -46,6 +49,32 @@ def volumen_para(porcentaje: str) -> Decimal:
 def test_volumen_unitario_es_el_producto_de_las_tres_medidas() -> None:
     """18 x 12 x 3 son 648 cm3. El ejemplo «Plato palta» de la hoja Productos."""
     assert piece_volume(Decimal(18), Decimal(12), Decimal(3)) == Decimal(648)
+
+
+def test_la_separacion_se_suma_a_cada_medida() -> None:
+    """Fase 010J. (18+3)(12+3)(3+3) = 1890 cm3: «Plato palta» del Excel final."""
+    assert piece_volume(Decimal(18), Decimal(12), Decimal(3), Decimal(3)) == Decimal(1890)
+
+
+def test_separacion_cero_es_la_caja_sin_margen() -> None:
+    assert piece_volume(Decimal(18), Decimal(12), Decimal(3), Decimal(0)) == Decimal(648)
+
+
+def test_rotar_la_pieza_no_cambia_el_volumen() -> None:
+    """Sin algoritmo de acomodo: la caja envolvente no depende del orden."""
+    a = piece_volume(Decimal(1), Decimal(15), Decimal(3), Decimal(3))
+    b = piece_volume(Decimal(15), Decimal(3), Decimal(1), Decimal(3))
+    assert a == b == Decimal(432)
+
+
+def test_sin_una_medida_la_separacion_no_inventa_volumen() -> None:
+    """Una linea sin alto no ocupa 3 x 3 x 3: ocupa cero y se avisa."""
+    assert piece_volume(Decimal(18), Decimal(12), None, Decimal(3)) == Decimal(0)
+
+
+def test_una_separacion_negativa_se_rechaza() -> None:
+    with pytest.raises(FiringMathError):
+        piece_volume(Decimal(18), Decimal(12), Decimal(3), Decimal(-1))
 
 
 def test_volumen_total_multiplica_por_la_cantidad() -> None:
@@ -181,100 +210,141 @@ def test_la_lista_de_cargas_tiene_tope() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Costo: la hornada se cobra entera
+# Costo (fase 010J): carga facturada por modo, por ciclo
 # ---------------------------------------------------------------------------
-def test_dos_hornadas_cuestan_dos_tarifas_completas() -> None:
-    """El caso canonico: externo, horno chico, baja. 2 x 200 = 400."""
-    assert firing_cost(2, Decimal(200)) == Decimal(400)
+#: Tarifas del horno chico del Excel final, cliente externo.
+BAJA, ALTA, GAS_BAJA, GAS_ALTA = Decimal(200), Decimal(250), Decimal(35), Decimal(70)
 
 
-def test_la_hornada_parcial_no_se_prorratea() -> None:
-    """Con 160 % la segunda va al 60 %, y aun asi son 2 x 200, no 200 x 1,6.
-
-    Es la regla economica de la fase: el horno se enciende completo. Un
-    prorrateo daria S/320 y pareceria razonable.
-    """
-    assert firing_cost(2, Decimal(200)) == Decimal(400)
-    assert firing_cost(2, Decimal(200)) != Decimal("320")
-
-
-def test_el_gas_tampoco_se_prorratea() -> None:
-    assert firing_cost(2, Decimal(35)) == Decimal(70)
+def quema(porcentaje: str, modo: str, baja: bool = True, alta: bool = True) -> tuple[Decimal, ...]:
+    """(carga, comercial, gas) de una ocupacion, como la hoja «Quema V2»."""
+    carga = billed_load(volumen_para(porcentaje), CAPACIDAD, modo)
+    comercial = (firing_amount(carga, BAJA) if baja else Decimal(0)) + (
+        firing_amount(carga, ALTA) if alta else Decimal(0)
+    )
+    gas = (firing_amount(carga, GAS_BAJA) if baja else Decimal(0)) + (
+        firing_amount(carga, GAS_ALTA) if alta else Decimal(0)
+    )
+    return carga, comercial, gas
 
 
-def test_cero_hornadas_no_cuestan_nada() -> None:
-    assert firing_cost(0, Decimal(200)) == Decimal(0)
+@pytest.mark.parametrize(
+    ("porcentaje", "carga", "comercial", "gas"),
+    [
+        ("10", "0.1", "45", "10.5"),
+        ("50", "0.5", "225", "52.5"),
+        ("100", "1", "450", "105"),
+        ("101", "1.01", "454.5", "106.05"),
+        ("250", "2.5", "1125", "262.5"),
+    ],
+)
+def test_compartida_cobra_la_fraccion_de_horno(
+    porcentaje: str, carga: str, comercial: str, gas: str
+) -> None:
+    """COMPARTIDA: ocupacion/100 x tarifa completa, en precio y en gas, por ciclo."""
+    assert quema(porcentaje, SHARED) == (Decimal(carga), Decimal(comercial), Decimal(gas))
+
+
+@pytest.mark.parametrize(
+    ("porcentaje", "carga", "comercial", "gas"),
+    [
+        ("10", 1, "450", "105"),
+        ("50", 1, "450", "105"),
+        ("100", 1, "450", "105"),
+        ("101", 2, "900", "210"),
+        ("250", 3, "1350", "315"),
+    ],
+)
+def test_exclusiva_cobra_hornadas_enteras(
+    porcentaje: str, carga: int, comercial: str, gas: str
+) -> None:
+    """EXCLUSIVA/URGENTE: techo(ocupacion/100) hornadas completas, precio y gas."""
+    assert quema(porcentaje, EXCLUSIVE) == (Decimal(carga), Decimal(comercial), Decimal(gas))
+
+
+def test_las_hornadas_fisicas_no_dependen_del_modo() -> None:
+    """Un 250 % se enciende tres veces en los dos modos; cambia lo que se cobra."""
+    volumen = volumen_para("250")
+    assert firing_count(volumen, CAPACIDAD) == 3
+    assert batch_loads(Decimal(250), 3) == (Decimal(100), Decimal(100), Decimal(50))
+
+
+def test_solo_baja_y_solo_alta_son_independientes() -> None:
+    _carga, com_baja, gas_baja = quema("50", SHARED, alta=False)
+    _carga, com_alta, gas_alta = quema("50", SHARED, baja=False)
+    assert (com_baja, gas_baja) == (Decimal(100), Decimal("17.5"))
+    assert (com_alta, gas_alta) == (Decimal(125), Decimal(35))
+    assert quema("50", SHARED)[1:] == (com_baja + com_alta, gas_baja + gas_alta)
+
+
+def test_sin_volumen_no_se_cobra_en_ningun_modo() -> None:
+    assert billed_load(Decimal(0), CAPACIDAD, SHARED) == Decimal(0)
+    assert billed_load(Decimal(0), CAPACIDAD, EXCLUSIVE) == Decimal(0)
+
+
+def test_un_modo_desconocido_se_rechaza() -> None:
+    with pytest.raises(FiringMathError):
+        billed_load(Decimal(10), CAPACIDAD, "HALF")
+
+
+def test_carga_con_capacidad_cero_no_se_inventa() -> None:
+    with pytest.raises(FiringMathError):
+        billed_load(Decimal(10), Decimal(0), SHARED)
+
+
+def test_la_carga_se_calcula_sin_float() -> None:
+    """85320 / 17000 no es exacto: doce decimales Decimal, nunca un float."""
+    carga = billed_load(Decimal(85320), Decimal(17000), SHARED)
+    assert isinstance(carga, Decimal)
+    assert carga == Decimal("5.018823529412")
 
 
 def test_una_tarifa_en_cero_es_legitima() -> None:
     """Un horno prestado con el gas incluido se cotiza con gas cero."""
-    assert firing_cost(2, Decimal(0)) == Decimal(0)
+    assert firing_amount(Decimal("1.5"), Decimal(0)) == Decimal(0)
 
 
 def test_una_tarifa_negativa_no_es_un_descuento() -> None:
     with pytest.raises(FiringMathError):
-        firing_cost(1, Decimal(-1))
+        firing_amount(Decimal(1), Decimal(-1))
 
 
-def test_hornadas_negativas_se_rechazan() -> None:
+def test_una_carga_negativa_se_rechaza() -> None:
     with pytest.raises(FiringMathError):
-        firing_cost(-1, Decimal(200))
+        firing_amount(Decimal(-1), Decimal(200))
 
 
 # ---------------------------------------------------------------------------
-# El caso canonico completo
+# El caso canonico del Excel final (hoja «Quema V2»)
 # ---------------------------------------------------------------------------
-def test_caso_canonico_externo_chico_ciento_sesenta_baja_y_alta() -> None:
-    """Externo, horno chico, 160 %, baja + alta.
+def test_caso_canonico_excel_final_chico_compartida() -> None:
+    """85 320 cm3 en el horno chico (17 000): 501,88 %, 6 hornadas fisicas.
 
-    Comercial: 2 x 200 + 2 x 250 = 900.
-    Gas real:  2 x 35  + 2 x 70  = 210.
-    Diferencia: 690.
+    Compartida, externo, baja + alta: comercial 2258,470588, gas 526,976471.
     """
-    hornadas = firing_count(volumen_para("160"), CAPACIDAD)
-    assert hornadas == 2
+    volumen, capacidad = Decimal(85320), Decimal(17000)
+    assert occupancy_percent(volumen, capacidad) == Decimal("501.882353")
+    assert firing_count(volumen, capacidad) == 6
+    carga = billed_load(volumen, capacidad, SHARED)
+    comercial = firing_amount(carga, BAJA) + firing_amount(carga, ALTA)
+    gas = firing_amount(carga, GAS_BAJA) + firing_amount(carga, GAS_ALTA)
+    assert comercial.quantize(Decimal("0.000001")) == Decimal("2258.470588")
+    assert gas.quantize(Decimal("0.000001")) == Decimal("526.976471")
 
-    comercial = firing_cost(hornadas, Decimal(200)) + firing_cost(hornadas, Decimal(250))
-    gas = firing_cost(hornadas, Decimal(35)) + firing_cost(hornadas, Decimal(70))
 
-    assert comercial == Decimal(900)
-    assert gas == Decimal(210)
-    assert firing_difference(comercial, gas) == Decimal(690)
-
-
-def test_solo_baja_externo_chico_ciento_sesenta() -> None:
-    hornadas = firing_count(volumen_para("160"), CAPACIDAD)
-    comercial = firing_cost(hornadas, Decimal(200))
-    gas = firing_cost(hornadas, Decimal(35))
-    assert (comercial, gas, firing_difference(comercial, gas)) == (
-        Decimal(400),
-        Decimal(70),
-        Decimal(330),
+def test_caso_canonico_excel_final_grande_y_exclusiva() -> None:
+    """El mismo pedido en el grande (700 / 1200) cuesta 810,54; en chico exclusiva, 2700."""
+    volumen = Decimal(85320)
+    carga_grande = billed_load(volumen, Decimal(200000), SHARED)
+    assert carga_grande == Decimal("0.4266")
+    assert firing_amount(carga_grande, Decimal(700)) + firing_amount(
+        carga_grande, Decimal(1200)
+    ) == Decimal("810.54")
+    carga_exclusiva = billed_load(volumen, Decimal(17000), EXCLUSIVE)
+    assert carga_exclusiva == Decimal(6)
+    assert firing_amount(carga_exclusiva, BAJA) + firing_amount(carga_exclusiva, ALTA) == Decimal(
+        2700
     )
-
-
-def test_solo_alta_externo_chico_ciento_sesenta() -> None:
-    hornadas = firing_count(volumen_para("160"), CAPACIDAD)
-    comercial = firing_cost(hornadas, Decimal(250))
-    gas = firing_cost(hornadas, Decimal(70))
-    assert (comercial, gas, firing_difference(comercial, gas)) == (
-        Decimal(500),
-        Decimal(140),
-        Decimal(360),
-    )
-
-
-def test_alumno_chico_ochenta_por_ciento() -> None:
-    """Alumno paga otra tarifa por la misma quema; el gas es el mismo.
-
-    1 baja a 90 + 1 alta a 180 = 270. Gas: 35 + 70 = 105.
-    """
-    hornadas = firing_count(volumen_para("80"), CAPACIDAD)
-    assert hornadas == 1
-    comercial = firing_cost(hornadas, Decimal(90)) + firing_cost(hornadas, Decimal(180))
-    gas = firing_cost(hornadas, Decimal(35)) + firing_cost(hornadas, Decimal(70))
-    assert comercial == Decimal(270)
-    assert gas == Decimal(105)
 
 
 def test_la_diferencia_puede_ser_negativa_y_se_dice() -> None:

@@ -18,7 +18,6 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.db.test_quoter_v2_excel_smoke import V2_SETTINGS
 from tests.db.test_quoter_v2_lifecycle_api import (
     V2,
     cotizacion_completa,
@@ -26,6 +25,7 @@ from tests.db.test_quoter_v2_lifecycle_api import (
     h,
     vencer,
 )
+from tests.db.v2_escenario_base import V2_SETTINGS
 
 LIMA = timedelta(hours=-5)
 

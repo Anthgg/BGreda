@@ -323,8 +323,14 @@ async def _recalculate(
     for linea in lineas:
         directo = linea.body_cost + linea.glaze_cost
         materiales_total += directo
+        # Fase 010J. La ilustracion de ESTE producto es costo directo suyo
+        # (hoja «Productos», Z = materiales + MO + ilustracion). La que no se
+        # asigno a ningun producto sigue yendo a lo general.
         linea.direct_cost = (
-            directo + costos_mo.get(linea.id, ZERO) + extras_por_linea.get(linea.id, ZERO)
+            directo
+            + costos_mo.get(linea.id, ZERO)
+            + extras_por_linea.get(linea.id, ZERO)
+            + (linea.illustration_cost or ZERO)
         )
 
     directo_total = sum((linea.direct_cost for linea in lineas), ZERO)
@@ -376,10 +382,17 @@ async def _recalculate(
         return [*avisos, WARN_NO_FACTOR]
 
     minimo = quotation.commercial_factor_min_snapshot or factor
-    maximo = quotation.commercial_factor_max_snapshot or factor
+    # Fase 010J. El precio objetivo es costo x factor OBJETIVO (x3), como en el
+    # Excel; no el maximo del rango. Las filas de antes de 0038 congelaron su
+    # maximo como objetivo y conservan ese numero.
+    objetivo = (
+        quotation.commercial_factor_target_snapshot
+        or quotation.commercial_factor_max_snapshot
+        or factor
+    )
     try:
         quotation.price_min = apply_factor(quotation.production_cost_total, minimo)
-        quotation.price_target = apply_factor(quotation.production_cost_total, maximo)
+        quotation.price_target = apply_factor(quotation.production_cost_total, objetivo)
         quotation.negotiated_price = apply_factor(quotation.production_cost_total, factor)
     except PricingMathError as error:
         raise V2PricingInputInvalid(str(error)) from error

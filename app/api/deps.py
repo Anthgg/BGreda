@@ -55,6 +55,7 @@ from app.services.quoter_v2_materials import V2MaterialService
 from app.services.quoter_v2_pdf import V2QuotationPdfService
 from app.services.quoter_v2_pricing import V2PricingService
 from app.services.quoter_v2_processes import V2ProcessService
+from app.services.quoter_v2_reductions import V2ReductionsService
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
@@ -468,6 +469,17 @@ async def get_v2_pricing_service(
 
 
 V2PricingServiceDep = Annotated[V2PricingService, Depends(get_v2_pricing_service)]
+
+
+async def get_v2_reductions_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2ReductionsService:
+    """Fase 010J. Reducciones de precio: solo lectura, nunca aplica nada."""
+    return V2ReductionsService(session, audit)
+
+
+V2ReductionsServiceDep = Annotated[V2ReductionsService, Depends(get_v2_reductions_service)]
 
 
 async def get_v2_quotation_service(

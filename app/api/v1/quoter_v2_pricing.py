@@ -18,8 +18,20 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path
 
-from app.api.deps import AdminUserDep, DbSessionDep, V2PricingServiceDep
-from app.schemas.quoter_v2_pricing import V2PricingIn, V2PricingLineOut, V2PricingOut
+from app.api.deps import (
+    AdminUserDep,
+    DbSessionDep,
+    V2PricingServiceDep,
+    V2ReductionsServiceDep,
+)
+from app.core.quoter_v2_config import BASE_CURRENCY
+from app.schemas.quoter_v2_pricing import (
+    V2PricingIn,
+    V2PricingLineOut,
+    V2PricingOut,
+    V2ReductionOut,
+    V2ReductionsOut,
+)
 from app.services.quoter_v2_pricing import PricingState
 
 router = APIRouter(tags=["cotizador-v2"])
@@ -30,7 +42,9 @@ def _out(estado: PricingState) -> V2PricingOut:
     return V2PricingOut(
         materials_cost=quotation.materials_cost_total,
         labor_cost=quotation.labor_cost_total,
-        illustration_cost=quotation.illustration_cost,
+        # Fase 010J. La general mas la de cada producto.
+        illustration_cost=quotation.illustration_cost
+        + sum((linea.illustration_cost for linea in estado.lines), Decimal(0)),
         space_cost=quotation.space_cost,
         administration_cost=quotation.administrative_cost_snapshot or Decimal(0),
         extras_cost=quotation.extras_cost_total,
@@ -47,6 +61,9 @@ def _out(estado: PricingState) -> V2PricingOut:
         commercial_factor=quotation.commercial_factor,
         factor_min=quotation.commercial_factor_min_snapshot,
         factor_max=quotation.commercial_factor_max_snapshot,
+        factor_target=(
+            quotation.commercial_factor_target_snapshot or quotation.commercial_factor_max_snapshot
+        ),
         price_min=quotation.price_min,
         price_target=quotation.price_target,
         negotiated_price=quotation.negotiated_price,
@@ -120,3 +137,34 @@ async def set_v2_pricing(
     resultado = _out(estado)
     await session.commit()
     return resultado
+
+
+@router.get("/quotations-v2/{quotation_id}/reductions", response_model=V2ReductionsOut)
+async def read_v2_reductions(
+    quotation_id: Annotated[int, Path(ge=1)],
+    service: V2ReductionsServiceDep,
+    _: AdminUserDep,
+) -> V2ReductionsOut:
+    """Fase 010J. Como bajar el precio: estimaciones, nunca cambios.
+
+    Solo lectura y sin confirmar la transaccion, como las demas lecturas de V2.
+    Solo para ADMIN: son costos y margenes internos.
+    """
+    estado = await service.reductions(quotation_id)
+    return V2ReductionsOut(
+        current_subtotal=estado.current_subtotal,
+        commercial_factor=estado.commercial_factor,
+        currency_code=BASE_CURRENCY,
+        items=[
+            V2ReductionOut(
+                code=item.code,
+                applicable=item.applicable,
+                cost_reduction=item.cost_reduction,
+                savings=item.savings,
+                estimated_subtotal=item.estimated_subtotal,
+                suggestion=item.suggestion,
+            )
+            for item in estado.items
+        ],
+        warnings=estado.warnings,
+    )

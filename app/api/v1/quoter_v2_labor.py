@@ -28,10 +28,11 @@ from fastapi import APIRouter, Path, Query, status
 
 from app.api.deps import AdminUserDep, DbSessionDep, V2LaborServiceDep
 from app.core.quoter_v2_labor import units_per_hour
-from app.models.quoter_v2 import V2Quotation
+from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
 from app.models.quoter_v2_labor import V2QuotationLabor, V2Technique, V2Worker
 from app.schemas.quoter_v2_labor import (
     V2IllustrationIn,
+    V2IllustrationLineOut,
     V2IllustrationOut,
     V2LaborIn,
     V2LaborOut,
@@ -113,7 +114,9 @@ def _labor_out(fila: V2QuotationLabor, warnings: list[str]) -> V2LaborOut:
     )
 
 
-def _illustration_out(quotation: V2Quotation) -> V2IllustrationOut:
+def _illustration_out(
+    quotation: V2Quotation, lineas: list[V2QuotationProduct]
+) -> V2IllustrationOut:
     return V2IllustrationOut(
         enabled=quotation.illustration_enabled,
         quantity=quotation.illustration_quantity,
@@ -124,6 +127,20 @@ def _illustration_out(quotation: V2Quotation) -> V2IllustrationOut:
         hourly_rate=quotation.illustration_hourly_rate_snapshot,
         hours=quotation.illustration_hours,
         cost=quotation.illustration_cost,
+        lines=[
+            V2IllustrationLineOut(
+                line_id=linea.id,
+                product_name=linea.product_name_snapshot,
+                quantity=linea.illustration_quantity,
+                hours=linea.illustration_hours,
+                cost=linea.illustration_cost,
+            )
+            for linea in lineas
+        ],
+        total_hours=quotation.illustration_hours
+        + sum((linea.illustration_hours for linea in lineas), Decimal(0)),
+        total_cost=quotation.illustration_cost
+        + sum((linea.illustration_cost for linea in lineas), Decimal(0)),
     )
 
 
@@ -366,7 +383,9 @@ async def read_v2_illustration(
     service: V2LaborServiceDep,
     _: AdminUserDep,
 ) -> V2IllustrationOut:
-    return _illustration_out(await service.quotation(quotation_id))
+    return _illustration_out(
+        await service.quotation(quotation_id), await service.illustration_lines(quotation_id)
+    )
 
 
 @router.put("/quotations-v2/{quotation_id}/illustration", response_model=V2IllustrationOut)
@@ -380,6 +399,6 @@ async def set_v2_illustration(
     quotation = await service.set_illustration(
         quotation_id, payload.model_dump(exclude_unset=True), user=admin
     )
-    resultado = _illustration_out(quotation)
+    resultado = _illustration_out(quotation, await service.illustration_lines(quotation_id))
     await session.commit()
     return resultado

@@ -18,14 +18,14 @@ from pypdf import PdfReader
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.db.test_quoter_v2_excel_smoke import (
+from tests.db.test_quoter_v2_materials_api import crear_producto
+from tests.db.v2_capacidades import habilitar
+from tests.db.v2_escenario_base import (
     COMMERCIAL,
     V2_SETTINGS,
     preparar_configuracion,
     preparar_maestros,
 )
-from tests.db.test_quoter_v2_materials_api import crear_producto
-from tests.db.v2_capacidades import habilitar
 
 V2 = "/api/v1/quotations-v2"
 PARTNERS = "/api/v1/partners"

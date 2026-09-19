@@ -39,7 +39,7 @@ from app.core.errors import APIError
 from app.core.quoter_v2_config import BASE_CURRENCY
 from app.models.audit import AuditAction
 from app.models.firings import FiringType, Kiln
-from app.models.quoter_v2 import V2CustomerKind, V2ProductionType
+from app.models.quoter_v2 import V2CustomerKind, V2FiringMode, V2ProductionType
 from app.models.quoter_v2_settings import V2CommercialSettings, V2KilnRate
 from app.models.settings import SINGLETON_ID, CommercialSettings
 from app.schemas.auth import AuthenticatedUser
@@ -385,6 +385,10 @@ class V2SettingsService:
             "commercial_factor": factor,
             "commercial_factor_min_snapshot": v2.commercial_factor_min,
             "commercial_factor_max_snapshot": v2.commercial_factor_max,
+            # Fase 010J. El objetivo es el factor por defecto de la casa (x3).
+            "commercial_factor_target_snapshot": v2.commercial_factor_default,
+            "firing_mode": V2FiringMode.SHARED,
+            "piece_separation_cm_snapshot": v2.piece_separation_cm,
             "customer_kind": customer_kind or v2.default_customer_kind,
             "production_type": tipo,
             "kiln_id": horno.id if horno is not None else None,
