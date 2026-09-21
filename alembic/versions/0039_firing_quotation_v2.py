@@ -291,9 +291,11 @@ def upgrade() -> None:
             server_default=sa.text("0"),
             nullable=False,
         ),
+        # Ancha a proposito: una perdida grande da un margen de -2892 % y el
+        # tope de 999,999999 reventaria la fila en vez de avisar.
         sa.Column(
             "effective_margin_percent",
-            sa.Numeric(precision=9, scale=6),
+            sa.Numeric(precision=18, scale=6),
             server_default=sa.text("0"),
             nullable=False,
         ),

@@ -247,8 +247,11 @@ class V2FiringQuotation(Base, TimestampMixin):
     estimated_profit: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
     )
+    #: `quantity_numeric` y no `percentage_numeric`: aquel tope de 999,999999
+    #: lo rompe una perdida grande —vender a 157 lo que cuesta 4697 es un
+    #: -2892 %— y el margen reventaria la fila en vez de avisar.
     effective_margin_percent: Mapped[Decimal] = mapped_column(
-        percentage_numeric(), nullable=False, server_default=text("0")
+        quantity_numeric(), nullable=False, server_default=text("0")
     )
 
     # ---- Ciclo de vida (igual que V2) --------------------------------------

@@ -429,6 +429,27 @@ class TestVidriado:
         esmalte = next(m for m in maestros if m["product_id"] == ids["esmalte"])
         assert dec(esmalte["effective_cost_per_unit"]) == Decimal("0.12")
 
+    async def test_un_costo_manual_en_cero_cae_al_maestro_y_avisa(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """El Excel (E10) usa el manual SOLO si es > 0. Un cero no regala el vidriado."""
+        ids = await preparar(api, admin_csrf)
+        ctz = await cotizacion_del_excel(api, admin_csrf, ids)
+        en_cero = await _put(
+            api,
+            admin_csrf,
+            f"{FQ}/{ctz['id']}",
+            {
+                "glaze_enabled": True,
+                "glaze_grams": "500",
+                "glaze_cost_source": "MANUAL",
+                "glaze_manual_cost_per_gram": "0",
+            },
+        )
+        assert dec(en_cero["glaze_cost_per_gram"]) == Decimal("0.12"), "cae al esmalte del maestro"
+        assert dec(en_cero["glaze_material_cost"]) == Decimal(60)
+        assert "V2_FQ_GLAZE_MANUAL_COST_MISSING" in en_cero["warnings"]
+
     async def test_mano_de_obra_de_vidriado_interna_no_suma_y_externa_si(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
@@ -531,6 +552,31 @@ class TestEmision:
             "Costoreal",
         ):
             assert prohibido not in plano, prohibido
+
+    async def test_el_resumen_del_cliente_no_lleva_avisos_internos(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Vender por debajo del costo es cosa del taller, no del documento."""
+        ids = await preparar(api, admin_csrf)
+        ctz = await cotizacion_del_excel(api, admin_csrf, ids)
+        # Una tarifa por debajo del gas: el servicio se vende a perdida.
+        await _put(
+            api,
+            admin_csrf,
+            f"{V2_SETTINGS}/kiln-rates/{ids['chico']}/LOW",
+            {"gas_cost": "300", "external_rate": "10", "student_rate": "10"},
+        )
+        await _put(
+            api,
+            admin_csrf,
+            f"{V2_SETTINGS}/kiln-rates/{ids['chico']}/HIGH",
+            {"gas_cost": "300", "external_rate": "10", "student_rate": "10"},
+        )
+        bajo_costo = await _put(api, admin_csrf, f"{FQ}/{ctz['id']}", {"factor": "1"})
+        assert dec(bajo_costo["estimated_profit"]) < 0
+        assert "V2_FQ_SELLING_BELOW_COST" in bajo_costo["warnings"]
+        resumen = (await api.get(f"{FQ}/{ctz['id']}/preview")).json()
+        assert "V2_FQ_SELLING_BELOW_COST" not in resumen["warnings"]
 
     async def test_el_doble_clic_no_reemite_y_un_cambio_da_conflicto(
         self, api: httpx.AsyncClient, admin_csrf: str

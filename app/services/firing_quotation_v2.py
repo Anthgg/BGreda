@@ -105,6 +105,11 @@ WARN_GLAZE_WITHOUT_GRAMS = "V2_FQ_GLAZE_WITHOUT_GRAMS"
 WARN_GLAZE_LABOR_INCOMPLETE = "V2_FQ_GLAZE_LABOR_INCOMPLETE"
 WARN_SELLING_BELOW_COST = "V2_FQ_SELLING_BELOW_COST"
 
+#: Avisos que hablan de COSTO o MARGEN. Son de administracion y no viajan en
+#: la vista del cliente: el resumen que se le ensena no dice que el taller esta
+#: vendiendo por debajo de su costo.
+WARNINGS_INTERNOS = frozenset({"V2_FQ_SELLING_BELOW_COST"})
+
 #: Bloqueos de emision.
 BLOCK_NO_CUSTOMER = "V2_FQ_NO_CUSTOMER"
 BLOCK_NO_LINES = "V2_FQ_NO_LINES"
@@ -823,11 +828,28 @@ class V2FiringQuotationService:
             return []
         avisos: list[str] = []
         costo_por_gramo: Decimal | None
-        if fila.glaze_cost_source is V2GlazeCostSource.MANUAL:
-            costo_por_gramo = fila.glaze_manual_cost_per_gram
+        manual = fila.glaze_manual_cost_per_gram
+        # El Excel es explicito (hoja «Solo Quema», E10): el costo manual vale
+        # SOLO si es mayor que cero; si no, se usa el del maestro. Un cero no es
+        # un acuerdo de esmalte gratis, es un campo a medio llenar, y cobrar el
+        # vidriado a cero por eso seria regalarlo.
+        if (
+            fila.glaze_cost_source is V2GlazeCostSource.MANUAL
+            and manual is not None
+            and (manual > ZERO)
+        ):
+            costo_por_gramo = manual
             fila.glaze_material_name_snapshot = None
-            if costo_por_gramo is None:
-                avisos.append(WARN_GLAZE_MANUAL_COST_MISSING)
+        elif fila.glaze_cost_source is V2GlazeCostSource.MANUAL:
+            avisos.append(WARN_GLAZE_MANUAL_COST_MISSING)
+            material = await self._most_expensive_glaze()
+            if material is None:
+                avisos.append(WARN_GLAZE_NO_MATERIAL)
+                costo_por_gramo = None
+                fila.glaze_material_name_snapshot = None
+            else:
+                costo_por_gramo = material.effective_cost_per_unit
+                fila.glaze_material_name_snapshot = material.product.name
         else:
             material = (
                 await self._glaze_material(fila.glaze_material_id, elegido_ahora=False)
@@ -917,6 +939,8 @@ class V2FiringQuotationService:
             proyectada, _ = compute_validity(await self.db_now(), fila.validity_days_snapshot)
         else:
             proyectada = fila.valid_until
+        # La vista del cliente se queda con los avisos que le incumben.
+        estado.warnings = [a for a in estado.warnings if a not in WARNINGS_INTERNOS]
         return FiringQuotationPreview(
             state=estado,
             can_confirm=fila.status is V2QuotationStatus.DRAFT and not bloqueos,
