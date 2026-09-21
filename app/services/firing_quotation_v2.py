@@ -24,7 +24,7 @@ Hoja «Solo Quema» del Excel final. Cuatro cosas, en este orden:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -939,10 +939,18 @@ class V2FiringQuotationService:
             proyectada, _ = compute_validity(await self.db_now(), fila.validity_days_snapshot)
         else:
             proyectada = fila.valid_until
-        # La vista del cliente se queda con los avisos que le incumben.
-        estado.warnings = [a for a in estado.warnings if a not in WARNINGS_INTERNOS]
+        # La vista del cliente se queda con los avisos que le incumben. Se
+        # construye un estado APARTE en vez de vaciarle los avisos al que vino:
+        # hoy `_state()` fabrica uno nuevo en cada llamada y no habria dano, pero
+        # esto deja de depender de eso —el dia que ese estado se comparta o se
+        # cachee, mutarlo aqui borraria el aviso de venta bajo costo de la vista
+        # interna, que es donde tiene que verse—. Lo noto Codex.
+        para_el_cliente = replace(
+            estado,
+            warnings=[a for a in estado.warnings if a not in WARNINGS_INTERNOS],
+        )
         return FiringQuotationPreview(
-            state=estado,
+            state=para_el_cliente,
             can_confirm=fila.status is V2QuotationStatus.DRAFT and not bloqueos,
             blockers=bloqueos,
             fingerprint=huella,
