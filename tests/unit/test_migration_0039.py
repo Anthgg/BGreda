@@ -32,9 +32,14 @@ def _downgrade() -> str:
     return _codigo().split("def downgrade()")[1]
 
 
-def test_0039_es_la_unica_cabeza() -> None:
+def test_0039_cuelga_de_0038_y_hay_una_sola_cabeza() -> None:
+    """Que 0039 siga la cadena, y que la cadena tenga una sola punta.
+
+    Cual es esa punta lo vigila la prueba de la migracion mas reciente: fijarla
+    aqui rompia esta suite en cuanto llegaba 0040.
+    """
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0039"]
+    assert len(list(script.get_heads())) == 1
     assert script.get_revision("0039").down_revision == "0038"
 
 

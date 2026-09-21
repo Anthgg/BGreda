@@ -36,6 +36,7 @@ from app.services.identity_providers import IdentityProvider
 from app.services.importing import ImportService
 from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
+from app.services.kiln_batches import KilnBatchService
 from app.services.masters import MasterDataService
 from app.services.preparations import PreparationService
 from app.services.production import ProductionOrderService
@@ -675,6 +676,20 @@ async def get_production_pdf_service(
 
 
 ProductionPdfServiceDep = Annotated[ProductionPdfService, Depends(get_production_pdf_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 010L: planificacion de hornadas
+# ---------------------------------------------------------------------------
+async def get_kiln_batch_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+    sequences: SequenceServiceDep,
+) -> KilnBatchService:
+    return KilnBatchService(session, audit, sequences)
+
+
+KilnBatchServiceDep = Annotated[KilnBatchService, Depends(get_kiln_batch_service)]
 
 
 # ---------------------------------------------------------------------------

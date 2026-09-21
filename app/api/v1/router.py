@@ -11,6 +11,7 @@ from app.api.v1 import (
     identity,
     imports,
     inventory,
+    kiln_batches,
     masters,
     production,
     prototype_quotations,
@@ -57,6 +58,7 @@ api_v1_router.include_router(quoter_v2_pricing.router)
 #: Fase 010C. Materiales de V2: valorizacion y lineas de cotizacion.
 api_v1_router.include_router(quoter_v2_materials.router)
 api_v1_router.include_router(production.router)
+api_v1_router.include_router(kiln_batches.router)
 #: Superficie PUBLICA de seguimiento (Fase 009I.1). Va aparte de
 #: `production.router` a proposito: no comparte esquemas, no exige sesion y
 #: no tiene una sola operacion que escriba.

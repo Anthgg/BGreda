@@ -30,9 +30,11 @@ from app.core.quoter_v2_lifecycle import V2EffectiveStatus
 from app.models.firing_quotation_v2 import (
     FIRING_QUOTATION_FACTOR_MAX,
     FIRING_QUOTATION_FACTOR_MIN,
+    V2FiringProductionHandoff,
 )
 from app.schemas.firing_quotation_v2 import (
     V2FiringModeQuoteOut,
+    V2FiringProductionHandoffOut,
     V2FiringQuotationBlockerOut,
     V2FiringQuotationCancelIn,
     V2FiringQuotationConfirmIn,
@@ -48,6 +50,7 @@ from app.schemas.firing_quotation_v2 import (
     V2FiringQuotationPreviewOut,
     V2FiringQuotationSuggestionOut,
     V2FiringQuotationUpdateIn,
+    V2FiringSendToProductionOut,
 )
 from app.services.firing_quotation_v2 import (
     FiringQuotationPreview,
@@ -56,6 +59,15 @@ from app.services.firing_quotation_v2 import (
 )
 
 router = APIRouter(prefix="/firing-quotations-v2", tags=["solo-quema-v2"])
+
+
+def _handoff_out(fila: V2FiringProductionHandoff) -> V2FiringProductionHandoffOut:
+    return V2FiringProductionHandoffOut(
+        id=fila.id,
+        v2_firing_quotation_id=fila.v2_firing_quotation_id,
+        created_at=fila.created_at,
+        created_by_name=fila.created_by_name,
+    )
 
 
 def _modo(quote: object | None) -> V2FiringModeQuoteOut | None:
@@ -400,6 +412,22 @@ async def duplicate_firing_quotation(
     )
     await session.commit()
     return resultado
+
+
+@router.post("/{quotation_id}/send-to-production", response_model=V2FiringSendToProductionOut)
+async def send_firing_quotation_to_production(
+    quotation_id: Annotated[int, Path(ge=1)],
+    service: V2FiringQuotationServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+    response: Response,
+) -> V2FiringSendToProductionOut:
+    """Deja una Solo Quema emitida lista para produccion. No consume inventario."""
+    puente, creado = await service.send_to_production(quotation_id, user=admin)
+    salida = V2FiringSendToProductionOut(handoff=_handoff_out(puente), created=creado)
+    await session.commit()
+    response.status_code = status.HTTP_201_CREATED if creado else status.HTTP_200_OK
+    return salida
 
 
 @router.get(

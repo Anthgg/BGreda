@@ -195,6 +195,11 @@ async def reset_database(
         await session.execute(
             text(
                 "TRUNCATE audit_events, bank_accounts, document_sequence_issues, "
+                # Fase 010L. Las cargas internas no cuelgan de ninguna tabla que
+                # se trunque aqui, asi que el CASCADE no las alcanzaria: sin
+                # nombrarlas sobrevivirian de una prueba a la siguiente.
+                "kiln_batch_operations, kiln_batch_assignments, kiln_batches, "
+                "internal_load_lines, internal_loads, v2_firing_production_handoffs, "
                 "production_order_lines, production_orders, "
                 "quotation_product_price_updates, quotation_other_costs, "
                 "quotation_additionals, quotation_techniques, quotations, "
@@ -250,6 +255,9 @@ async def reset_database(
             ("QUOTE_V2", "CTZ-V2", DEFAULT_PATTERN, 6, "YEARLY"),
             # Fase 010K. Solo Quema V2: talonario propio.
             ("FIRING_V2", "Q-V2", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 010L. Hornadas planificadas y cargas internas del taller.
+            ("KILN_BATCH", "HOR", DEFAULT_PATTERN, 6, "YEARLY"),
+            ("INTERNAL_LOAD", "CI", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(

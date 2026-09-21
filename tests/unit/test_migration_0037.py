@@ -65,15 +65,30 @@ def test_el_tercer_origen_cuelga_del_puente_con_restrict_y_es_unico() -> None:
     )
 
 
-def test_el_check_de_la_migracion_es_el_del_modelo() -> None:
-    """La migracion no importa del modelo, asi que se comprueba que dicen lo mismo."""
+def test_el_check_de_la_migracion_es_el_que_0040_sustituye_y_restaura() -> None:
+    """Las tres ramas de 0037 son exactamente las que 0040 reemplaza y devuelve al bajar.
+
+    Hasta 010L esta prueba comparaba con la constante del MODELO, y 0040 la dejo
+    en cuatro ramas: la comparacion ya no decia nada de 0037. Lo que importa de
+    verdad es la cadena: que bajar de 0040 deje la base como la dejo 0037.
+    """
+    import importlib.util
+
     codigo = _codigo()
     # El texto de la constante de tres ramas, reconstruido tal como Python lo une.
     inicio = codigo.index("_ORIGEN_TRES_RAMAS = (")
     fin = codigo.index(")\n\n", inicio)
     trozos = [linea.strip() for linea in codigo[inicio:fin].splitlines()[1:]]
     texto = "".join(trozo.strip('"') for trozo in trozos)
-    assert texto == EXACTLY_ONE_ORIGIN
+
+    archivo = next((REPO_ROOT / "alembic" / "versions").glob("0040_*.py"))
+    spec = importlib.util.spec_from_file_location("migracion_0040", archivo)
+    assert spec is not None and spec.loader is not None
+    migracion_0040 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migracion_0040)
+    assert texto == migracion_0040._ORIGEN_TRES_RAMAS
+    # Y el modelo de hoy son esas tres ramas mas la de Solo Quema.
+    assert EXACTLY_ONE_ORIGIN.count(" OR ") == 3
 
 
 def test_cada_rama_del_origen_nombra_los_tres_campos() -> None:
