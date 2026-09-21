@@ -248,6 +248,8 @@ async def reset_database(
             # Talonario propio y prefijo distinto: un codigo dice a simple
             # vista con que motor nacio. La 0028 la siembra en produccion.
             ("QUOTE_V2", "CTZ-V2", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 010K. Solo Quema V2: talonario propio.
+            ("FIRING_V2", "Q-V2", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(

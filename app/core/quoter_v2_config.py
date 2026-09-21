@@ -87,6 +87,20 @@ DEFAULT_PIECE_SEPARATION_CM = Decimal("3")
 MAX_PIECE_SEPARATION_CM = Decimal("20")
 
 # ---------------------------------------------------------------------------
+# Solo Quema V2 (fase 010K)
+# ---------------------------------------------------------------------------
+#: Factor por defecto del servicio de quema (hoja «Configuracion», B15) y su
+#: rango CERRADO (A15:C15). No es configuracion: es la regla del servicio, y el
+#: x2..x10 de fabricacion no aplica porque aqui la pieza ya existe.
+#:
+#: Viven aqui y no en el modelo porque los necesitan los tres lados: la columna
+#: con su CHECK, el motor que valida el factor y el contrato de la API de
+#: configuracion, que no puede importar de `models` sin arriesgar un ciclo.
+DEFAULT_FIRING_SERVICE_FACTOR = Decimal("1.00")
+FIRING_QUOTATION_FACTOR_MIN = Decimal("1.00")
+FIRING_QUOTATION_FACTOR_MAX = Decimal("2.00")
+
+# ---------------------------------------------------------------------------
 # Tarifas de horno de referencia
 # ---------------------------------------------------------------------------
 #: Los numeros aprobados para un horno chico y uno grande.

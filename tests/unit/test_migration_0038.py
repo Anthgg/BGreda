@@ -30,9 +30,10 @@ def _downgrade() -> str:
     return _codigo().split("def downgrade()")[1]
 
 
-def test_0038_es_la_unica_cabeza() -> None:
+def test_0038_sigue_en_una_cadena_de_una_sola_cabeza() -> None:
+    """La cabeza se la lleva la migracion mas nueva; esa afirmacion vive en 0039."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0038"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("0038").down_revision == "0037"
 
 
@@ -89,13 +90,14 @@ def test_los_check_de_la_migracion_son_los_del_modelo() -> None:
         (
             V2QuotationProduct.__table__,
             (
-                "line_illustration_quantity_non_negative",
                 "line_illustration_hours_non_negative",
                 "line_illustration_cost_non_negative",
             ),
         ),
         (V2CommercialSettings.__table__, ("piece_separation_range",)),
     ):
+        # `line_illustration_quantity_non_negative` quedo con otro nombre en la
+        # base (pasaba de 63 caracteres); 0039 lo renombra y lo comprueba su prueba.
         del_modelo = {str(c.name) for c in tabla.constraints if c.name is not None}
         for nombre in nombres:
             assert f'"{nombre}"' in codigo, nombre

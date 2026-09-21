@@ -5,7 +5,7 @@
 2. las cotizaciones nuevas nacen COMPARTIDAS y con 3 cm de separacion;
 3. los CHECK nuevos muerden;
 4. bajar funciona si nadie uso las reglas nuevas y se niega si alguien las uso;
-5. la cadena entera deja una sola cabeza, y es 0038.
+5. la cadena entera deja una sola cabeza.
 """
 
 from __future__ import annotations
@@ -244,12 +244,13 @@ async def test_bajar_se_niega_si_alguien_uso_la_quema_compartida(
     assert version == "0038"
 
 
-async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0038(
+async def test_toda_la_cadena_deja_una_sola_cabeza(
     migration_engine: AsyncEngine,
 ) -> None:
+    """La cabeza se la lleva la migracion mas nueva; esa afirmacion vive en 0039."""
     _upgrade("head")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0038"]
+    assert len(cabezas) == 1

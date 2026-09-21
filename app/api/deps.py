@@ -28,6 +28,8 @@ from app.models.profile import UserRole
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.catalogs import CatalogService
+from app.services.firing_quotation_v2 import V2FiringQuotationService
+from app.services.firing_quotation_v2_pdf import V2FiringQuotationPdfService
 from app.services.firings import FiringService, KilnService
 from app.services.identity import IdentityLookupService, _InMemoryRateLimiter
 from app.services.identity_providers import IdentityProvider
@@ -601,6 +603,34 @@ async def get_v2_quotation_pdf_service(
 
 
 V2QuotationPdfServiceDep = Annotated[V2QuotationPdfService, Depends(get_v2_quotation_pdf_service)]
+
+
+# ---------------------------------------------------------------------------
+# Fase 010K: Solo Quema V2
+# ---------------------------------------------------------------------------
+async def get_v2_firing_quotation_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2FiringQuotationService:
+    """Cotizaciones de Solo Quema. No toca produccion ni inventario."""
+    return V2FiringQuotationService(session, audit)
+
+
+V2FiringQuotationServiceDep = Annotated[
+    V2FiringQuotationService, Depends(get_v2_firing_quotation_service)
+]
+
+
+async def get_v2_firing_quotation_pdf_service(
+    session: DbSessionDep,
+    base: QuotationPdfServiceDep,
+) -> V2FiringQuotationPdfService:
+    return V2FiringQuotationPdfService(session, base)
+
+
+V2FiringQuotationPdfServiceDep = Annotated[
+    V2FiringQuotationPdfService, Depends(get_v2_firing_quotation_pdf_service)
+]
 
 
 # ---------------------------------------------------------------------------

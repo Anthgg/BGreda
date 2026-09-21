@@ -13,7 +13,11 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.quoter_v2_config import MAX_PIECE_SEPARATION_CM
+from app.core.quoter_v2_config import (
+    FIRING_QUOTATION_FACTOR_MAX,
+    FIRING_QUOTATION_FACTOR_MIN,
+    MAX_PIECE_SEPARATION_CM,
+)
 from app.core.quoter_v2_lifecycle import MAX_VALIDITY_DAYS
 from app.models.firings import FiringType
 from app.models.quoter_v2 import V2CustomerKind, V2ProductionType
@@ -110,6 +114,12 @@ class V2SettingsUpdateIn(BaseModel):
     #: Fase 010J. Separacion entre piezas en el horno, en cm (0 = sin separacion).
     piece_separation_cm: Decimal | None = Field(default=None, ge=0, le=MAX_PIECE_SEPARATION_CM)
 
+    #: Fase 010K. Con que factor nace un servicio de Solo Quema. Su rango es el
+    #: suyo —[1,00; 2,00]— y no el de fabricacion: lo que se vende es horno.
+    firing_service_factor_default: Decimal | None = Field(
+        default=None, ge=FIRING_QUOTATION_FACTOR_MIN, le=FIRING_QUOTATION_FACTOR_MAX
+    )
+
 
 class V2SettingsOut(BaseModel):
     """La configuracion efectiva, con el origen de cada grupo."""
@@ -137,6 +147,7 @@ class V2SettingsOut(BaseModel):
     illustration_daily_rate: Decimal
     illustration_pieces_per_workday: Decimal
     piece_separation_cm: Decimal
+    firing_service_factor_default: Decimal
 
     #: Derivados, no almacenados: guardarlos permitiria que contradijeran a sus
     #: fuentes y habria que decidir cual manda.

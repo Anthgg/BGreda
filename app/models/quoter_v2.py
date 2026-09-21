@@ -1090,9 +1090,9 @@ class V2QuotationProduct(Base, TimestampMixin):
         CheckConstraint("unit_volume_cm3 >= 0", name="unit_volume_non_negative"),
         CheckConstraint("total_volume_cm3 >= 0", name="total_volume_non_negative"),
         CheckConstraint("firing_occupancy_percent >= 0", name="line_firing_occupancy_non_negative"),
-        CheckConstraint(
-            "illustration_quantity >= 0", name="line_illustration_quantity_non_negative"
-        ),
+        # Fase 010K: nombre corto. El de 0038 pasaba de 63 caracteres y
+        # PostgreSQL lo guardo recortado; 0039 lo renombra a este.
+        CheckConstraint("illustration_quantity >= 0", name="line_illustration_qty_non_negative"),
         CheckConstraint("illustration_hours >= 0", name="line_illustration_hours_non_negative"),
         CheckConstraint("illustration_cost >= 0", name="line_illustration_cost_non_negative"),
         CheckConstraint(

@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     auth,
+    firing_quotations_v2,
     firings,
     identity,
     imports,
@@ -37,6 +38,7 @@ api_v1_router.include_router(inventory.router)
 api_v1_router.include_router(imports.router)
 api_v1_router.include_router(recipes.router)
 api_v1_router.include_router(firings.router)
+api_v1_router.include_router(firing_quotations_v2.router)
 api_v1_router.include_router(quotations.router)
 api_v1_router.include_router(quotation_builder.router)
 #: Fase 010A. Cotizador V2: motor nuevo, ruta propia. `/quotations-v2` no

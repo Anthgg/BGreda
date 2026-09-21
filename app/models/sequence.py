@@ -66,6 +66,10 @@ class SequenceType(StrEnum):
     #: sean independientes evita que retirar Legacy mas adelante deje huecos o
     #: colisiones en la numeracion de V2.
     QUOTE_V2 = "QUOTE_V2"
+    #: Fase 010K. Solo Quema V2 (Q-V2-2026-000001). Talonario propio: es otro
+    #: documento, con otro destinatario, y el prefijo dice a simple vista que
+    #: es un servicio de quema y no una cotizacion de fabricacion.
+    FIRING_V2 = "FIRING_V2"
 
 
 class ResetPolicy(StrEnum):
@@ -121,7 +125,7 @@ class DocumentSequence(Base, TimestampMixin):
         CheckConstraint(
             "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', "
             "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE', 'PROTOTYPE_QUOTE', "
-            "'QUOTE_V2')",
+            "'QUOTE_V2', 'FIRING_V2')",
             name="type_allowed",
         ),
         CheckConstraint(

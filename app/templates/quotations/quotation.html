@@ -224,8 +224,10 @@
       <th class="col-desc">Descripción del Producto</th>
       <th class="col-qty">Cant.</th>
       <th class="col-uom">Unidad</th>
+      {% if doc.show_line_amounts %}
       <th class="col-price">P. Unitario</th>
       <th class="col-subtotal">Subtotal</th>
+      {% endif %}
       {% if doc.show_line_tax %}
       <th class="col-tax">IGV</th>
       <th class="col-total">Total</th>
@@ -258,8 +260,10 @@
       </td>
       <td class="col-qty">{{ item.quantity_formatted }}</td>
       <td class="col-uom">{{ item.unit_of_measure }}</td>
+      {% if doc.show_line_amounts %}
       <td class="col-price">{{ item.unit_price_formatted }}</td>
       <td class="col-subtotal">{{ item.subtotal_formatted }}</td>
+      {% endif %}
       {% if doc.show_line_tax %}
       <td class="col-tax">{{ item.line_tax_formatted or '' }}</td>
       <td class="col-total">{{ item.line_total_formatted or '' }}</td>

@@ -96,6 +96,24 @@ def quantize_percent(value: Decimal) -> Decimal:
     return value.quantize(_PERCENT_STEP, rounding=ROUND_HALF_UP)
 
 
+#: Lo mas grande que cabe en `quantity_numeric()`, que es NUMERIC(18, 6):
+#: doce digitos enteros. No es un limite de negocio sino el techo fisico de la
+#: columna, y hace falta comprobarlo ANTES de guardar: sin esto, un pedido
+#: bastante grande —100 piezas de 1 m de lado ya lo son— se iba a la base y
+#: volvia como un error de desbordamiento, o sea un 500. Un dato que no cabe es
+#: una entrada invalida y tiene que decirse como tal.
+MAX_VOLUME_CM3 = Decimal("999999999999")
+
+
+def _comprobar_volumen(valor: Decimal, que: str) -> Decimal:
+    if valor > MAX_VOLUME_CM3:
+        raise FiringMathError(
+            f"{que} es demasiado grande para el sistema ({valor} cm3): "
+            f"el maximo es {MAX_VOLUME_CM3} cm3. Revise medidas y cantidad."
+        )
+    return valor
+
+
 def piece_volume(
     length_cm: Decimal | None,
     width_cm: Decimal | None,
@@ -121,14 +139,16 @@ def piece_volume(
     unitario, _total = line_volume(
         1, length_cm + separation_cm, width_cm + separation_cm, height_cm + separation_cm
     )
-    return quantize_volume(unitario)
+    return _comprobar_volumen(quantize_volume(unitario), "El volumen de la pieza")
 
 
 def total_volume(unit_volume_cm3: Decimal, quantity: int) -> Decimal:
     """Volumen de la linea entera."""
     if quantity <= 0 or unit_volume_cm3 <= ZERO:
         return ZERO
-    return quantize_volume(unit_volume_cm3 * Decimal(quantity))
+    return _comprobar_volumen(
+        quantize_volume(unit_volume_cm3 * Decimal(quantity)), "El volumen de la linea"
+    )
 
 
 def occupancy_percent(volume_cm3: Decimal, capacity_cm3: Decimal) -> Decimal:

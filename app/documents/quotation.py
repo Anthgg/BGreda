@@ -242,6 +242,12 @@ class QuotationPdfDocument:
     #: cliente» del Cotizador V2. Falso por defecto: Legacy y los prototipos
     #: siguen con su tabla de siempre.
     show_line_tax: bool = False
+    #: Fase 010K. Si la tabla lleva precio unitario y subtotal por linea.
+    #: Verdadero por defecto: solo Solo Quema lo apaga, porque su documento
+    #: cobra UN servicio y el Excel no le pone precio a cada pieza («PDF
+    #: Quema», A11:C21). Escribir ahi un cero o una raya sugeriria que esa
+    #: pieza no cuesta nada.
+    show_line_amounts: bool = True
 
 
 def _build_conditions_doc(
