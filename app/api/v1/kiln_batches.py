@@ -1,4 +1,4 @@
-"""API de planificacion de hornadas. Fase 010L."""
+"""API de planificacion de hornadas. Fases 010L y 010M."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
+    KilnBatchLayoutServiceDep,
     KilnBatchServiceDep,
     WorkshopUserDep,
 )
@@ -25,12 +26,21 @@ from app.schemas.kiln_batches import (
     KilnBatchAssignmentReleaseIn,
     KilnBatchCancelIn,
     KilnBatchCreateIn,
+    KilnBatchLayoutLevelOut,
+    KilnBatchLayoutOut,
+    KilnBatchLayoutPlacementOut,
+    KilnBatchLayoutUpdate,
     KilnBatchMoveIn,
     KilnBatchMoveOut,
     KilnBatchOut,
     KilnBatchPage,
     KilnBatchSuggestionOut,
     KilnBatchUpdateIn,
+)
+from app.services.kiln_batch_layout import (
+    LayoutView,
+    LevelSpec,
+    PlacementSpec,
 )
 from app.services.kiln_batches import AssignItem, BatchView, FiringPlan
 
@@ -334,3 +344,123 @@ async def cancel_kiln_batch(
     result = _batch_out(await service.cancel(batch_id, reason=payload.reason, user=admin))
     await session.commit()
     return result
+
+
+# ---------------------------------------------------------------------------
+# Fase 010M: layout fisico del horno
+# ---------------------------------------------------------------------------
+
+def _layout_out(view: LayoutView) -> KilnBatchLayoutOut:
+    """Convierte un LayoutView al schema de respuesta de la API."""
+    return KilnBatchLayoutOut(
+        batch_id=view.layout.batch_id,
+        layout_id=view.layout.id,
+        version=view.layout.version,
+        kiln_width_cm_snapshot=view.layout.kiln_width_cm_snapshot,
+        kiln_depth_cm_snapshot=view.layout.kiln_depth_cm_snapshot,
+        kiln_height_cm_snapshot=view.layout.kiln_height_cm_snapshot,
+        updated_at=view.layout.updated_at,
+        levels=[
+            KilnBatchLayoutLevelOut(
+                id=lvl.id,
+                level_index=lvl.level_index,
+                name=lvl.name,
+                z_cm=lvl.z_cm,
+                usable_height_cm=lvl.usable_height_cm,
+                plate_label=lvl.plate_label,
+                plate_thickness_cm=lvl.plate_thickness_cm,
+            )
+            for lvl in view.levels
+        ],
+        placements=[
+            KilnBatchLayoutPlacementOut(
+                id=plc.id,
+                batch_assignment_id=plc.batch_assignment_id,
+                group_index=plc.group_index,
+                unit_index=plc.unit_index,
+                quantity=plc.quantity,
+                level_index=plc.level_index,
+                x_cm=plc.x_cm,
+                y_cm=plc.y_cm,
+                rotation_degrees=plc.rotation_degrees,
+                piece_length_cm_snapshot=plc.piece_length_cm_snapshot,
+                piece_width_cm_snapshot=plc.piece_width_cm_snapshot,
+                piece_height_cm_snapshot=plc.piece_height_cm_snapshot,
+                separation_cm_snapshot=plc.separation_cm_snapshot,
+            )
+            for plc in view.placements
+        ],
+    )
+
+
+@router.get("/{batch_id}/layout", response_model=KilnBatchLayoutOut)
+async def get_kiln_batch_layout(
+    batch_id: int,
+    layout_service: KilnBatchLayoutServiceDep,
+    _: CurrentUserDep,
+) -> KilnBatchLayoutOut:
+    """Devuelve el layout fisico de una hornada.
+
+    Funciona para cualquier estado (PLANNED, STARTED, COMPLETED, CANCELLED).
+    Si todavia no existe layout devuelve 404.
+    """
+    return _layout_out(await layout_service.get_layout(batch_id))
+
+
+@router.put("/{batch_id}/layout", response_model=KilnBatchLayoutOut)
+async def save_kiln_batch_layout(
+    batch_id: int,
+    payload: KilnBatchLayoutUpdate,
+    layout_service: KilnBatchLayoutServiceDep,
+    actor: WorkshopUserDep,
+    session: DbSessionDep,
+) -> KilnBatchLayoutOut:
+    """Guarda (crea o reemplaza) el layout fisico de una hornada.
+
+    Solo permitido cuando la hornada esta en estado PLANNED.
+
+    - `expected_version = 0`: creacion inicial (no debe existir layout).
+    - `expected_version = N`: actualizacion; debe coincidir con la version actual.
+
+    El PUT es un reemplazo completo y atomico de todos los niveles y placements.
+    """
+    levels = [
+        LevelSpec(
+            level_index=lvl.level_index,
+            name=lvl.name,
+            z_cm=lvl.z_cm,
+            usable_height_cm=lvl.usable_height_cm,
+            plate_label=lvl.plate_label,
+            plate_thickness_cm=lvl.plate_thickness_cm,
+        )
+        for lvl in payload.levels
+    ]
+    placements = [
+        PlacementSpec(
+            batch_assignment_id=p.batch_assignment_id,
+            group_index=p.group_index,
+            unit_index=p.unit_index,
+            quantity=p.quantity,
+            level_index=p.level_index,
+            x_cm=p.x_cm,
+            y_cm=p.y_cm,
+            rotation_degrees=p.rotation_degrees,
+            piece_length_cm_snapshot=p.piece_length_cm_snapshot,
+            piece_width_cm_snapshot=p.piece_width_cm_snapshot,
+            piece_height_cm_snapshot=p.piece_height_cm_snapshot,
+            separation_cm_snapshot=p.separation_cm_snapshot,
+        )
+        for p in payload.placements
+    ]
+    result = _layout_out(
+        await layout_service.save_layout(
+            batch_id,
+            expected_version=payload.expected_version,
+            levels=levels,
+            placements=placements,
+            user=actor,
+        )
+    )
+    await session.commit()
+    return result
+
