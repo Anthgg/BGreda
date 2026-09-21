@@ -4,6 +4,7 @@ from app.db.base import Base
 from app.models.audit import AuditAction, AuditEvent
 from app.models.catalog import CurrencyCatalog, SequencePatternPreset, UbigeoDistrict
 from app.models.firing_quotation_v2 import (
+    V2FiringProductionHandoff,
     V2FiringQuotation,
     V2FiringQuotationLine,
     V2GlazeCostSource,
@@ -35,6 +36,17 @@ from app.models.importing import (
     ImportStatus,
 )
 from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
+from app.models.kiln_batches import (
+    InternalLoad,
+    InternalLoadLine,
+    KilnBatch,
+    KilnBatchAssignment,
+    KilnBatchAssignmentStatus,
+    KilnBatchOperation,
+    KilnBatchOperationKind,
+    KilnBatchSourceKind,
+    KilnBatchStatus,
+)
 from app.models.masters import (
     DocumentType,
     Partner,
@@ -160,7 +172,16 @@ __all__ = [
     "ImportRow",
     "ImportRowStatus",
     "ImportStatus",
+    "InternalLoad",
+    "InternalLoadLine",
     "Kiln",
+    "KilnBatch",
+    "KilnBatchAssignment",
+    "KilnBatchAssignmentStatus",
+    "KilnBatchOperation",
+    "KilnBatchOperationKind",
+    "KilnBatchSourceKind",
+    "KilnBatchStatus",
     "KilnOccupancyFactor",
     "KilnRate",
     "MovementType",
@@ -215,6 +236,7 @@ __all__ = [
     "V2CommercialSettings",
     "V2CustomerKind",
     "V2Extra",
+    "V2FiringProductionHandoff",
     "V2FiringQuotation",
     "V2FiringQuotationLine",
     "V2GlazeCostSource",

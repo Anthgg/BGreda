@@ -4,7 +4,7 @@
 2. el CHECK del factor muerde fuera de [1; 2] y el de coherencia de estados tambien;
 3. el CHECK de 0038 con nombre recortado queda con su nombre corto;
 4. bajar funciona sin datos y se niega si hay servicios de Solo Quema;
-5. la cadena entera deja una sola cabeza, y es 0039.
+5. la cadena entera deja una sola cabeza.
 """
 
 from __future__ import annotations
@@ -180,12 +180,15 @@ async def test_bajar_sin_datos_funciona_y_con_datos_se_niega(
     assert version == "0039"
 
 
-async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0039(
+async def test_toda_la_cadena_deja_una_sola_cabeza(
     migration_engine: AsyncEngine,
 ) -> None:
+    """Una sola, sea cual sea. Fijarla aqui en 0039 rompia la suite en cuanto
+    llegaba 0040 sin que 0039 hubiera cambiado en nada; la cabeza concreta la
+    comprueba la prueba de la migracion MAS reciente."""
     _upgrade("head")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0039"]
+    assert len(cabezas) == 1

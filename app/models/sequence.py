@@ -70,6 +70,11 @@ class SequenceType(StrEnum):
     #: documento, con otro destinatario, y el prefijo dice a simple vista que
     #: es un servicio de quema y no una cotizacion de fabricacion.
     FIRING_V2 = "FIRING_V2"
+    #: Fase 010L. Hornadas planificadas y cargas internas del taller: dos
+    #: talonarios propios, porque ni una hornada ni una carga interna son una
+    #: orden de produccion y no pueden comerse sus correlativos.
+    KILN_BATCH = "KILN_BATCH"
+    INTERNAL_LOAD = "INTERNAL_LOAD"
 
 
 class ResetPolicy(StrEnum):
@@ -125,7 +130,7 @@ class DocumentSequence(Base, TimestampMixin):
         CheckConstraint(
             "sequence_type IN ('QUOTE', 'FIRING', 'PRODUCT_50', 'PRODUCT_70', "
             "'PREPARATION', 'PRODUCTION_ORDER', 'PROTOTYPE', 'PROTOTYPE_QUOTE', "
-            "'QUOTE_V2', 'FIRING_V2')",
+            "'QUOTE_V2', 'FIRING_V2', 'KILN_BATCH', 'INTERNAL_LOAD')",
             name="type_allowed",
         ),
         CheckConstraint(

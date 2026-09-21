@@ -403,10 +403,51 @@ class V2FiringQuotationLine(Base, TimestampMixin):
     )
 
 
+class V2FiringProductionHandoff(Base, TimestampMixin):
+    """Fase 010L (K5). El puente entre una Solo Quema aceptada y la produccion.
+
+    Espejo exacto del puente del Cotizador V2 (`v2_production_handoffs`), a
+    proposito: dos puentes que se comportaran distinto obligarian al taller a
+    aprenderse dos maneras de recibir el mismo tipo de encargo. Garantiza lo
+    mismo que aquel:
+
+    - **identidad**: dice que Solo Quema paso, y su huella comercial congelada
+      dice con que contenido;
+    - **unicidad**: UNIQUE sobre la cotizacion. Dos clics simultaneos en
+      «Enviar a produccion» pasan los dos la comprobacion del servicio; solo la
+      base puede impedir que nazcan dos;
+    - **ningun movimiento de inventario**: las piezas ya existen —las trajo el
+      cliente— y el esmalte, si lo hay, se consume cuando alguien lo gasta.
+    """
+
+    __tablename__ = "v2_firing_production_handoffs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    v2_firing_quotation_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "v2_firing_quotations.id",
+            ondelete="RESTRICT",
+            name="fk_v2_firing_production_handoffs_quotation",
+        ),
+        nullable=False,
+        unique=True,
+    )
+    #: Copia de la huella al pasar. Si algun dia no coincidiera con la de la
+    #: cotizacion, alguien habria tocado un documento emitido por debajo.
+    commercial_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    created_by_name: Mapped[str | None] = mapped_column(String(200))
+
+    __table_args__ = (
+        CheckConstraint("length(btrim(commercial_fingerprint)) = 64", name="fingerprint_is_sha256"),
+    )
+
+
 __all__ = [
     "DEFAULT_FIRING_SERVICE_FACTOR",
     "FIRING_QUOTATION_FACTOR_MAX",
     "FIRING_QUOTATION_FACTOR_MIN",
+    "V2FiringProductionHandoff",
     "V2FiringQuotation",
     "V2FiringQuotationLine",
     "V2GlazeCostSource",

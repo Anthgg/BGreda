@@ -250,6 +250,9 @@ async def reset_database(
             ("QUOTE_V2", "CTZ-V2", DEFAULT_PATTERN, 6, "YEARLY"),
             # Fase 010K. Solo Quema V2: talonario propio.
             ("FIRING_V2", "Q-V2", DEFAULT_PATTERN, 6, "YEARLY"),
+            # Fase 010L. Hornadas planificadas y cargas internas del taller.
+            ("KILN_BATCH", "HOR", DEFAULT_PATTERN, 6, "YEARLY"),
+            ("INTERNAL_LOAD", "CI", DEFAULT_PATTERN, 6, "YEARLY"),
         ):
             await session.execute(
                 text(

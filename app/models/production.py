@@ -66,12 +66,20 @@ QR_TOKEN_MIN_LENGTH = 32
 #: contradictorios y dos tipos de movimiento para el mismo arranque.
 #:
 #: Fase 010I: el tercer origen es la cotizacion V2, y entra por su PUENTE
-#: (`v2_handoff_id`) y no por la cotizacion. Cada rama nombra los TRES campos:
-#: una rama que solo mirara dos dejaria pasar una fila con el tercero relleno.
+#: (`v2_handoff_id`) y no por la cotizacion.
+#:
+#: Fase 010L: el cuarto es Solo Quema, por SU puente (`v2_firing_handoff_id`).
+#: Cada rama nombra los CUATRO campos: una rama que solo mirara tres dejaria
+#: pasar una fila con el cuarto relleno.
 EXACTLY_ONE_ORIGIN = (
-    "(quotation_id IS NOT NULL AND prototype_id IS NULL AND v2_handoff_id IS NULL)"
-    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL AND v2_handoff_id IS NULL)"
-    " OR (quotation_id IS NULL AND prototype_id IS NULL AND v2_handoff_id IS NOT NULL)"
+    "(quotation_id IS NOT NULL AND prototype_id IS NULL"
+    " AND v2_handoff_id IS NULL AND v2_firing_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NOT NULL"
+    " AND v2_handoff_id IS NULL AND v2_firing_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NULL"
+    " AND v2_handoff_id IS NOT NULL AND v2_firing_handoff_id IS NULL)"
+    " OR (quotation_id IS NULL AND prototype_id IS NULL"
+    " AND v2_handoff_id IS NULL AND v2_firing_handoff_id IS NOT NULL)"
 )
 
 
@@ -189,6 +197,17 @@ class ProductionOrder(Base, TimestampMixin):
     #: acaban en la misma fila.
     v2_handoff_id: Mapped[int | None] = mapped_column(
         ForeignKey("v2_production_handoffs.id", ondelete="RESTRICT"), unique=True
+    )
+    #: Fase 010L (K5). El puente de una Solo Quema, con la misma logica: UNIQUE
+    #: aqui y UNIQUE de la cotizacion en el puente, y una Solo Quema tiene como
+    #: mucho una orden. Nombre explicito: el de la convencion pasa de 63.
+    v2_firing_handoff_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "v2_firing_production_handoffs.id",
+            ondelete="RESTRICT",
+            name="fk_production_orders_v2_firing_handoff",
+        ),
+        unique=True,
     )
 
     #: De donde sale el material. Explicita siempre: no hay ubicacion por
