@@ -102,7 +102,8 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.batch_id IS DISTINCT FROM NEW.batch_id THEN
         IF viejo <> 0 THEN
             UPDATE kiln_batches
-               SET assigned_volume_cm3 = assigned_volume_cm3 - viejo
+               SET assigned_volume_cm3 = assigned_volume_cm3 - viejo,
+                   exclusive = exclusive AND (assigned_volume_cm3 - viejo) > 0
              WHERE id = OLD.batch_id;
         END IF;
         IF nuevo <> 0 THEN
@@ -111,8 +112,11 @@ BEGIN
              WHERE id = NEW.batch_id;
         END IF;
     ELSIF nuevo - viejo <> 0 THEN
+        -- Una hornada que se queda VACIA deja de estar reservada: la exclusiva
+        -- era de las piezas que ya no estan.
         UPDATE kiln_batches
-           SET assigned_volume_cm3 = assigned_volume_cm3 + (nuevo - viejo)
+           SET assigned_volume_cm3 = assigned_volume_cm3 + (nuevo - viejo),
+               exclusive = exclusive AND (assigned_volume_cm3 + (nuevo - viejo)) > 0
          WHERE id = COALESCE(NEW.batch_id, OLD.batch_id);
     END IF;
     RETURN NULL;
@@ -153,6 +157,44 @@ _LIBERACION = (
     "(status IS NOT NULL AND status = 'ACTIVE' AND released_at IS NULL) OR (status IS NOT"
     " NULL AND status = 'RELEASED' AND released_at IS NOT NULL)"
 )
+
+
+#: El contador SOLO lo mueve el trigger de las asignaciones. Sin esta guarda,
+#: un `UPDATE kiln_batches SET assigned_volume_cm3 = 0` —un error de un script,
+#: una mano en la consola— dejaria la suma falsa, y la hornada volveria a
+#: ofrecer capacidad que ya esta ocupada: la garantia del 100 % caeria en
+#: silencio. `pg_trigger_depth()` distingue el camino legitimo: la escritura del
+#: trigger de asignaciones llega a profundidad 2; una directa, a 1.
+#: Lo encontro Codex en la auditoria de L1.
+_GUARDA_FUNCION = """
+CREATE FUNCTION kiln_batches_guard_assigned_volume() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    -- Profundidad 2 o mas: la escritura viene del trigger de las asignaciones,
+    -- que es el UNICO que puede mover el contador.
+    IF pg_trigger_depth() > 1 THEN
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'INSERT' AND NEW.assigned_volume_cm3 <> 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'check_violation',
+            MESSAGE = 'Una hornada nace vacia: su volumen lo ponen sus asignaciones';
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.assigned_volume_cm3 IS DISTINCT FROM OLD.assigned_volume_cm3 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'check_violation',
+            MESSAGE = 'El volumen asignado de una hornada solo lo cambian sus asignaciones';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+"""
+
+_GUARDA_TRIGGER = """
+CREATE TRIGGER trg_kiln_batches_guard_assigned_volume
+BEFORE INSERT OR UPDATE ON kiln_batches
+FOR EACH ROW EXECUTE FUNCTION kiln_batches_guard_assigned_volume();
+"""
 
 
 def upgrade() -> None:
@@ -658,6 +700,8 @@ def upgrade() -> None:
     # 4. El contador de volumen, mantenido por la base.
     op.execute(sa.text(_FUNCION_VOLUMEN))
     op.execute(sa.text(_TRIGGER_VOLUMEN))
+    op.execute(sa.text(_GUARDA_FUNCION))
+    op.execute(sa.text(_GUARDA_TRIGGER))
 
 
 def downgrade() -> None:
@@ -691,6 +735,8 @@ def downgrade() -> None:
     )
     op.execute(sa.text("DROP TRIGGER trg_kiln_batch_assignments_volume ON kiln_batch_assignments"))
     op.execute(sa.text("DROP FUNCTION kiln_batch_assignments_apply_volume()"))
+    op.execute(sa.text("DROP TRIGGER trg_kiln_batches_guard_assigned_volume ON kiln_batches"))
+    op.execute(sa.text("DROP FUNCTION kiln_batches_guard_assigned_volume()"))
 
     op.drop_constraint(_CK_ORIGEN, "production_orders", type_="check")
     op.create_check_constraint(_CK_ORIGEN, "production_orders", _ORIGEN_TRES_RAMAS)

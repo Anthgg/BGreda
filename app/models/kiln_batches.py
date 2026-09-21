@@ -526,7 +526,8 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.batch_id IS DISTINCT FROM NEW.batch_id THEN
         IF viejo <> 0 THEN
             UPDATE kiln_batches
-               SET assigned_volume_cm3 = assigned_volume_cm3 - viejo
+               SET assigned_volume_cm3 = assigned_volume_cm3 - viejo,
+                   exclusive = exclusive AND (assigned_volume_cm3 - viejo) > 0
              WHERE id = OLD.batch_id;
         END IF;
         IF nuevo <> 0 THEN
@@ -535,8 +536,11 @@ BEGIN
              WHERE id = NEW.batch_id;
         END IF;
     ELSIF nuevo - viejo <> 0 THEN
+        -- Una hornada que se queda VACIA deja de estar reservada: la exclusiva
+        -- era de las piezas que ya no estan.
         UPDATE kiln_batches
-           SET assigned_volume_cm3 = assigned_volume_cm3 + (nuevo - viejo)
+           SET assigned_volume_cm3 = assigned_volume_cm3 + (nuevo - viejo),
+               exclusive = exclusive AND (assigned_volume_cm3 + (nuevo - viejo)) > 0
          WHERE id = COALESCE(NEW.batch_id, OLD.batch_id);
     END IF;
     RETURN NULL;
@@ -550,6 +554,45 @@ AFTER INSERT OR UPDATE OR DELETE ON kiln_batch_assignments
 FOR EACH ROW EXECUTE FUNCTION kiln_batch_assignments_apply_volume();
 """
 
+#: La guarda del contador: solo el trigger de las asignaciones lo mueve. Ver el
+#: comentario gemelo en la migracion 0040.
+KILN_BATCH_GUARD_FUNCTION = """
+CREATE FUNCTION kiln_batches_guard_assigned_volume() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    -- Profundidad 2 o mas: la escritura viene del trigger de las asignaciones,
+    -- que es el UNICO que puede mover el contador.
+    IF pg_trigger_depth() > 1 THEN
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'INSERT' AND NEW.assigned_volume_cm3 <> 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'check_violation',
+            MESSAGE = 'Una hornada nace vacia: su volumen lo ponen sus asignaciones';
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.assigned_volume_cm3 IS DISTINCT FROM OLD.assigned_volume_cm3 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'check_violation',
+            MESSAGE = 'El volumen asignado de una hornada solo lo cambian sus asignaciones';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+"""
+
+KILN_BATCH_GUARD_TRIGGER = """
+CREATE TRIGGER trg_kiln_batches_guard_assigned_volume
+BEFORE INSERT OR UPDATE ON kiln_batches
+FOR EACH ROW EXECUTE FUNCTION kiln_batches_guard_assigned_volume();
+"""
+
+event.listen(KilnBatch.__table__, "after_create", DDL(KILN_BATCH_GUARD_FUNCTION))
+event.listen(KilnBatch.__table__, "after_create", DDL(KILN_BATCH_GUARD_TRIGGER))
+event.listen(
+    KilnBatch.__table__,
+    "after_drop",
+    DDL("DROP FUNCTION IF EXISTS kiln_batches_guard_assigned_volume()"),
+)
 event.listen(KilnBatchAssignment.__table__, "after_create", DDL(KILN_BATCH_VOLUME_FUNCTION))
 event.listen(KilnBatchAssignment.__table__, "after_create", DDL(KILN_BATCH_VOLUME_TRIGGER))
 event.listen(
@@ -564,6 +607,8 @@ __all__ = [
     "ASSIGNMENT_SOURCE_COHERENT",
     "IDEMPOTENCY_KEY_LENGTH",
     "KILN_BATCH_EDITABLE",
+    "KILN_BATCH_GUARD_FUNCTION",
+    "KILN_BATCH_GUARD_TRIGGER",
     "KILN_BATCH_STATUS_TIMESTAMPS",
     "KILN_BATCH_VOLUME_FUNCTION",
     "KILN_BATCH_VOLUME_TRIGGER",

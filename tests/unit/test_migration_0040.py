@@ -14,6 +14,8 @@ from app.models.firing_quotation_v2 import V2FiringProductionHandoff
 from app.models.kiln_batches import (
     ASSIGNMENT_RELEASE_COHERENT,
     ASSIGNMENT_SOURCE_COHERENT,
+    KILN_BATCH_GUARD_FUNCTION,
+    KILN_BATCH_GUARD_TRIGGER,
     KILN_BATCH_STATUS_TIMESTAMPS,
     KILN_BATCH_VOLUME_FUNCTION,
     KILN_BATCH_VOLUME_TRIGGER,
@@ -109,6 +111,16 @@ def test_el_trigger_del_modelo_es_el_de_la_migracion() -> None:
     migracion = _modulo()
     assert KILN_BATCH_VOLUME_FUNCTION == migracion._FUNCION_VOLUMEN  # type: ignore[attr-defined]
     assert KILN_BATCH_VOLUME_TRIGGER == migracion._TRIGGER_VOLUMEN  # type: ignore[attr-defined]
+    assert KILN_BATCH_GUARD_FUNCTION == migracion._GUARDA_FUNCION  # type: ignore[attr-defined]
+    assert KILN_BATCH_GUARD_TRIGGER == migracion._GUARDA_TRIGGER  # type: ignore[attr-defined]
+
+
+def test_la_guarda_distingue_el_trigger_de_una_escritura_directa() -> None:
+    """Sin la guarda, un UPDATE directo al contador dejaria la suma falsa (Codex, L1)."""
+    codigo = _codigo()
+    assert "CREATE TRIGGER trg_kiln_batches_guard_assigned_volume" in codigo
+    assert "BEFORE INSERT OR UPDATE ON kiln_batches" in codigo
+    assert "pg_trigger_depth() > 1" in codigo
 
 
 def test_el_trigger_de_volumen_aplica_el_delta_y_no_una_suma() -> None:
@@ -126,6 +138,7 @@ def test_el_downgrade_se_niega_con_datos() -> None:
     assert downgrade.index("RAISE EXCEPTION") < downgrade.index("drop_table")
     # Y quita el trigger antes que las tablas de las que depende.
     assert downgrade.index("DROP TRIGGER") < downgrade.index("drop_table")
+    assert "DROP TRIGGER trg_kiln_batches_guard_assigned_volume" in downgrade
 
 
 def test_ningun_nombre_de_restriccion_pasa_de_63_caracteres() -> None:
