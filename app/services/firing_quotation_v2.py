@@ -626,13 +626,13 @@ class V2FiringQuotationService:
 
         return FiringQuotationState(
             quotation=fila,
-             lines=lineas,
-             kilns=comparacion,
-             suggestion=sugerencia,
-             batch_loads=batch_loads(fila.occupancy_percent, fila.firing_count),
-             effective_status=await self._effective(fila, ahora),
-             warnings=avisos,
-         )
+            lines=lineas,
+            kilns=comparacion,
+            suggestion=sugerencia,
+            batch_loads=batch_loads(fila.occupancy_percent, fila.firing_count),
+            effective_status=await self._effective(fila, ahora),
+            warnings=avisos,
+        )
 
     async def _compare_frozen(
         self, fila: V2FiringQuotation
