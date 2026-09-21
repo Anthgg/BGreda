@@ -772,6 +772,39 @@ class TestAnularYDuplicar:
         otra_vez = await _post(api, admin_csrf, f"{FQ}/{ctz['id']}/cancel", {})
         assert otra_vez["cancelled_at"] == anulada["cancelled_at"]
 
+    async def test_enviar_a_produccion_impide_anular_solo_quema(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        ids = await preparar(api, admin_csrf)
+        ctz = await cotizacion_del_excel(api, admin_csrf, ids)
+        resumen = (await api.get(f"{FQ}/{ctz['id']}/preview")).json()
+        await _post(
+            api,
+            admin_csrf,
+            f"{FQ}/{ctz['id']}/confirm",
+            {"expected_fingerprint": resumen["fingerprint"]},
+        )
+
+        enviada = await api.post(f"{FQ}/{ctz['id']}/send-to-production", headers=h(admin_csrf))
+        assert enviada.status_code == 201, enviada.text
+        puente = enviada.json()["handoff"]
+        assert puente["v2_firing_quotation_id"] == ctz["id"]
+
+        repetida = await api.post(f"{FQ}/{ctz['id']}/send-to-production", headers=h(admin_csrf))
+        assert repetida.status_code == 200, repetida.text
+        assert repetida.json()["handoff"]["id"] == puente["id"]
+
+        releida = (await api.get(f"{FQ}/{ctz['id']}")).json()
+        assert releida["effective_status"] == "READY_FOR_PRODUCTION"
+
+        anulacion = await api.post(
+            f"{FQ}/{ctz['id']}/cancel",
+            json={"reason": "Ya no"},
+            headers=h(admin_csrf),
+        )
+        assert anulacion.status_code == 409, anulacion.text
+        assert anulacion.json()["error"]["code"] == "V2_FQ_NOT_CANCELLABLE"
+
     async def test_una_vigente_no_se_duplica_y_una_vencida_si(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
     ) -> None:

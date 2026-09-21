@@ -68,6 +68,7 @@ from app.core.quoter_v2_lifecycle import (
 from app.core.quoter_v2_pricing import quantize_money
 from app.models.audit import AuditAction
 from app.models.firing_quotation_v2 import (
+    V2FiringProductionHandoff,
     V2FiringQuotation,
     V2FiringQuotationLine,
     V2GlazeCostSource,
@@ -142,6 +143,7 @@ EVENT_UPDATED = "updated"
 EVENT_CONFIRMED = "confirmed"
 EVENT_CANCELLED = "cancelled"
 EVENT_DUPLICATED = "duplicated"
+EVENT_SENT_TO_PRODUCTION = "sent_to_production"
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +201,18 @@ class V2FiringQuotationNotDuplicableError(APIError):
     status_code = 409
     code = "V2_FQ_NOT_DUPLICABLE"
     message = "Solo una cotizacion vencida o anulada se puede duplicar"
+
+
+class V2FiringQuotationNotCancellableError(APIError):
+    status_code = 409
+    code = "V2_FQ_NOT_CANCELLABLE"
+    message = "La cotizacion ya paso a produccion y no puede anularse desde aqui"
+
+
+class V2FiringQuotationNotSendableError(APIError):
+    status_code = 409
+    code = "V2_FQ_NOT_SENDABLE"
+    message = "Solo una cotizacion emitida y vigente puede pasar a produccion"
 
 
 # ---------------------------------------------------------------------------
@@ -612,13 +626,13 @@ class V2FiringQuotationService:
 
         return FiringQuotationState(
             quotation=fila,
-            lines=lineas,
-            kilns=comparacion,
-            suggestion=sugerencia,
-            batch_loads=batch_loads(fila.occupancy_percent, fila.firing_count),
-            effective_status=self._effective(fila, ahora),
-            warnings=avisos,
-        )
+             lines=lineas,
+             kilns=comparacion,
+             suggestion=sugerencia,
+             batch_loads=batch_loads(fila.occupancy_percent, fila.firing_count),
+             effective_status=await self._effective(fila, ahora),
+             warnings=avisos,
+         )
 
     async def _compare_frozen(
         self, fila: V2FiringQuotation
@@ -1036,10 +1050,12 @@ class V2FiringQuotationService:
     async def cancel(
         self, quotation_id: int, reason: str | None, *, user: AuthenticatedUser
     ) -> tuple[V2FiringQuotation, bool]:
-        """Anula un borrador o una emitida. Idempotente; no borra nada."""
+        """Anula un borrador o una emitida que no paso a produccion."""
         fila = await self._locked(quotation_id)
         if fila.status is V2QuotationStatus.CANCELLED:
             return fila, False
+        if await self._handoff_of(fila.id) is not None:
+            raise V2FiringQuotationNotCancellableError()
         fila.status = V2QuotationStatus.CANCELLED
         fila.cancelled_at = await self.db_now()
         fila.cancelled_by = user.id
@@ -1048,6 +1064,41 @@ class V2FiringQuotationService:
         await self._session.flush()
         self._record(fila, user, EVENT_CANCELLED, was_issued=str(fila.issued_at is not None))
         return fila, True
+
+    async def send_to_production(
+        self, quotation_id: int, *, user: AuthenticatedUser
+    ) -> tuple[V2FiringProductionHandoff, bool]:
+        """Crea el puente de Solo Quema a produccion, una sola vez."""
+        fila = await self._locked(quotation_id)
+        existente = await self._handoff_of(fila.id)
+        if existente is not None:
+            return existente, False
+        if fila.status is not V2QuotationStatus.CONFIRMED:
+            raise V2FiringQuotationNotSendableError()
+        ahora = await self.db_now()
+        if fila.expires_at is None or ahora >= fila.expires_at:
+            raise V2FiringQuotationNotSendableError(
+                "La cotizacion esta vencida: dupliquela para actualizar precios",
+                code="V2_FQ_EXPIRED",
+            )
+        assert fila.commercial_fingerprint is not None
+        puente = V2FiringProductionHandoff(
+            v2_firing_quotation_id=fila.id,
+            commercial_fingerprint=fila.commercial_fingerprint,
+            created_by=user.id,
+            created_by_name=user.display_name,
+        )
+        try:
+            async with self._session.begin_nested():
+                self._session.add(puente)
+                await self._session.flush()
+        except IntegrityError:
+            ganador = await self._handoff_of(fila.id)
+            if ganador is None:
+                raise
+            return ganador, False
+        self._record(fila, user, EVENT_SENT_TO_PRODUCTION, handoff_id=str(puente.id))
+        return puente, True
 
     async def duplicate(
         self, quotation_id: int, *, user: AuthenticatedUser
@@ -1058,7 +1109,7 @@ class V2FiringQuotationService:
         al doble clic: si ya hay un borrador abierto nacido de ella, se devuelve.
         """
         original = await self._locked(quotation_id)
-        estado = self._effective(original, await self.db_now())
+        estado = await self._effective(original, await self.db_now())
         if estado not in (V2EffectiveStatus.EXPIRED, V2EffectiveStatus.CANCELLED):
             raise V2FiringQuotationNotDuplicableError()
         abierta = await self._open_duplicate(original.id)
@@ -1161,13 +1212,19 @@ class V2FiringQuotationService:
         assert instante is not None
         return instante
 
-    @staticmethod
-    def _effective(fila: V2FiringQuotation, ahora: datetime) -> V2EffectiveStatus:
+    async def _effective(self, fila: V2FiringQuotation, ahora: datetime) -> V2EffectiveStatus:
         return effective_status(
             status=fila.status.value,
             expires_at=fila.expires_at,
-            has_production_handoff=False,
+            has_production_handoff=await self._handoff_of(fila.id) is not None,
             now=ahora,
+        )
+
+    async def _handoff_of(self, quotation_id: int) -> V2FiringProductionHandoff | None:
+        return await self._session.scalar(
+            select(V2FiringProductionHandoff).where(
+                V2FiringProductionHandoff.v2_firing_quotation_id == quotation_id
+            )
         )
 
     async def _get(self, quotation_id: int) -> V2FiringQuotation:

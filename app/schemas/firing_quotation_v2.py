@@ -342,3 +342,17 @@ class V2FiringQuotationDuplicateOut(BaseModel):
     quotation: V2FiringQuotationOut
     created: bool
     warnings: list[str]
+
+
+class V2FiringProductionHandoffOut(BaseModel):
+    """Fase 010L. Puente de Solo Quema hacia produccion."""
+
+    id: int
+    v2_firing_quotation_id: int
+    created_at: datetime
+    created_by_name: str | None
+
+
+class V2FiringSendToProductionOut(BaseModel):
+    handoff: V2FiringProductionHandoffOut
+    created: bool
