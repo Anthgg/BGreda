@@ -188,10 +188,6 @@ class KilnBatchLayoutPlacementInput(BaseModel):
     x_cm: Decimal = Field(ge=0)
     y_cm: Decimal = Field(ge=0)
     rotation_degrees: int = Field(default=0)
-    piece_length_cm_snapshot: Decimal = Field(gt=0)
-    piece_width_cm_snapshot: Decimal = Field(gt=0)
-    piece_height_cm_snapshot: Decimal = Field(gt=0)
-    separation_cm_snapshot: Decimal = Field(default=Decimal(0), ge=0)
 
     @model_validator(mode="after")
     def _rotation_only_0_or_90(self) -> KilnBatchLayoutPlacementInput:
@@ -223,6 +219,7 @@ class KilnBatchLayoutUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_version: int = Field(ge=0)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
     levels: list[KilnBatchLayoutLevelInput] = Field(default_factory=list)
     placements: list[KilnBatchLayoutPlacementInput] = Field(default_factory=list)
 

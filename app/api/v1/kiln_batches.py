@@ -445,10 +445,6 @@ async def save_kiln_batch_layout(
             x_cm=p.x_cm,
             y_cm=p.y_cm,
             rotation_degrees=p.rotation_degrees,
-            piece_length_cm_snapshot=p.piece_length_cm_snapshot,
-            piece_width_cm_snapshot=p.piece_width_cm_snapshot,
-            piece_height_cm_snapshot=p.piece_height_cm_snapshot,
-            separation_cm_snapshot=p.separation_cm_snapshot,
         )
         for p in payload.placements
     ]
@@ -459,6 +455,7 @@ async def save_kiln_batch_layout(
             levels=levels,
             placements=placements,
             user=actor,
+            idempotency_key=payload.idempotency_key,
         )
     )
     await session.commit()

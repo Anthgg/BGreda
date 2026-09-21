@@ -87,9 +87,15 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_kiln_batch_layouts")),
         sa.UniqueConstraint("batch_id", name="uq_kiln_batch_layouts_batch_id"),
-        sa.CheckConstraint("kiln_width_cm_snapshot > 0", name="ck_kiln_batch_layouts_width_positive"),
-        sa.CheckConstraint("kiln_depth_cm_snapshot > 0", name="ck_kiln_batch_layouts_depth_positive"),
-        sa.CheckConstraint("kiln_height_cm_snapshot > 0", name="ck_kiln_batch_layouts_height_positive"),
+        sa.CheckConstraint(
+            "kiln_width_cm_snapshot > 0", name="ck_kiln_batch_layouts_width_positive"
+        ),
+        sa.CheckConstraint(
+            "kiln_depth_cm_snapshot > 0", name="ck_kiln_batch_layouts_depth_positive"
+        ),
+        sa.CheckConstraint(
+            "kiln_height_cm_snapshot > 0", name="ck_kiln_batch_layouts_height_positive"
+        ),
         sa.CheckConstraint("version >= 1", name="ck_kiln_batch_layouts_version_positive"),
     )
 
@@ -123,10 +129,16 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_kiln_batch_layout_levels")),
-        sa.UniqueConstraint("layout_id", "level_index", name="uq_kiln_batch_layout_levels_layout_level"),
-        sa.CheckConstraint("level_index >= 0", name="ck_kiln_batch_layout_levels_level_index_non_negative"),
+        sa.UniqueConstraint(
+            "layout_id", "level_index", name="uq_kiln_batch_layout_levels_layout_level"
+        ),
+        sa.CheckConstraint(
+            "level_index >= 0", name="ck_kiln_batch_layout_levels_level_index_non_negative"
+        ),
         sa.CheckConstraint("z_cm >= 0", name="ck_kiln_batch_layout_levels_z_non_negative"),
-        sa.CheckConstraint("usable_height_cm > 0", name="ck_kiln_batch_layout_levels_usable_height_positive"),
+        sa.CheckConstraint(
+            "usable_height_cm > 0", name="ck_kiln_batch_layout_levels_usable_height_positive"
+        ),
         sa.CheckConstraint(
             "plate_thickness_cm IS NULL OR plate_thickness_cm >= 0",
             name="ck_kiln_batch_layout_levels_plate_thickness_non_negative",
@@ -155,7 +167,12 @@ def upgrade() -> None:
         sa.Column("piece_length_cm_snapshot", sa.Numeric(18, 6), nullable=False),
         sa.Column("piece_width_cm_snapshot", sa.Numeric(18, 6), nullable=False),
         sa.Column("piece_height_cm_snapshot", sa.Numeric(18, 6), nullable=False),
-        sa.Column("separation_cm_snapshot", sa.Numeric(18, 6), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "separation_cm_snapshot",
+            sa.Numeric(18, 6),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -181,17 +198,47 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_kiln_batch_layout_placements")),
-        sa.CheckConstraint("quantity > 0", name="ck_kiln_batch_layout_placements_quantity_positive"),
-        sa.CheckConstraint("level_index >= 0", name="ck_kiln_batch_layout_placements_level_index_non_negative"),
-        sa.CheckConstraint("x_cm >= 0", name="ck_kiln_batch_layout_placements_x_non_negative"),
-        sa.CheckConstraint("y_cm >= 0", name="ck_kiln_batch_layout_placements_y_non_negative"),
-        sa.CheckConstraint("rotation_degrees IN (0, 90)", name="ck_kiln_batch_layout_placements_rotation_allowed"),
-        sa.CheckConstraint("piece_length_cm_snapshot > 0", name="ck_kiln_batch_layout_placements_length_positive"),
-        sa.CheckConstraint("piece_width_cm_snapshot > 0", name="ck_kiln_batch_layout_placements_width_positive"),
-        sa.CheckConstraint("piece_height_cm_snapshot > 0", name="ck_kiln_batch_layout_placements_height_positive"),
-        sa.CheckConstraint("separation_cm_snapshot >= 0", name="ck_kiln_batch_layout_placements_separation_non_negative"),
-        sa.CheckConstraint("group_index >= 0", name="ck_kiln_batch_layout_placements_group_index_non_negative"),
-        sa.CheckConstraint("unit_index IS NULL OR unit_index >= 0", name="ck_kiln_batch_layout_placements_unit_index_non_negative"),
+        sa.CheckConstraint(
+            "quantity > 0", name="ck_kiln_batch_layout_placements_quantity_positive"
+        ),
+        sa.CheckConstraint(
+            "level_index >= 0",
+            name="ck_kiln_batch_layout_placements_level_index_non_negative",
+        ),
+        sa.CheckConstraint(
+            "x_cm >= 0", name="ck_kiln_batch_layout_placements_x_non_negative"
+        ),
+        sa.CheckConstraint(
+            "y_cm >= 0", name="ck_kiln_batch_layout_placements_y_non_negative"
+        ),
+        sa.CheckConstraint(
+            "rotation_degrees IN (0, 90)",
+            name="ck_kiln_batch_layout_placements_rotation_allowed",
+        ),
+        sa.CheckConstraint(
+            "piece_length_cm_snapshot > 0",
+            name="ck_kiln_batch_layout_placements_length_positive",
+        ),
+        sa.CheckConstraint(
+            "piece_width_cm_snapshot > 0",
+            name="ck_kiln_batch_layout_placements_width_positive",
+        ),
+        sa.CheckConstraint(
+            "piece_height_cm_snapshot > 0",
+            name="ck_kiln_batch_layout_placements_height_positive",
+        ),
+        sa.CheckConstraint(
+            "separation_cm_snapshot >= 0",
+            name="ck_kiln_batch_layout_placements_separation_non_negative",
+        ),
+        sa.CheckConstraint(
+            "group_index >= 0",
+            name="ck_kiln_batch_layout_placements_group_index_non_negative",
+        ),
+        sa.CheckConstraint(
+            "unit_index IS NULL OR unit_index >= 0",
+            name="ck_kiln_batch_layout_placements_unit_index_non_negative",
+        ),
     )
     op.create_index(
         op.f("ix_kiln_batch_layout_placements_layout_id"),

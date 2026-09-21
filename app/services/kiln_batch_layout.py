@@ -57,9 +57,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
 from app.models.audit import AuditAction
+from app.models.firing_quotation_v2 import V2FiringQuotation, V2FiringQuotationLine
 from app.models.firings import Kiln
 from app.models.kiln_batches import (
     KILN_BATCH_EDITABLE,
+    InternalLoad,
+    InternalLoadLine,
     KilnBatch,
     KilnBatchAssignment,
     KilnBatchAssignmentStatus,
@@ -68,7 +71,9 @@ from app.models.kiln_batches import (
     KilnBatchLayoutPlacement,
     KilnBatchOperation,
     KilnBatchOperationKind,
+    KilnBatchSourceKind,
 )
+from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 
@@ -102,6 +107,15 @@ class KilnLayoutDimensionsMissingError(APIError):
         "El horno no tiene dimensiones utiles configuradas "
         "(usable_width_cm, usable_depth_cm, usable_height_cm). "
         "Configurelas antes de crear el layout fisico"
+    )
+
+
+class KilnLayoutPieceDimensionsMissingError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_PIECE_DIMENSIONS_MISSING"
+    message = (
+        "La asignación no cuenta con dimensiones geométricas suficientes "
+        "(largo, ancho, alto) en su fuente productiva para crear el layout físico"
     )
 
 
@@ -175,10 +189,6 @@ class PlacementSpec:
     x_cm: Decimal
     y_cm: Decimal
     rotation_degrees: int
-    piece_length_cm_snapshot: Decimal
-    piece_width_cm_snapshot: Decimal
-    piece_height_cm_snapshot: Decimal
-    separation_cm_snapshot: Decimal
 
 
 @dataclass(frozen=True)
@@ -195,11 +205,13 @@ class LayoutView:
 # ---------------------------------------------------------------------------
 
 def _layout_fingerprint(
+    expected_version: int,
     levels: list[LevelSpec],
     placements: list[PlacementSpec],
 ) -> str:
     """SHA-256 canonico del contenido del layout para idempotencia."""
     payload = {
+        "expected_version": expected_version,
         "levels": [
             {
                 "level_index": s.level_index,
@@ -225,12 +237,17 @@ def _layout_fingerprint(
                 "x_cm": str(p.x_cm),
                 "y_cm": str(p.y_cm),
                 "rotation_degrees": p.rotation_degrees,
-                "piece_length_cm_snapshot": str(p.piece_length_cm_snapshot),
-                "piece_width_cm_snapshot": str(p.piece_width_cm_snapshot),
-                "piece_height_cm_snapshot": str(p.piece_height_cm_snapshot),
-                "separation_cm_snapshot": str(p.separation_cm_snapshot),
             }
-            for p in sorted(placements, key=lambda x: (x.batch_assignment_id, x.group_index))
+            for p in sorted(
+                placements,
+                key=lambda x: (
+                    x.batch_assignment_id,
+                    x.group_index,
+                    x.level_index,
+                    str(x.x_cm),
+                    str(x.y_cm),
+                ),
+            )
         ],
     }
     texto = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -350,6 +367,159 @@ class KilnBatchLayoutService:
         return await self._load_full_layout(layout)
 
     # ------------------------------------------------------------------
+    # Resolución de Geometría de Asignaciones (Fase 010M)
+    # ------------------------------------------------------------------
+
+    async def resolve_assignments_geometry(
+        self,
+        assignments: list[KilnBatchAssignment],
+    ) -> dict[int, tuple[Decimal, Decimal, Decimal, Decimal]]:
+        """Resuelve la geometría (largo, ancho, alto, separación) de asignaciones.
+
+        Realiza carga por lotes para evitar consultas N+1.
+        Devuelve dict: assignment_id -> (length_cm, width_cm, height_cm, separation_cm).
+        Lanza KilnLayoutPieceDimensionsMissingError si faltan dimensiones o son <= 0.
+        """
+        result: dict[int, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
+        if not assignments:
+            return result
+
+        # 1. V2_QUOTATION
+        v2_asgns = [
+            a
+            for a in assignments
+            if a.source_kind == KilnBatchSourceKind.V2_QUOTATION
+            and a.v2_quotation_product_id is not None
+        ]
+        if v2_asgns:
+            v2_product_ids = [a.v2_quotation_product_id for a in v2_asgns]
+            v2_rows = (
+                await self._session.execute(
+                    select(
+                        V2QuotationProduct.id,
+                        V2QuotationProduct.length_cm,
+                        V2QuotationProduct.width_cm,
+                        V2QuotationProduct.height_cm,
+                        V2Quotation.piece_separation_cm_snapshot,
+                    )
+                    .join(V2Quotation, V2Quotation.id == V2QuotationProduct.v2_quotation_id)
+                    .where(V2QuotationProduct.id.in_(v2_product_ids))
+                )
+            ).all()
+            v2_map = {row[0]: (row[1], row[2], row[3], row[4]) for row in v2_rows}
+            for a in v2_asgns:
+                assert a.v2_quotation_product_id is not None
+                if a.v2_quotation_product_id not in v2_map:
+                    raise KilnLayoutPieceDimensionsMissingError()
+                length, width, height, sep = v2_map[a.v2_quotation_product_id]
+                if (
+                    length is None
+                    or width is None
+                    or height is None
+                    or length <= 0
+                    or width <= 0
+                    or height <= 0
+                ):
+                    raise KilnLayoutPieceDimensionsMissingError()
+                result[a.id] = (length, width, height, sep if sep is not None else Decimal(0))
+
+        # 2. FIRING_V2
+        fq_asgns = [
+            a
+            for a in assignments
+            if a.source_kind == KilnBatchSourceKind.FIRING_V2
+            and a.v2_firing_quotation_line_id is not None
+        ]
+        if fq_asgns:
+            fq_line_ids = [a.v2_firing_quotation_line_id for a in fq_asgns]
+            fq_rows = (
+                await self._session.execute(
+                    select(
+                        V2FiringQuotationLine.id,
+                        V2FiringQuotationLine.length_cm,
+                        V2FiringQuotationLine.width_cm,
+                        V2FiringQuotationLine.height_cm,
+                        V2FiringQuotation.piece_separation_cm,
+                    )
+                    .join(
+                        V2FiringQuotation,
+                        V2FiringQuotation.id == V2FiringQuotationLine.v2_firing_quotation_id,
+                    )
+                    .where(V2FiringQuotationLine.id.in_(fq_line_ids))
+                )
+            ).all()
+            fq_map = {row[0]: (row[1], row[2], row[3], row[4]) for row in fq_rows}
+            for a in fq_asgns:
+                assert a.v2_firing_quotation_line_id is not None
+                if a.v2_firing_quotation_line_id not in fq_map:
+                    raise KilnLayoutPieceDimensionsMissingError()
+                length, width, height, sep = fq_map[a.v2_firing_quotation_line_id]
+                if (
+                    length is None
+                    or width is None
+                    or height is None
+                    or length <= 0
+                    or width <= 0
+                    or height <= 0
+                ):
+                    raise KilnLayoutPieceDimensionsMissingError()
+                result[a.id] = (length, width, height, sep if sep is not None else Decimal(0))
+
+        # 3. INTERNAL
+        int_asgns = [
+            a
+            for a in assignments
+            if a.source_kind == KilnBatchSourceKind.INTERNAL
+            and a.internal_load_line_id is not None
+        ]
+        if int_asgns:
+            int_line_ids = [a.internal_load_line_id for a in int_asgns]
+            int_rows = (
+                await self._session.execute(
+                    select(
+                        InternalLoadLine.id,
+                        InternalLoadLine.length_cm,
+                        InternalLoadLine.width_cm,
+                        InternalLoadLine.height_cm,
+                        InternalLoad.piece_separation_cm,
+                    )
+                    .join(InternalLoad, InternalLoad.id == InternalLoadLine.load_id)
+                    .where(InternalLoadLine.id.in_(int_line_ids))
+                )
+            ).all()
+            int_map = {row[0]: (row[1], row[2], row[3], row[4]) for row in int_rows}
+            for a in int_asgns:
+                assert a.internal_load_line_id is not None
+                if a.internal_load_line_id not in int_map:
+                    raise KilnLayoutPieceDimensionsMissingError()
+                length, width, height, sep = int_map[a.internal_load_line_id]
+                if (
+                    length is None
+                    or width is None
+                    or height is None
+                    or length <= 0
+                    or width <= 0
+                    or height <= 0
+                ):
+                    raise KilnLayoutPieceDimensionsMissingError()
+                result[a.id] = (length, width, height, sep if sep is not None else Decimal(0))
+
+        # Verificar que todas las asignaciones tienen geometría válida
+        for a in assignments:
+            if a.id not in result:
+                raise KilnLayoutPieceDimensionsMissingError()
+
+        return result
+
+    async def resolve_assignment_geometry(
+        self,
+        assignment: KilnBatchAssignment,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        """Resuelve la geometría para una sola asignación."""
+        mapping = await self.resolve_assignments_geometry([assignment])
+        return mapping[assignment.id]
+
+    # ------------------------------------------------------------------
     # PUT
     # ------------------------------------------------------------------
 
@@ -372,9 +542,9 @@ class KilnBatchLayoutService:
         expected_version > 0  → actualizacion; debe coincidir con version actual.
         """
         # ── Idempotencia ──────────────────────────────────────────────────
+        huella = _layout_fingerprint(expected_version, levels, placements)
         if idempotency_key:
             await self._lock_idempotency(idempotency_key)
-            huella = _layout_fingerprint(levels, placements)
             operacion_previa = await self._session.scalar(
                 select(KilnBatchOperation).where(
                     KilnBatchOperation.idempotency_key == idempotency_key
@@ -384,6 +554,7 @@ class KilnBatchLayoutService:
                 if (
                     operacion_previa.kind is not KilnBatchOperationKind.LAYOUT
                     or operacion_previa.payload_fingerprint != huella
+                    or operacion_previa.batch_id != batch_id
                 ):
                     raise KilnLayoutIdempotencyKeyReusedError()
                 # Reintento identico: devolver el estado actual.
@@ -391,8 +562,6 @@ class KilnBatchLayoutService:
                 if layout is None:
                     raise KilnLayoutNotFoundError()
                 return await self._load_full_layout(layout)
-        else:
-            huella = _layout_fingerprint(levels, placements)
 
         # ── Bloquear la hornada ────────────────────────────────────────────
         batch = await self._get_batch(batch_id, lock=True)
@@ -427,6 +596,7 @@ class KilnBatchLayoutService:
 
         # ── Validar que todos los assignments pertenecen a este batch ──────
         assignment_ids = {p.batch_assignment_id for p in placements}
+        geometry_by_assignment: dict[int, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
         if assignment_ids:
             active_assignments: dict[int, KilnBatchAssignment] = {}
             rows = (
@@ -455,6 +625,11 @@ class KilnBatchLayoutService:
                 asgn = active_assignments[asgn_id]
                 if total > asgn.quantity:
                     raise KilnLayoutQuantityExceededError()
+
+            # Derivar geometrías y separación desde la fuente productiva
+            geometry_by_assignment = await self.resolve_assignments_geometry(
+                list(active_assignments.values())
+            )
 
         # ── Persistir en una sola transaccion ─────────────────────────────
         if existing_layout is None:
@@ -509,8 +684,11 @@ class KilnBatchLayoutService:
                 )
             )
 
-        # Insertar los nuevos placements.
+        # Insertar los nuevos placements con dimensiones congeladas desde la fuente productiva.
         for placement_spec in placements:
+            length, width, height, sep = geometry_by_assignment[
+                placement_spec.batch_assignment_id
+            ]
             self._session.add(
                 KilnBatchLayoutPlacement(
                     layout_id=layout.id,
@@ -522,10 +700,10 @@ class KilnBatchLayoutService:
                     x_cm=placement_spec.x_cm,
                     y_cm=placement_spec.y_cm,
                     rotation_degrees=placement_spec.rotation_degrees,
-                    piece_length_cm_snapshot=placement_spec.piece_length_cm_snapshot,
-                    piece_width_cm_snapshot=placement_spec.piece_width_cm_snapshot,
-                    piece_height_cm_snapshot=placement_spec.piece_height_cm_snapshot,
-                    separation_cm_snapshot=placement_spec.separation_cm_snapshot,
+                    piece_length_cm_snapshot=length,
+                    piece_width_cm_snapshot=width,
+                    piece_height_cm_snapshot=height,
+                    separation_cm_snapshot=sep,
                 )
             )
 

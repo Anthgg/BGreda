@@ -57,10 +57,11 @@ def _downgrade() -> str:
     return _codigo().split("def downgrade()")[1]
 
 
-def test_0040_es_la_unica_cabeza_y_cuelga_de_0039() -> None:
+def test_0040_cuelga_de_0039_y_la_cabeza_es_0041() -> None:
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0040"]
+    assert list(script.get_heads()) == ["0041"]
     assert script.get_revision("0040").down_revision == "0039"
+    assert script.get_revision("0041").down_revision == "0040"
 
 
 def test_el_upgrade_no_borra_datos() -> None:
@@ -152,14 +153,18 @@ def test_ningun_nombre_de_restriccion_pasa_de_63_caracteres() -> None:
         V2FiringProductionHandoff.__table__,
         ProductionOrder.__table__,
     ):
-        for restriccion in tabla.constraints:
+        for restriccion in tabla.constraints:  # type: ignore[attr-defined]
             assert restriccion.name is None or len(str(restriccion.name)) <= 63, restriccion.name
-        for indice in tabla.indexes:
+        for indice in tabla.indexes:  # type: ignore[attr-defined]
             assert indice.name is None or len(str(indice.name)) <= 63, indice.name
 
 
 def test_la_garantia_de_capacidad_esta_en_la_base() -> None:
-    nombres = {str(c.name) for c in KilnBatch.__table__.constraints if c.name is not None}
+    nombres = {
+        str(c.name)
+        for c in KilnBatch.__table__.constraints  # type: ignore[attr-defined]
+        if c.name is not None
+    }
     assert "ck_kiln_batches_assigned_within_capacity" in nombres
     assert "ck_kiln_batches_assigned_non_negative" in nombres
     assert "ck_kiln_batches_assigned_within_capacity" in _codigo()
