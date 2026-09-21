@@ -78,6 +78,7 @@ def _settings_out(
         illustration_daily_rate=fila.illustration_daily_rate,
         illustration_pieces_per_workday=fila.illustration_pieces_per_workday,
         piece_separation_cm=fila.piece_separation_cm,
+        firing_service_factor_default=fila.firing_service_factor_default,
         illustration_hourly_rate=(
             fila.illustration_daily_rate / horas if horas > Decimal(0) else Decimal(0)
         ),

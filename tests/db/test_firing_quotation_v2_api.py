@@ -381,6 +381,95 @@ class TestPiezas:
         assert dec(respuesta.json()["total_volume_cm3"]) == Decimal(0)
 
 
+class TestLimitesYTarifas:
+    """Revision de Codex en el PR: tres casos que devolvian el error equivocado."""
+
+    async def test_un_pedido_que_no_cabe_en_la_columna_se_rechaza_con_422(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Un volumen imposible es una entrada invalida, no un 500.
+
+        El volumen se guarda en NUMERIC(18, 6): doce digitos enteros. Una pieza
+        de 10 m de lado por un millon de unidades pasa de largo ese techo, y
+        antes el desbordamiento lo levantaba PostgreSQL al vaciar la sesion: un
+        500 sin explicacion sobre una peticion que el contrato habia aceptado.
+        """
+        ids = await preparar(api, admin_csrf)
+        creada = await _post(api, admin_csrf, FQ, {"customer_id": ids["cliente"]})
+        respuesta = await api.post(
+            f"{FQ}/{creada['id']}/lines",
+            json={
+                "product_name": "Imposible",
+                "quantity": 1_000_000,
+                "length_cm": "1000",
+                "width_cm": "1000",
+                "height_cm": "1000",
+            },
+            headers=h(admin_csrf),
+        )
+        assert respuesta.status_code == 422, respuesta.text
+        assert "demasiado grande" in respuesta.text
+
+    async def test_una_tarifa_puesta_en_cero_no_es_una_tarifa_que_falta(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Una quema de cortesia con vidriado cobrado SI se emite.
+
+        El contrato de tarifas por horno admite el cero, asi que un total de
+        quema en cero puede significar dos cosas muy distintas: que no hay
+        tarifas configuradas o que la casa decidio no cobrar la quema. Deducirlo
+        del importe confundia una con otra y bloqueaba la emision aunque todo
+        estuviera puesto y el vidriado se cobrara aparte.
+        """
+        ids = await preparar(api, admin_csrf)
+        for tipo in ("LOW", "HIGH"):
+            await _put(
+                api,
+                admin_csrf,
+                f"{V2_SETTINGS}/kiln-rates/{ids['chico']}/{tipo}",
+                {"gas_cost": "35", "external_rate": "0", "student_rate": "0"},
+            )
+        ctz = await cotizacion_del_excel(api, admin_csrf, ids)
+        ctz = await _put(
+            api,
+            admin_csrf,
+            f"{FQ}/{ctz['id']}",
+            {"kiln_id": ids["chico"], "glaze_enabled": True, "glaze_grams": "500"},
+        )
+        assert dec(ctz["firing_commercial_total"]) == Decimal(0)
+        assert dec(ctz["glaze_material_cost"]) > Decimal(0)
+        resumen = (await api.get(f"{FQ}/{ctz['id']}/preview")).json()
+        codigos = {bloqueo["code"] for bloqueo in resumen["blockers"]}
+        assert "V2_FQ_RATES_MISSING" not in codigos, resumen["blockers"]
+        assert resumen["can_confirm"] is True, resumen["blockers"]
+
+    async def test_el_factor_por_defecto_de_quema_se_lee_y_se_cambia_por_la_api(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """Sin esto la casa se quedaba clavada en x1,00 salvo tocando la base."""
+        ids = await preparar(api, admin_csrf)
+        ajustes = (await api.get(V2_SETTINGS)).json()["settings"]
+        assert dec(ajustes["firing_service_factor_default"]) == Decimal("1.00")
+        await _put(
+            api,
+            admin_csrf,
+            V2_SETTINGS,
+            {"expected_version": ajustes["version"], "firing_service_factor_default": "1.40"},
+        )
+        vigentes = (await api.get(V2_SETTINGS)).json()["settings"]
+        assert dec(vigentes["firing_service_factor_default"]) == Decimal("1.40")
+        # Y un servicio nuevo nace con el, no con el x1,00 de la migracion.
+        creada = await _post(api, admin_csrf, FQ, {"customer_id": ids["cliente"]})
+        assert dec(creada["factor"]) == Decimal("1.40")
+        # El rango sigue siendo el del servicio: el x3 de fabricacion no entra.
+        rechazo = await api.put(
+            V2_SETTINGS,
+            json={"expected_version": vigentes["version"], "firing_service_factor_default": "3"},
+            headers=h(admin_csrf),
+        )
+        assert rechazo.status_code == 422, rechazo.text
+
+
 class TestVidriado:
     async def test_apagado_no_cuesta_nada(self, api: httpx.AsyncClient, admin_csrf: str) -> None:
         ids = await preparar(api, admin_csrf)

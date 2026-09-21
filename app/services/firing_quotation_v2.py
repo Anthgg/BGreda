@@ -45,7 +45,12 @@ from app.core.firing_quotation_v2 import (
     service_price,
     volume_shares,
 )
-from app.core.quoter_v2_firing import FiringMathError, piece_volume, total_volume
+from app.core.quoter_v2_firing import (
+    MAX_VOLUME_CM3,
+    FiringMathError,
+    piece_volume,
+    total_volume,
+)
 from app.core.quoter_v2_labor import (
     LaborMathError,
     hourly_rate,
@@ -226,6 +231,20 @@ class FiringQuotationState:
     batch_loads: tuple[Decimal, ...]
     effective_status: V2EffectiveStatus
     warnings: list[str] = field(default_factory=list)
+
+
+def _faltan_tarifas(fila: V2FiringQuotation) -> bool:
+    """Si a algun ciclo encendido le falta su tarifa.
+
+    Se mira el SNAPSHOT, no el importe. Una tarifa puesta a cero es legitima
+    —el contrato de tarifas por horno admite `ge=0`, y hay quemas de cortesia—
+    y da un total de cero sin que falte nada. Deducirlo del importe bloqueaba
+    una quema gratis con vidriado cobrado: todo estaba configurado y aun asi
+    no se dejaba emitir. Lo encontro la revision de Codex en el PR.
+    """
+    if fila.low_fire_enabled and fila.commercial_rate_low_snapshot is None:
+        return True
+    return fila.high_fire_enabled and fila.commercial_rate_high_snapshot is None
 
 
 @dataclass(frozen=True)
@@ -654,6 +673,12 @@ class V2FiringQuotationService:
         ):
             linea.volume_share_percent = cuota
         volumen = sum((linea.total_volume_cm3 for linea in lineas), ZERO)
+        # Cada linea cabe por separado; la suma de muchas puede no caber.
+        if volumen > MAX_VOLUME_CM3:
+            raise V2FiringQuotationInputInvalid(
+                f"El volumen total del pedido es demasiado grande ({volumen} cm3): "
+                f"el maximo es {MAX_VOLUME_CM3} cm3. Revise medidas y cantidades."
+            )
         fila.total_volume_cm3 = volumen
         if not lineas:
             avisos.append(WARN_NO_LINES)
@@ -1296,7 +1321,7 @@ class V2FiringQuotationService:
                 bloqueos.append(Blocker(BLOCK_KILN_INACTIVE))
         if not fila.low_fire_enabled and not fila.high_fire_enabled:
             bloqueos.append(Blocker(BLOCK_NO_CYCLE))
-        elif fila.kiln_id is not None and fila.firing_commercial_total <= ZERO and lineas:
+        elif fila.kiln_id is not None and lineas and _faltan_tarifas(fila):
             bloqueos.append(Blocker(BLOCK_RATES_MISSING))
         if fila.glaze_enabled and (
             fila.glaze_grams <= ZERO or fila.glaze_cost_per_gram_snapshot is None

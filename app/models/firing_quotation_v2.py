@@ -49,7 +49,11 @@ from app.core.precision import (
     quantity_numeric,
     unit_cost_numeric,
 )
-from app.core.quoter_v2_config import DEFAULT_FIRING_SERVICE_FACTOR
+from app.core.quoter_v2_config import (
+    DEFAULT_FIRING_SERVICE_FACTOR,
+    FIRING_QUOTATION_FACTOR_MAX,
+    FIRING_QUOTATION_FACTOR_MIN,
+)
 from app.db.base import Base, TimestampMixin
 from app.db.types import StrEnumType
 from app.models.quoter_v2 import (
@@ -58,11 +62,6 @@ from app.models.quoter_v2 import (
     V2FiringMode,
     V2QuotationStatus,
 )
-
-#: Rango CERRADO del factor Solo Quema (hoja «Configuracion», A15:C15). No es
-#: configuracion: es la regla del servicio. El x2..x10 de fabricacion no aplica.
-FIRING_QUOTATION_FACTOR_MIN = Decimal("1.00")
-FIRING_QUOTATION_FACTOR_MAX = Decimal("2.00")
 
 
 class V2GlazeCostSource(StrEnum):
