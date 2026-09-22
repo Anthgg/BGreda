@@ -29,6 +29,8 @@ from app.schemas.kiln_batches import (
     KilnBatchLayoutLevelOut,
     KilnBatchLayoutOut,
     KilnBatchLayoutPlacementOut,
+    KilnBatchLayoutSuggestIn,
+    KilnBatchLayoutSuggestionOut,
     KilnBatchLayoutUpdate,
     KilnBatchMoveIn,
     KilnBatchMoveOut,
@@ -36,8 +38,11 @@ from app.schemas.kiln_batches import (
     KilnBatchPage,
     KilnBatchSuggestionOut,
     KilnBatchUpdateIn,
+    SuggestedPlacementOut,
+    UnplacedPieceOut,
 )
 from app.services.kiln_batch_layout import (
+    LayoutSuggestionView,
     LayoutView,
     LevelSpec,
     PlacementSpec,
@@ -463,4 +468,81 @@ async def save_kiln_batch_layout(
     )
     await session.commit()
     return result
+
+
+def _suggestion_out(view: LayoutSuggestionView) -> KilnBatchLayoutSuggestionOut:
+    return KilnBatchLayoutSuggestionOut(
+        batch_id=view.batch_id,
+        base_version=view.base_version,
+        total_pending=view.total_pending,
+        suggested_count=view.suggested_count,
+        unplaced_count=view.unplaced_count,
+        levels_used=view.levels_used,
+        suggested_placements=[
+            SuggestedPlacementOut(
+                batch_assignment_id=p.batch_assignment_id,
+                group_index=p.group_index,
+                unit_index=p.unit_index,
+                quantity=p.quantity,
+                level_index=p.level_index,
+                x_cm=p.x_cm,
+                y_cm=p.y_cm,
+                rotation_degrees=p.rotation_degrees,
+                piece_length_cm_snapshot=p.piece_length_cm_snapshot,
+                piece_width_cm_snapshot=p.piece_width_cm_snapshot,
+                piece_height_cm_snapshot=p.piece_height_cm_snapshot,
+                separation_cm_snapshot=p.separation_cm_snapshot,
+            )
+            for p in view.suggested_placements
+        ],
+        unplaced_pieces=[
+            UnplacedPieceOut(
+                batch_assignment_id=u.batch_assignment_id,
+                unit_index=u.unit_index,
+                quantity=u.quantity,
+                reason=u.reason,
+            )
+            for u in view.unplaced_pieces
+        ],
+    )
+
+
+@router.post("/{batch_id}/layout/suggest", response_model=KilnBatchLayoutSuggestionOut)
+async def suggest_kiln_batch_layout(
+    batch_id: int,
+    layout_service: KilnBatchLayoutServiceDep,
+    actor: WorkshopUserDep,
+    payload: KilnBatchLayoutSuggestIn | None = None,
+) -> KilnBatchLayoutSuggestionOut:
+    """Calcula una sugerencia de acomodo físico para piezas pendientes.
+
+    - Solo permitido cuando la hornada está en estado PLANNED.
+    - NO persiste nada en la base de datos.
+    - NO incrementa la versión ni muta los placements existentes.
+    - Si se especifica `expected_version`, valida coincidencia con la versión actual (409).
+    """
+    expected_version = payload.expected_version if payload is not None else None
+    candidate_levels = (
+        [
+            LevelSpec(
+                level_index=lvl.level_index,
+                name=lvl.name,
+                z_cm=lvl.z_cm,
+                usable_height_cm=lvl.usable_height_cm,
+                plate_label=lvl.plate_label,
+                plate_thickness_cm=lvl.plate_thickness_cm,
+            )
+            for lvl in payload.levels
+        ]
+        if payload is not None and payload.levels is not None
+        else None
+    )
+    return _suggestion_out(
+        await layout_service.suggest_layout(
+            batch_id,
+            expected_version=expected_version,
+            candidate_levels=candidate_levels,
+        )
+    )
+
 

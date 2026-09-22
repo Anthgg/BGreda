@@ -273,3 +273,59 @@ class KilnBatchLayoutOut(BaseModel):
     placements: list[KilnBatchLayoutPlacementOut]
     updated_at: datetime
 
+
+# ---------------------------------------------------------------------------
+# Fase 010M - M3: Sugerencia de acomodo físico (Auto-packing)
+# ---------------------------------------------------------------------------
+
+class KilnBatchLayoutSuggestIn(BaseModel):
+    """Cuerpo opcional del POST /kiln-batches/{batch_id}/layout/suggest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int | None = Field(default=None, ge=0)
+    levels: list[KilnBatchLayoutLevelInput] | None = None
+
+
+class SuggestedPlacementOut(BaseModel):
+    """Un placement sugerido por el motor de auto-packing."""
+
+    batch_assignment_id: int
+    group_index: int
+    unit_index: int | None
+    quantity: int = 1
+    level_index: int
+    x_cm: Decimal
+    y_cm: Decimal
+    rotation_degrees: int
+    piece_length_cm_snapshot: Decimal
+    piece_width_cm_snapshot: Decimal
+    piece_height_cm_snapshot: Decimal
+    separation_cm_snapshot: Decimal
+
+
+class UnplacedPieceOut(BaseModel):
+    """Una pieza/unidad que no pudo ser ubicada en la sugerencia."""
+
+    batch_assignment_id: int
+    unit_index: int | None
+    quantity: int = 1
+    reason: str
+
+
+class KilnBatchLayoutSuggestionOut(BaseModel):
+    """Respuesta completa del POST /kiln-batches/{batch_id}/layout/suggest.
+
+    Solo incluye información operacional. Nunca precios, IGV, factor ni margen.
+    """
+
+    batch_id: int
+    base_version: int
+    total_pending: int
+    suggested_count: int
+    unplaced_count: int
+    levels_used: list[int]
+    suggested_placements: list[SuggestedPlacementOut]
+    unplaced_pieces: list[UnplacedPieceOut]
+
+

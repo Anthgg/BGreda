@@ -615,3 +615,131 @@ async def test_layout_api_atomicidad_error_no_incrementa_version(
     assert res_get.status_code == 200
     assert res_get.json()["version"] == 1
     assert len(res_get.json()["placements"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Sugerencia de Layout M3 en API
+# ---------------------------------------------------------------------------
+
+async def test_suggest_layout_api_ciclo_y_no_mutacion(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """POST suggest devuelve sugerencia sin mutar el layout persistido en DB."""
+    kiln = await _kiln_with_dims(db_session, "K-API-SUG", width=Decimal("60"), depth=Decimal("50"))
+    batch = await _batch(db_session, kiln, "HOR-API-SUG")
+    load, line = await _load(db_session, "L-API-SUG", quantity=5, unit_volume=Decimal("50"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
+    ]
+    # Guardar versión 1 con 1 placement
+    res_init = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": [
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 0,
+                    "unit_index": None,
+                    "quantity": 1,
+                    "level_index": 0,
+                    "x_cm": "0.0",
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert res_init.status_code == 200
+    assert res_init.json()["version"] == 1
+
+    # POST suggest para las 4 piezas pendientes
+    res_sug = await api.post(
+        f"{KILN_BATCHES}/{batch.id}/layout/suggest",
+        json={"expected_version": 1},
+        headers=head(admin_csrf),
+    )
+    assert res_sug.status_code == 200, res_sug.text
+    sug_body = res_sug.json()
+    assert sug_body["batch_id"] == batch.id
+    assert sug_body["base_version"] == 1
+    assert sug_body["total_pending"] == 4
+    assert sug_body["suggested_count"] == 4
+    assert sug_body["unplaced_count"] == 0
+    assert len(sug_body["suggested_placements"]) == 4
+
+    # Privacidad: verificar que ningún campo de precio/margen/IGV esté presente
+    for forbidden in ("price", "subtotal", "igv", "margin", "factor", "ganancia"):
+        assert forbidden not in str(sug_body).lower()
+
+    # GET layout confirma NO MUTACIÓN: versión sigue siendo 1 y hay exactamente 1 placement
+    res_get = await api.get(f"{KILN_BATCHES}/{batch.id}/layout")
+    assert res_get.status_code == 200
+    get_body = res_get.json()
+    assert get_body["version"] == 1
+    assert len(get_body["placements"]) == 1
+
+
+async def test_suggest_layout_api_expected_version_invalida_409(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """POST suggest con expected_version obsoleta devuelve 409 KILN_LAYOUT_VERSION_CONFLICT."""
+    kiln = await _kiln_with_dims(db_session, "K-API-SUG-ST")
+    batch = await _batch(db_session, kiln, "HOR-API-SUG-ST")
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
+    ]
+    # Crear versión 1
+    res_init = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={"expected_version": 0, "levels": levels_payload, "placements": []},
+        headers=head(admin_csrf),
+    )
+    assert res_init.status_code == 200
+
+    # Request con expected_version=0 cuando actual es 1
+    res = await api.post(
+        f"{KILN_BATCHES}/{batch.id}/layout/suggest",
+        json={"expected_version": 0},
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_VERSION_CONFLICT"
+
+
+async def test_suggest_layout_api_rechaza_batch_no_planned_409(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """POST suggest en batch iniciado devuelve 409 KILN_LAYOUT_NOT_EDITABLE."""
+    kiln = await _kiln_with_dims(db_session, "K-API-SUG-RO")
+    batch = await _batch(db_session, kiln, "HOR-API-SUG-RO")
+    batch.status = KilnBatchStatus.STARTED
+    batch.started_at = datetime.now(UTC)
+    await db_session.commit()
+
+    res = await api.post(
+        f"{KILN_BATCHES}/{batch.id}/layout/suggest",
+        json={"expected_version": 0},
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_NOT_EDITABLE"
+

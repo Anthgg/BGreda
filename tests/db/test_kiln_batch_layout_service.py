@@ -1489,3 +1489,155 @@ async def test_layout_service_atomicidad_rechazo_no_altera_version(
     assert got.layout.version == 1
     assert len(got.placements) == 1
     assert got.placements[0].x_cm == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Sugerencia de Layout M3 en Servicio
+# ---------------------------------------------------------------------------
+
+async def test_suggest_layout_service_con_placements_existentes(
+    db_session: AsyncSession,
+) -> None:
+    """Sugerencia empaqueta solo piezas pendientes respetando obstáculos existentes."""
+    kiln = await _kiln_with_dims(db_session, "K-SUG-1", width=Decimal("60"), depth=Decimal("50"))
+    batch = await _batch(db_session, kiln, "HOR-SUG-1")
+    load, line = await _load(db_session, "L-SUG-1", quantity=10, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=10)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # Guardar 6 placements ya colocados
+    placements_existentes = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=i,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal(f"{(i - 1) * 10}"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        )
+        for i in range(1, 7)
+    ]
+    await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=placements_existentes,
+        user=USER,
+    )
+
+    # Solicitar sugerencia para las 4 piezas pendientes
+    suggestion = await service.suggest_layout(batch.id, expected_version=1)
+
+    assert suggestion.batch_id == batch.id
+    assert suggestion.base_version == 1
+    assert suggestion.total_pending == 4
+    assert suggestion.suggested_count == 4
+    assert suggestion.unplaced_count == 0
+    assert len(suggestion.suggested_placements) == 4
+
+    # Verificar que el layout persistido no cambió (sin mutación)
+    layout_db = await service.get_layout(batch.id)
+    assert layout_db.layout.version == 1
+    assert len(layout_db.placements) == 6
+
+
+async def test_suggest_layout_service_con_version_obsoleta_409(
+    db_session: AsyncSession,
+) -> None:
+    """Si expected_version no coincide con el layout actual, lanza 409."""
+    kiln = await _kiln_with_dims(db_session, "K-SUG-STALE")
+    batch = await _batch(db_session, kiln, "HOR-SUG-STALE")
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="N0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=[],
+        user=USER,
+    )
+
+    with pytest.raises(KilnLayoutVersionConflictError):
+        await service.suggest_layout(batch.id, expected_version=0)
+
+
+async def test_suggest_layout_service_estado_no_editable_409(
+    db_session: AsyncSession,
+) -> None:
+    """Si la hornada está en STARTED/COMPLETED/CANCELLED, suggest lanza 409."""
+    kiln = await _kiln_with_dims(db_session, "K-SUG-RO")
+    batch = await _batch(db_session, kiln, "HOR-SUG-RO")
+    batch.status = KilnBatchStatus.STARTED
+    batch.started_at = datetime.now(UTC)
+    await db_session.flush()
+
+    service = KilnBatchLayoutService(db_session)
+    with pytest.raises(KilnLayoutNotEditableError):
+        await service.suggest_layout(batch.id)
+
+
+async def test_suggest_layout_service_sin_layout_previo_con_candidate_levels(
+    db_session: AsyncSession,
+) -> None:
+    """Sin layout en DB pero con candidate_levels en request, devuelve sugerencia con version 0."""
+    kiln = await _kiln_with_dims(db_session, "K-SUG-NEW", width=Decimal("60"), depth=Decimal("50"))
+    batch = await _batch(db_session, kiln, "HOR-SUG-NEW")
+    load, line = await _load(db_session, "L-SUG-NEW", quantity=2, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    await _assign_internal(db_session, batch, load, line, quantity=2)
+
+    service = KilnBatchLayoutService(db_session)
+    candidate_levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+
+    suggestion = await service.suggest_layout(
+        batch.id,
+        expected_version=0,
+        candidate_levels=candidate_levels,
+    )
+    assert suggestion.base_version == 0
+    assert suggestion.total_pending == 2
+    assert suggestion.suggested_count == 2
+
+    # GET layout sigue devolviendo 404 porque no se persistió nada
+    with pytest.raises(KilnLayoutNotFoundError):
+        await service.get_layout(batch.id)
+

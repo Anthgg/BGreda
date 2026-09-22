@@ -77,9 +77,17 @@ from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
 from app.services.kiln_layout_geometry import (
+    BoundingBox2D,
     LevelGeometry,
     PlacementGeometry,
+    get_reserved_footprint,
     validate_layout_geometry,
+)
+from app.services.kiln_layout_packing import (
+    PieceToPack,
+    SuggestedPlacement,
+    UnplacedPiece,
+    suggest_layout_packing,
 )
 
 KILN_LAYOUT_ENTITY = "kiln_batch_layout"
@@ -248,6 +256,20 @@ class LayoutView:
     placed_quantity: int
     pending_quantity: int
     invalid_quantity: int = 0
+
+
+@dataclass(frozen=True)
+class LayoutSuggestionView:
+    """Resultado de la sugerencia de layout lista para serializar."""
+
+    batch_id: int
+    base_version: int
+    total_pending: int
+    suggested_count: int
+    unplaced_count: int
+    levels_used: list[int]
+    suggested_placements: list[SuggestedPlacement]
+    unplaced_pieces: list[UnplacedPiece]
 
 
 # ---------------------------------------------------------------------------
@@ -866,8 +888,165 @@ class KilnBatchLayoutService:
             user,
             action,
             batch_code=batch.code,
-            metadata={"version": new_version, "levels": len(levels), "placements": len(placements)},
+            metadata={
+                "version": new_version,
+                "levels": len(levels),
+                "placements": len(placements),
+            },
         )
 
         # Refrescar y devolver.
         return await self._load_full_layout(layout)
+
+    # ------------------------------------------------------------------
+    # SUGGEST (Fase 010M - M3)
+    # ------------------------------------------------------------------
+
+    async def suggest_layout(
+        self,
+        batch_id: int,
+        *,
+        expected_version: int | None = None,
+        candidate_levels: list[LevelSpec] | None = None,
+    ) -> LayoutSuggestionView:
+        """Calcula una sugerencia de layout físico sin persistirla.
+
+        Solo permitido cuando batch.status == PLANNED.
+        NO modifica la base de datos, no incrementa versión ni registra auditoría.
+        """
+        # 1. Verificar hornada
+        batch = await self._get_batch(batch_id)
+
+        # 2. Solo PLANNED puede calcular sugerencias
+        if batch.status not in KILN_BATCH_EDITABLE:
+            raise KilnLayoutNotEditableError()
+
+        # 3. Cargar horno y verificar dimensiones útiles
+        kiln = await self._get_kiln(batch.kiln_id)
+        if (
+            kiln.usable_width_cm is None
+            or kiln.usable_depth_cm is None
+            or kiln.usable_height_cm is None
+        ):
+            raise KilnLayoutDimensionsMissingError()
+
+        # 4. Cargar layout actual (si existe) y verificar versión esperada
+        existing_layout = await self._get_layout_for_batch(batch_id)
+
+        if expected_version is not None:
+            if existing_layout is None:
+                if expected_version != 0:
+                    raise KilnLayoutVersionConflictError()
+            elif existing_layout.version != expected_version:
+                raise KilnLayoutVersionConflictError()
+
+        base_version = existing_layout.version if existing_layout is not None else 0
+
+        # 5. Obtener niveles y placements existentes como obstáculos fijos
+        levels_geom: list[LevelGeometry] = []
+        existing_boxes: list[BoundingBox2D] = []
+        existing_placements: list[KilnBatchLayoutPlacement] = []
+
+        if existing_layout is not None:
+            layout_view = await self._load_full_layout(existing_layout)
+            for lvl in layout_view.levels:
+                levels_geom.append(
+                    LevelGeometry(
+                        level_index=lvl.level_index,
+                        z_cm=lvl.z_cm,
+                        usable_height_cm=lvl.usable_height_cm,
+                    )
+                )
+            for pl in layout_view.placements:
+                existing_placements.append(pl)
+                fp = get_reserved_footprint(
+                    piece_length=pl.piece_length_cm_snapshot,
+                    piece_width=pl.piece_width_cm_snapshot,
+                    piece_height=pl.piece_height_cm_snapshot,
+                    separation=pl.separation_cm_snapshot,
+                    rotation_degrees=pl.rotation_degrees,
+                )
+                existing_boxes.append(
+                    BoundingBox2D(
+                        placement_index=pl.id,
+                        batch_assignment_id=pl.batch_assignment_id,
+                        level_index=pl.level_index,
+                        left=pl.x_cm,
+                        right=pl.x_cm + fp.x_size,
+                        bottom=pl.y_cm,
+                        top=pl.y_cm + fp.y_size,
+                        height=fp.z_size,
+                    )
+                )
+        elif candidate_levels:
+            for clvl in candidate_levels:
+                levels_geom.append(
+                    LevelGeometry(
+                        level_index=clvl.level_index,
+                        z_cm=clvl.z_cm,
+                        usable_height_cm=clvl.usable_height_cm,
+                    )
+                )
+        else:
+            raise KilnLayoutNotFoundError()
+
+        # 6. Cargar asignaciones activas de la hornada
+        assignments = (
+            await self._session.scalars(
+                select(KilnBatchAssignment)
+                .where(
+                    KilnBatchAssignment.batch_id == batch_id,
+                    KilnBatchAssignment.status == KilnBatchAssignmentStatus.ACTIVE,
+                )
+                .order_by(KilnBatchAssignment.id)
+            )
+        ).all()
+
+        # 7. Resolver geometría de asignaciones
+        geom_map = await self.resolve_assignments_geometry(list(assignments))
+
+        # 8. Calcular piezas pendientes (assignment.quantity - placed)
+        placed_counts: dict[int, int] = {}
+        for p in existing_placements:
+            placed_counts[p.batch_assignment_id] = (
+                placed_counts.get(p.batch_assignment_id, 0) + p.quantity
+            )
+
+        pieces_to_pack: list[PieceToPack] = []
+        for asgn in assignments:
+            already_placed = placed_counts.get(asgn.id, 0)
+            pending_qty = max(0, asgn.quantity - already_placed)
+            length, width, height, sep = geom_map[asgn.id]
+            for u in range(pending_qty):
+                pieces_to_pack.append(
+                    PieceToPack(
+                        batch_assignment_id=asgn.id,
+                        group_index=0,
+                        unit_index=already_placed + u + 1,
+                        piece_length_cm=length,
+                        piece_width_cm=width,
+                        piece_height_cm=height,
+                        separation_cm=sep,
+                    )
+                )
+
+        # 9. Ejecutar motor de auto-packing puro
+        result = suggest_layout_packing(
+            kiln_width=kiln.usable_width_cm,
+            kiln_depth=kiln.usable_depth_cm,
+            kiln_height=kiln.usable_height_cm,
+            levels=levels_geom,
+            existing_boxes=existing_boxes,
+            pieces_to_pack=pieces_to_pack,
+        )
+
+        return LayoutSuggestionView(
+            batch_id=batch_id,
+            base_version=base_version,
+            total_pending=result.total_pending,
+            suggested_count=result.suggested_count,
+            unplaced_count=result.unplaced_count,
+            levels_used=result.levels_used,
+            suggested_placements=result.suggested_placements,
+            unplaced_pieces=result.unplaced_pieces,
+        )
