@@ -78,6 +78,8 @@ from app.services.kiln_batch_layout import (
     KilnLayoutPhysicalQuantityInvalidError,
     KilnLayoutPieceDimensionsMissingError,
     KilnLayoutQuantityExceededError,
+    KilnLayoutUnitIdentityInconsistentError,
+    KilnLayoutUnitIdentityMissingError,
     KilnLayoutVersionConflictError,
     LevelSpec,
     PlacementSpec,
@@ -1640,4 +1642,337 @@ async def test_suggest_layout_service_sin_layout_previo_con_candidate_levels(
     # GET layout sigue devolviendo 404 porque no se persistió nada
     with pytest.raises(KilnLayoutNotFoundError):
         await service.get_layout(batch.id)
+
+
+async def test_suggest_layout_service_rechaza_candidate_level_out_of_bounds_422(
+    db_session: AsyncSession,
+) -> None:
+    """suggest_layout con candidate_level que excede la altura del horno
+    lanza 422 KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS.
+    """
+    kiln = await _kiln_with_dims(db_session, "K-SUG-LVL-OOB", height=Decimal("80"))
+    batch = await _batch(db_session, kiln, "HOR-SUG-LVL-OOB")
+    load, line = await _load(db_session, "L-SUG-LVL-OOB", quantity=1, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    await _assign_internal(db_session, batch, load, line, quantity=1)
+
+    service = KilnBatchLayoutService(db_session)
+    invalid_candidate_levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("70"),
+            usable_height_cm=Decimal("20"),  # 70 + 20 = 90 > 80
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+
+    with pytest.raises(KilnLayoutLevelOutOfBoundsError) as exc_info:
+        await service.suggest_layout(
+            batch.id,
+            expected_version=0,
+            candidate_levels=invalid_candidate_levels,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS"
+
+
+async def test_suggest_layout_service_rechaza_candidate_level_overlap_422(
+    db_session: AsyncSession,
+) -> None:
+    """suggest_layout con candidate_levels que se solapan verticalmente
+    lanza 422 KILN_LAYOUT_LEVEL_OVERLAP.
+    """
+    kiln = await _kiln_with_dims(db_session, "K-SUG-LVL-OV", height=Decimal("80"))
+    batch = await _batch(db_session, kiln, "HOR-SUG-LVL-OV")
+    load, line = await _load(db_session, "L-SUG-LVL-OV", quantity=1, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    await _assign_internal(db_session, batch, load, line, quantity=1)
+
+    service = KilnBatchLayoutService(db_session)
+    overlapping_candidate_levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("30"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        ),
+        LevelSpec(
+            level_index=1,
+            name="Nivel 1",
+            z_cm=Decimal("20"),
+            usable_height_cm=Decimal("30"),  # Solapa en [20..30]
+            plate_label=None,
+            plate_thickness_cm=None,
+        ),
+    ]
+
+    with pytest.raises(KilnLayoutLevelOverlapError) as exc_info:
+        await service.suggest_layout(
+            batch.id,
+            expected_version=0,
+            candidate_levels=overlapping_candidate_levels,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_LEVEL_OVERLAP"
+
+
+async def test_suggest_layout_service_rechaza_unit_index_none_422(
+    db_session: AsyncSession,
+) -> None:
+    """suggest_layout rechaza placements con unit_index=None
+    con 422 KILN_LAYOUT_UNIT_IDENTITY_MISSING.
+    """
+    kiln = await _kiln_with_dims(
+        db_session, "K-SUG-NO-UID", width=Decimal("60"), depth=Decimal("50")
+    )
+    batch = await _batch(db_session, kiln, "HOR-SUG-NO-UID")
+    load, line = await _load(db_session, "L-SUG-NO-UID", quantity=2, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=2)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # Guardar placement con unit_index=None
+    await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=[
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=0,
+                unit_index=None,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("0"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            )
+        ],
+        user=USER,
+    )
+
+    with pytest.raises(KilnLayoutUnitIdentityMissingError) as exc_info:
+        await service.suggest_layout(batch.id, expected_version=1)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_UNIT_IDENTITY_MISSING"
+
+
+async def test_suggest_layout_service_rechaza_unit_index_duplicado_422(
+    db_session: AsyncSession,
+) -> None:
+    """suggest_layout rechaza placements con unit_index duplicados
+    con 422 KILN_LAYOUT_UNIT_IDENTITY_INCONSISTENT.
+    """
+    kiln = await _kiln_with_dims(
+        db_session, "K-SUG-DUP-UID", width=Decimal("60"), depth=Decimal("50")
+    )
+    batch = await _batch(db_session, kiln, "HOR-SUG-DUP-UID")
+    load, line = await _load(db_session, "L-SUG-DUP-UID", quantity=3, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=3)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # Guardar 2 placements ambos con unit_index=1
+    await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=[
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=0,
+                unit_index=1,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("0"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            ),
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=1,
+                unit_index=1,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("20"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            ),
+        ],
+        user=USER,
+    )
+
+    with pytest.raises(KilnLayoutUnitIdentityInconsistentError) as exc_info:
+        await service.suggest_layout(batch.id, expected_version=1)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_UNIT_IDENTITY_INCONSISTENT"
+
+
+async def test_suggest_layout_service_rechaza_unit_index_fuera_de_rango_422(
+    db_session: AsyncSession,
+) -> None:
+    """suggest_layout rechaza placements con unit_index fuera de rango [1..N]
+    con 422 KILN_LAYOUT_UNIT_IDENTITY_INCONSISTENT.
+    """
+    kiln = await _kiln_with_dims(
+        db_session, "K-SUG-OOR-UID", width=Decimal("60"), depth=Decimal("50")
+    )
+    batch = await _batch(db_session, kiln, "HOR-SUG-OOR-UID")
+    load, line = await _load(db_session, "L-SUG-OOR-UID", quantity=2, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=2)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # Guardar placement con unit_index=99 (> quantity=2)
+    await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=[
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=0,
+                unit_index=99,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("0"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            )
+        ],
+        user=USER,
+    )
+
+    with pytest.raises(KilnLayoutUnitIdentityInconsistentError) as exc_info:
+        await service.suggest_layout(batch.id, expected_version=1)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_UNIT_IDENTITY_INCONSISTENT"
+
+
+async def test_suggest_layout_service_unidades_no_contiguas(
+    db_session: AsyncSession,
+) -> None:
+    """suggest_layout calcula unidades pendientes cuando las existentes no son contiguas."""
+    kiln = await _kiln_with_dims(
+        db_session, "K-SUG-NONCONT", width=Decimal("60"), depth=Decimal("50")
+    )
+    batch = await _batch(db_session, kiln, "HOR-SUG-NONCONT")
+    load, line = await _load(db_session, "L-SUG-NONCONT", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # Asignación tiene quantity=5. Placements existentes usan unit_index: 1, 3, 5
+    await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=[
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=0,
+                unit_index=1,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("0"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            ),
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=1,
+                unit_index=3,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("15"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            ),
+            PlacementSpec(
+                batch_assignment_id=asgn.id,
+                group_index=2,
+                unit_index=5,
+                quantity=1,
+                level_index=0,
+                x_cm=Decimal("30"),
+                y_cm=Decimal("0"),
+                rotation_degrees=0,
+            ),
+        ],
+        user=USER,
+    )
+
+    suggestion = await service.suggest_layout(batch.id, expected_version=1)
+    assert suggestion.total_pending == 2
+    assert suggestion.suggested_count == 2
+    suggested_uids = [p.unit_index for p in suggestion.suggested_placements]
+    assert set(suggested_uids) == {2, 4}
 

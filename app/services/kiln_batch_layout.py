@@ -82,6 +82,7 @@ from app.services.kiln_layout_geometry import (
     PlacementGeometry,
     get_reserved_footprint,
     validate_layout_geometry,
+    validate_level_geometry,
 )
 from app.services.kiln_layout_packing import (
     PieceToPack,
@@ -214,6 +215,24 @@ class KilnLayoutPhysicalQuantityInvalidError(APIError):
     status_code = 422
     code = "KILN_LAYOUT_PHYSICAL_QUANTITY_INVALID"
     message = "Cada placement físico debe tener cantidad exactamente 1"
+
+
+class KilnLayoutUnitIdentityMissingError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_UNIT_IDENTITY_MISSING"
+    message = (
+        "Existen placements persistidos sin unit_index para una asignación; "
+        "se requiere identidad explícita para auto-packing"
+    )
+
+
+class KilnLayoutUnitIdentityInconsistentError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_UNIT_IDENTITY_INCONSISTENT"
+    message = (
+        "Los unit_index de los placements existentes son inconsistentes "
+        "(duplicados o fuera de rango [1..N])"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1009,15 @@ class KilnBatchLayoutService:
         else:
             raise KilnLayoutNotFoundError()
 
+        # Validar niveles con motor M2
+        try:
+            validate_level_geometry(levels_geom, kiln.usable_height_cm)
+        except ValueError as e:
+            msg = str(e)
+            if "LEVEL_OVERLAP" in msg:
+                raise KilnLayoutLevelOverlapError(msg) from e
+            raise KilnLayoutLevelOutOfBoundsError(msg) from e
+
         # 6. Cargar asignaciones activas de la hornada
         assignments = (
             await self._session.scalars(
@@ -1005,24 +1033,45 @@ class KilnBatchLayoutService:
         # 7. Resolver geometría de asignaciones
         geom_map = await self.resolve_assignments_geometry(list(assignments))
 
-        # 8. Calcular piezas pendientes (assignment.quantity - placed)
-        placed_counts: dict[int, int] = {}
-        for p in existing_placements:
-            placed_counts[p.batch_assignment_id] = (
-                placed_counts.get(p.batch_assignment_id, 0) + p.quantity
-            )
-
+        # 8. Identidad de unidades lógicas y cálculo de pendientes
         pieces_to_pack: list[PieceToPack] = []
         for asgn in assignments:
-            already_placed = placed_counts.get(asgn.id, 0)
-            pending_qty = max(0, asgn.quantity - already_placed)
+            asgn_placements = [
+                p for p in existing_placements if p.batch_assignment_id == asgn.id
+            ]
+
+            # Validar unit_index en placements existentes
+            used_indices: list[int] = []
+            for p in asgn_placements:
+                if p.unit_index is None:
+                    raise KilnLayoutUnitIdentityMissingError(
+                        f"El placement {p.id} de la asignación {asgn.id} no tiene unit_index "
+                        f"definido. Se requiere identidad explícita para auto-packing."
+                    )
+                if p.unit_index < 1 or p.unit_index > asgn.quantity:
+                    raise KilnLayoutUnitIdentityInconsistentError(
+                        f"El placement {p.id} de la asignación {asgn.id} tiene unit_index "
+                        f"{p.unit_index} fuera de rango [1..{asgn.quantity}]."
+                    )
+                used_indices.append(p.unit_index)
+
+            if len(used_indices) != len(set(used_indices)):
+                raise KilnLayoutUnitIdentityInconsistentError(
+                    f"La asignación {asgn.id} tiene unit_index duplicados en sus placements "
+                    f"existentes: {used_indices}."
+                )
+
+            # Calcular identidades pendientes: {1..quantity} - used_indices
+            all_indices = set(range(1, asgn.quantity + 1))
+            pending_indices = sorted(all_indices - set(used_indices))
+
             length, width, height, sep = geom_map[asgn.id]
-            for u in range(pending_qty):
+            for u_idx in pending_indices:
                 pieces_to_pack.append(
                     PieceToPack(
                         batch_assignment_id=asgn.id,
                         group_index=0,
-                        unit_index=already_placed + u + 1,
+                        unit_index=u_idx,
                         piece_length_cm=length,
                         piece_width_cm=width,
                         piece_height_cm=height,
@@ -1039,6 +1088,60 @@ class KilnBatchLayoutService:
             existing_boxes=existing_boxes,
             pieces_to_pack=pieces_to_pack,
         )
+
+        # 10. Validar compatibilidad del layout final (existentes + sugeridos) con motor M2
+        all_placements_geom: list[PlacementGeometry] = []
+        for idx, pl in enumerate(existing_placements):
+            all_placements_geom.append(
+                PlacementGeometry(
+                    index=idx,
+                    batch_assignment_id=pl.batch_assignment_id,
+                    quantity=pl.quantity,
+                    level_index=pl.level_index,
+                    x_cm=pl.x_cm,
+                    y_cm=pl.y_cm,
+                    rotation_degrees=pl.rotation_degrees,
+                    piece_length_cm=pl.piece_length_cm_snapshot,
+                    piece_width_cm=pl.piece_width_cm_snapshot,
+                    piece_height_cm=pl.piece_height_cm_snapshot,
+                    separation_cm=pl.separation_cm_snapshot,
+                )
+            )
+        start_idx = len(existing_placements)
+        for idx, sp in enumerate(result.suggested_placements):
+            all_placements_geom.append(
+                PlacementGeometry(
+                    index=start_idx + idx,
+                    batch_assignment_id=sp.batch_assignment_id,
+                    quantity=sp.quantity,
+                    level_index=sp.level_index,
+                    x_cm=sp.x_cm,
+                    y_cm=sp.y_cm,
+                    rotation_degrees=sp.rotation_degrees,
+                    piece_length_cm=sp.piece_length_cm_snapshot,
+                    piece_width_cm=sp.piece_width_cm_snapshot,
+                    piece_height_cm=sp.piece_height_cm_snapshot,
+                    separation_cm=sp.separation_cm_snapshot,
+                )
+            )
+
+        try:
+            validate_layout_geometry(
+                kiln_width=kiln.usable_width_cm,
+                kiln_depth=kiln.usable_depth_cm,
+                kiln_height=kiln.usable_height_cm,
+                levels=levels_geom,
+                placements=all_placements_geom,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if "COLLISION" in msg:
+                raise KilnLayoutCollisionError(msg) from e
+            if "OUT_OF_BOUNDS" in msg:
+                raise KilnLayoutOutOfBoundsError(msg) from e
+            if "HEIGHT_EXCEEDED" in msg:
+                raise KilnLayoutHeightExceededError(msg) from e
+            raise KilnLayoutOutOfBoundsError(msg) from e
 
         return LayoutSuggestionView(
             batch_id=batch_id,

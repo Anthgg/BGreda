@@ -23,7 +23,7 @@ from app.services.kiln_layout_geometry import (
     BoundingBox2D,
     LevelGeometry,
     get_reserved_footprint,
-    placements_overlap,
+    validate_level_geometry,
 )
 
 
@@ -205,8 +205,6 @@ class LevelPacker:
         if reserved_height > self.level.usable_height_cm:
             return None
 
-        sorted_candidates = sorted(self.candidates, key=lambda pt: (pt[1], pt[0]))
-
         fp_0 = get_reserved_footprint(
             piece_length=piece.piece_length_cm,
             piece_width=piece.piece_width_cm,
@@ -222,71 +220,81 @@ class LevelPacker:
             rotation_degrees=90,
         )
 
+        min_w = min(fp_0.x_size, fp_90.x_size)
+        min_h = min(fp_0.y_size, fp_90.y_size)
+
+        sorted_candidates = [
+            pt
+            for pt in sorted(self.candidates, key=lambda pt: (pt[1], pt[0]))
+            if pt[0] + min_w <= self.kiln_width and pt[1] + min_h <= self.kiln_depth
+        ]
+
         for cx, cy in sorted_candidates:
             # Evaluar rotación 0
-            box_0: BoundingBox2D | None = None
-            if (cx + fp_0.x_size <= self.kiln_width) and (cy + fp_0.y_size <= self.kiln_depth):
-                cand_box = BoundingBox2D(
-                    placement_index=placement_index,
-                    batch_assignment_id=piece.batch_assignment_id,
-                    level_index=self.level.level_index,
-                    left=cx,
-                    right=cx + fp_0.x_size,
-                    bottom=cy,
-                    top=cy + fp_0.y_size,
-                    height=fp_0.z_size,
-                )
-                if not any(placements_overlap(cand_box, b) for b in self.boxes):
-                    box_0 = cand_box
+            fits_0 = False
+            r0 = cx + fp_0.x_size
+            t0 = cy + fp_0.y_size
+            if (r0 <= self.kiln_width) and (t0 <= self.kiln_depth):
+                if not any(
+                    not (r0 <= b.left or b.right <= cx or t0 <= b.bottom or b.top <= cy)
+                    for b in self.boxes
+                ):
+                    fits_0 = True
 
             # Evaluar rotación 90
-            box_90: BoundingBox2D | None = None
-            if (cx + fp_90.x_size <= self.kiln_width) and (cy + fp_90.y_size <= self.kiln_depth):
-                cand_box = BoundingBox2D(
-                    placement_index=placement_index,
-                    batch_assignment_id=piece.batch_assignment_id,
-                    level_index=self.level.level_index,
-                    left=cx,
-                    right=cx + fp_90.x_size,
-                    bottom=cy,
-                    top=cy + fp_90.y_size,
-                    height=fp_90.z_size,
-                )
-                if not any(placements_overlap(cand_box, b) for b in self.boxes):
-                    box_90 = cand_box
+            fits_90 = False
+            r90 = cx + fp_90.x_size
+            t90 = cy + fp_90.y_size
+            if (r90 <= self.kiln_width) and (t90 <= self.kiln_depth):
+                if not any(
+                    not (r90 <= b.left or b.right <= cx or t90 <= b.bottom or b.top <= cy)
+                    for b in self.boxes
+                ):
+                    fits_90 = True
 
             chosen_rot: int | None = None
-            chosen_box: BoundingBox2D | None = None
+            chosen_w: Decimal = Decimal("0")
+            chosen_h: Decimal = Decimal("0")
 
-            if box_0 is not None and box_90 is not None:
+            if fits_0 and fits_90:
                 # Ambas rotaciones son válidas en este punto candidato:
                 # 1. Preferir menor top (más compacto en profundidad Y)
                 # 2. Desempate: menor right (más compacto en ancho X)
                 # 3. Desempate: rotación 0
-                if box_0.top < box_90.top:
+                if t0 < t90:
                     chosen_rot = 0
-                    chosen_box = box_0
-                elif box_90.top < box_0.top:
+                    chosen_w, chosen_h = fp_0.x_size, fp_0.y_size
+                elif t90 < t0:
                     chosen_rot = 90
-                    chosen_box = box_90
+                    chosen_w, chosen_h = fp_90.x_size, fp_90.y_size
                 else:
-                    if box_0.right < box_90.right:
+                    if r0 < r90:
                         chosen_rot = 0
-                        chosen_box = box_0
-                    elif box_90.right < box_0.right:
+                        chosen_w, chosen_h = fp_0.x_size, fp_0.y_size
+                    elif r90 < r0:
                         chosen_rot = 90
-                        chosen_box = box_90
+                        chosen_w, chosen_h = fp_90.x_size, fp_90.y_size
                     else:
                         chosen_rot = 0
-                        chosen_box = box_0
-            elif box_0 is not None:
+                        chosen_w, chosen_h = fp_0.x_size, fp_0.y_size
+            elif fits_0:
                 chosen_rot = 0
-                chosen_box = box_0
-            elif box_90 is not None:
+                chosen_w, chosen_h = fp_0.x_size, fp_0.y_size
+            elif fits_90:
                 chosen_rot = 90
-                chosen_box = box_90
+                chosen_w, chosen_h = fp_90.x_size, fp_90.y_size
 
-            if chosen_rot is not None and chosen_box is not None:
+            if chosen_rot is not None:
+                chosen_box = BoundingBox2D(
+                    placement_index=placement_index,
+                    batch_assignment_id=piece.batch_assignment_id,
+                    level_index=self.level.level_index,
+                    left=cx,
+                    right=cx + chosen_w,
+                    bottom=cy,
+                    top=cy + chosen_h,
+                    height=fp_0.z_size,
+                )
                 self.add_box(chosen_box)
                 suggested = SuggestedPlacement(
                     batch_assignment_id=piece.batch_assignment_id,
@@ -319,7 +327,7 @@ def suggest_layout_packing(
     """Ejecuta el motor de auto-packing físico determinista.
 
     1. Si no hay niveles definidos: todas las piezas son unplaced con NO_LEVELS.
-    2. Ordena los niveles por level_index ascendente.
+    2. Ordena los niveles por level_index ascendente y valida geometría M2.
     3. Inicializa un LevelPacker por nivel con las cajas existentes de ese nivel.
     4. Ordena las piezas por criterio FFD estable.
     5. Para cada pieza, intenta ubicarla en los niveles en orden.
@@ -347,6 +355,9 @@ def suggest_layout_packing(
         )
 
     sorted_levels = sorted(levels, key=lambda lvl: lvl.level_index)
+
+    # Validar niveles con motor M2 (bounds, z >= 0, height > 0, no vertical overlap)
+    validate_level_geometry(sorted_levels, kiln_height)
 
     boxes_by_level: dict[int, list[BoundingBox2D]] = {lvl.level_index: [] for lvl in sorted_levels}
     for box in existing_boxes:

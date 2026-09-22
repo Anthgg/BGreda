@@ -19,11 +19,15 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
+import pytest
+
 from app.services.kiln_layout_geometry import (
     BoundingBox2D,
     LevelGeometry,
+    PlacementGeometry,
     check_collisions,
     get_reserved_footprint,
+    validate_layout_geometry,
 )
 from app.services.kiln_layout_packing import (
     PieceToPack,
@@ -548,3 +552,212 @@ def test_packing_rendimiento_500_piezas() -> None:
     duration = time.perf_counter() - start
     assert result.total_pending == 500
     assert duration < 2.0, f"500 piezas tardaron demasiado: {duration:.4f}s"
+
+
+def test_packing_level_out_of_bounds_falla() -> None:
+    """Si un nivel excede la altura del horno, suggest_layout_packing falla
+    con LEVEL_OUT_OF_BOUNDS.
+    """
+    # Horno altura 80. Nivel con z=70 y usable_height=20 -> 70 + 20 = 90 > 80
+    invalid_level = LevelGeometry(
+        level_index=0,
+        z_cm=Decimal("70"),
+        usable_height_cm=Decimal("20"),
+    )
+    piece = PieceToPack(
+        batch_assignment_id=1,
+        group_index=0,
+        unit_index=1,
+        piece_length_cm=Decimal("10"),
+        piece_width_cm=Decimal("10"),
+        piece_height_cm=Decimal("10"),
+        separation_cm=Decimal("0"),
+    )
+    with pytest.raises(ValueError, match="LEVEL_OUT_OF_BOUNDS"):
+        suggest_layout_packing(
+            kiln_width=Decimal("60"),
+            kiln_depth=Decimal("50"),
+            kiln_height=Decimal("80"),
+            levels=[invalid_level],
+            existing_boxes=[],
+            pieces_to_pack=[piece],
+        )
+
+
+def test_packing_level_overlap_falla() -> None:
+    """Si dos niveles se solapan verticalmente, suggest_layout_packing falla con LEVEL_OVERLAP."""
+    # Nivel 0: z=0, h=30 -> [0, 30]
+    # Nivel 1: z=20, h=30 -> [20, 50] (solapamiento en [20, 30])
+    levels = [
+        LevelGeometry(level_index=0, z_cm=Decimal("0"), usable_height_cm=Decimal("30")),
+        LevelGeometry(level_index=1, z_cm=Decimal("20"), usable_height_cm=Decimal("30")),
+    ]
+    piece = PieceToPack(
+        batch_assignment_id=1,
+        group_index=0,
+        unit_index=1,
+        piece_length_cm=Decimal("10"),
+        piece_width_cm=Decimal("10"),
+        piece_height_cm=Decimal("10"),
+        separation_cm=Decimal("0"),
+    )
+    with pytest.raises(ValueError, match="LEVEL_OVERLAP"):
+        suggest_layout_packing(
+            kiln_width=Decimal("60"),
+            kiln_depth=Decimal("50"),
+            kiln_height=Decimal("80"),
+            levels=levels,
+            existing_boxes=[],
+            pieces_to_pack=[piece],
+        )
+
+
+def test_packing_suggest_to_m2_validation() -> None:
+    """Las piezas sugeridas son válidas según validate_layout_geometry."""
+    levels = [
+        LevelGeometry(level_index=0, z_cm=Decimal("0"), usable_height_cm=Decimal("25")),
+        LevelGeometry(level_index=1, z_cm=Decimal("30"), usable_height_cm=Decimal("25")),
+    ]
+    pieces = [
+        PieceToPack(
+            batch_assignment_id=i % 3 + 1,
+            group_index=0,
+            unit_index=i,
+            piece_length_cm=Decimal("8"),
+            piece_width_cm=Decimal("6"),
+            piece_height_cm=Decimal("15"),
+            separation_cm=Decimal("1"),
+        )
+        for i in range(1, 20)
+    ]
+    result = suggest_layout_packing(
+        kiln_width=Decimal("60"),
+        kiln_depth=Decimal("50"),
+        kiln_height=Decimal("60"),
+        levels=levels,
+        existing_boxes=[],
+        pieces_to_pack=pieces,
+    )
+    assert result.suggested_count > 0
+
+    # Construir PlacementGeometry para cada placement sugerido y validar con M2
+    placements_geom = [
+        PlacementGeometry(
+            index=idx,
+            batch_assignment_id=sp.batch_assignment_id,
+            quantity=sp.quantity,
+            level_index=sp.level_index,
+            x_cm=sp.x_cm,
+            y_cm=sp.y_cm,
+            rotation_degrees=sp.rotation_degrees,
+            piece_length_cm=sp.piece_length_cm_snapshot,
+            piece_width_cm=sp.piece_width_cm_snapshot,
+            piece_height_cm=sp.piece_height_cm_snapshot,
+            separation_cm=sp.separation_cm_snapshot,
+        )
+        for idx, sp in enumerate(result.suggested_placements)
+    ]
+
+    # No debe levantar ninguna excepción
+    validate_layout_geometry(
+        kiln_width=Decimal("60"),
+        kiln_depth=Decimal("50"),
+        kiln_height=Decimal("60"),
+        levels=levels,
+        placements=placements_geom,
+    )
+
+
+def test_packing_noncontiguous_unit_indices() -> None:
+    """suggest_layout_packing preserva exactamente los unit_index no contiguos proporcionados."""
+    # Supongamos que para una asignación con quantity=5, las unidades 1, 3 y 5 ya estaban colocadas.
+    # Pendientes son 2 y 4.
+    pieces = [
+        PieceToPack(
+            batch_assignment_id=1,
+            group_index=0,
+            unit_index=2,
+            piece_length_cm=Decimal("10"),
+            piece_width_cm=Decimal("10"),
+            piece_height_cm=Decimal("10"),
+            separation_cm=Decimal("1"),
+        ),
+        PieceToPack(
+            batch_assignment_id=1,
+            group_index=0,
+            unit_index=4,
+            piece_length_cm=Decimal("10"),
+            piece_width_cm=Decimal("10"),
+            piece_height_cm=Decimal("10"),
+            separation_cm=Decimal("1"),
+        ),
+    ]
+    result = suggest_layout_packing(
+        kiln_width=Decimal("60"),
+        kiln_depth=Decimal("50"),
+        kiln_height=Decimal("40"),
+        levels=[_default_level()],
+        existing_boxes=[],
+        pieces_to_pack=pieces,
+    )
+    assert result.suggested_count == 2
+    suggested_unit_indices = [sp.unit_index for sp in result.suggested_placements]
+    assert set(suggested_unit_indices) == {2, 4}
+
+
+def test_packing_adversarial_500_piezas_50_obstaculos() -> None:
+    """Escenario adversarial: 500 piezas a empaquetar con 50 obstáculos existentes.
+
+    Verifica que la optimización evita sobrecargas y corre rápidamente (< 2.5s).
+    """
+    levels = [
+        _default_level(0, z_cm=Decimal("0"), usable_height_cm=Decimal("20")),
+        _default_level(1, z_cm=Decimal("25"), usable_height_cm=Decimal("20")),
+    ]
+    # 50 obstáculos existentes (25 en cada nivel)
+    existing_boxes = []
+    box_id = 1
+    for lvl in (0, 1):
+        for col in range(5):
+            for row in range(5):
+                existing_boxes.append(
+                    BoundingBox2D(
+                        placement_index=box_id,
+                        batch_assignment_id=999,
+                        level_index=lvl,
+                        left=Decimal(f"{col * 15}"),
+                        right=Decimal(f"{col * 15 + 5}"),
+                        bottom=Decimal(f"{row * 15}"),
+                        top=Decimal(f"{row * 15 + 5}"),
+                        height=Decimal("10"),
+                    )
+                )
+                box_id += 1
+
+    pieces = [
+        PieceToPack(
+            batch_assignment_id=i % 10 + 1,
+            group_index=0,
+            unit_index=i,
+            piece_length_cm=Decimal("3"),
+            piece_width_cm=Decimal("3"),
+            piece_height_cm=Decimal("6"),
+            separation_cm=Decimal("0.5"),
+        )
+        for i in range(1, 501)
+    ]
+
+    start = time.perf_counter()
+    result = suggest_layout_packing(
+        kiln_width=Decimal("100"),
+        kiln_depth=Decimal("100"),
+        kiln_height=Decimal("50"),
+        levels=levels,
+        existing_boxes=existing_boxes,
+        pieces_to_pack=pieces,
+    )
+    duration = time.perf_counter() - start
+
+    assert result.total_pending == 500
+    assert result.suggested_count > 0
+    assert duration < 2.5, f"Escenario adversarial tardó demasiado: {duration:.4f}s"

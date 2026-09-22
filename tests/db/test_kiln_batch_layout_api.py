@@ -651,7 +651,7 @@ async def test_suggest_layout_api_ciclo_y_no_mutacion(
                 {
                     "batch_assignment_id": asgn.id,
                     "group_index": 0,
-                    "unit_index": None,
+                    "unit_index": 1,
                     "quantity": 1,
                     "level_index": 0,
                     "x_cm": "0.0",
@@ -742,4 +742,166 @@ async def test_suggest_layout_api_rechaza_batch_no_planned_409(
     )
     assert res.status_code == 409
     assert res.json()["error"]["code"] == "KILN_LAYOUT_NOT_EDITABLE"
+
+
+async def test_suggest_to_put_roundtrip_api(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Flujo completo suggest -> PUT: las sugerencias son directamente persistibles
+    sin error de validación M2.
+    """
+    kiln = await _kiln_with_dims(
+        db_session, "K-API-ROUNDTRIP", width=Decimal("60"), depth=Decimal("50")
+    )
+    batch = await _batch(db_session, kiln, "HOR-API-ROUNDTRIP")
+    load, line = await _load(db_session, "L-API-ROUNDTRIP", quantity=3, unit_volume=Decimal("10"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
+    await _assign_internal(db_session, batch, load, line, quantity=3)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0.0", "usable_height_cm": "20.0"}
+    ]
+
+    # 1. POST suggest con candidate_levels para el batch sin layout previo
+    sug_res = await api.post(
+        f"{KILN_BATCHES}/{batch.id}/layout/suggest",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+        },
+        headers=head(admin_csrf),
+    )
+    assert sug_res.status_code == 200, sug_res.text
+    sug_data = sug_res.json()
+    assert sug_data["suggested_count"] == 3
+    assert sug_data["base_version"] == 0
+
+    # 2. Tomar las sugerencias y enviar PUT directo al layout
+    put_placements = [
+        {
+            "batch_assignment_id": p["batch_assignment_id"],
+            "group_index": p["group_index"],
+            "unit_index": p["unit_index"],
+            "quantity": p["quantity"],
+            "level_index": p["level_index"],
+            "x_cm": p["x_cm"],
+            "y_cm": p["y_cm"],
+            "rotation_degrees": p["rotation_degrees"],
+        }
+        for p in sug_data["suggested_placements"]
+    ]
+
+    put_res = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": put_placements,
+        },
+        headers=head(admin_csrf),
+    )
+    assert put_res.status_code == 200, put_res.text
+    put_data = put_res.json()
+    assert put_data["version"] == 1
+    assert len(put_data["placements"]) == 3
+    assert put_data["placed_quantity"] == 3
+    assert put_data["pending_quantity"] == 0
+
+
+async def test_suggest_api_rechaza_candidate_level_out_of_bounds_422(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """POST suggest con candidate_level que excede altura de horno
+    retorna 422 KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS.
+    """
+    kiln = await _kiln_with_dims(db_session, "K-API-LVL-OOB", height=Decimal("80"))
+    batch = await _batch(db_session, kiln, "HOR-API-LVL-OOB")
+    load, line = await _load(db_session, "L-API-LVL-OOB", quantity=1, unit_volume=Decimal("10"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    await _assign_internal(db_session, batch, load, line, quantity=1)
+    await db_session.commit()
+
+    invalid_levels = [
+        {"level_index": 0, "name": "N0", "z_cm": "70.0", "usable_height_cm": "20.0"}
+    ]
+    res = await api.post(
+        f"{KILN_BATCHES}/{batch.id}/layout/suggest",
+        json={
+            "expected_version": 0,
+            "levels": invalid_levels,
+        },
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 422, res.text
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS"
+
+
+async def test_suggest_api_rechaza_unit_index_none_422(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """POST suggest con layout previo que contiene placements con unit_index=null
+    retorna 422 KILN_LAYOUT_UNIT_IDENTITY_MISSING.
+    """
+    kiln = await _kiln_with_dims(
+        db_session, "K-API-NO-UID", width=Decimal("60"), depth=Decimal("50")
+    )
+    batch = await _batch(db_session, kiln, "HOR-API-NO-UID")
+    load, line = await _load(db_session, "L-API-NO-UID", quantity=2, unit_volume=Decimal("10"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=2)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0.0", "usable_height_cm": "20.0"}
+    ]
+    # Guardar layout con unit_index = null
+    put_res = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": [
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 0,
+                    "unit_index": None,
+                    "quantity": 1,
+                    "level_index": 0,
+                    "x_cm": "0.0",
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert put_res.status_code == 200
+
+    # Invocar suggest esperando 422 por unit_index faltante
+    res = await api.post(
+        f"{KILN_BATCHES}/{batch.id}/layout/suggest",
+        json={"expected_version": 1},
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 422, res.text
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_UNIT_IDENTITY_MISSING"
 
