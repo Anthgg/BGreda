@@ -266,6 +266,9 @@ class KilnBatchLayoutOut(BaseModel):
     kiln_width_cm_snapshot: Decimal
     kiln_depth_cm_snapshot: Decimal
     kiln_height_cm_snapshot: Decimal
+    placed_quantity: int
+    pending_quantity: int
+    invalid_quantity: int = 0
     levels: list[KilnBatchLayoutLevelOut]
     placements: list[KilnBatchLayoutPlacementOut]
     updated_at: datetime

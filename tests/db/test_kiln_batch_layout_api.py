@@ -1,9 +1,9 @@
-"""Pruebas de la API de layout físico del horno (Fase 010M - M1).
+"""Pruebas de la API de layout físico del horno (Fase 010M - M1 y M2).
 
 Cubre:
 1. GET 404 si no hay layout
 2. PUT 200 crea layout inicial (expected_version=0) con derivación de snapshots
-3. GET 200 devuelve layout con niveles y placements
+3. GET 200 devuelve layout con niveles, placements y resumen operacional (placed_qty, pending_qty)
 4. PUT 200 actualiza layout (expected_version=1 -> version=2)
 5. PUT 409 por stale version
 6. PUT 422 por rotación no permitida (ej: 45 o 180)
@@ -14,6 +14,11 @@ Cubre:
     - Mismo idempotency_key + mismo payload: 200 sin 409 ni duplicación
     - Mismo idempotency_key + diferente payload: 409
     - Diferente idempotency_key + versión obsoleta: 409
+11. Validaciones M2 por HTTP (422):
+    - Colisión 2D entre piezas en el mismo nivel
+    - Placement fuera de los límites del horno
+    - Placement con quantity != 1
+    - Atomicidad: error de validación no consume versión ni altera el layout existente
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ async def test_layout_api_ciclo_completo(
     db_session: AsyncSession,
 ) -> None:
     """Ciclo completo por HTTP: GET inicial (404), PUT creación, GET (200), PUT actualización."""
-    kiln = await _kiln_with_dims(db_session, "K-API-LAY")
+    kiln = await _kiln_with_dims(db_session, "K-API-LAY", height=Decimal("80"))
     batch = await _batch(db_session, kiln, "HOR-API-LAY")
     load, line = await _load(db_session, "L-API-LAY", quantity=10, unit_volume=Decimal("50"))
     asgn = await _assign_internal(db_session, batch, load, line, quantity=10)
@@ -51,13 +56,13 @@ async def test_layout_api_ciclo_completo(
     res_get_init = await api.get(f"{KILN_BATCHES}/{batch.id}/layout")
     assert res_get_init.status_code == 404, res_get_init.text
 
-    # 2. PUT inicial con expected_version=0 (sin snapshots en payload)
+    # 2. PUT inicial con expected_version=0 (M2: quantity=1)
     levels_payload = [
         {
             "level_index": 0,
             "name": "Nivel 0",
             "z_cm": "0.0",
-            "usable_height_cm": "20.0",
+            "usable_height_cm": "60.0",
             "plate_label": "Placa 1",
             "plate_thickness_cm": "1.5",
         }
@@ -67,7 +72,7 @@ async def test_layout_api_ciclo_completo(
             "batch_assignment_id": asgn.id,
             "group_index": 0,
             "unit_index": None,
-            "quantity": 5,
+            "quantity": 1,
             "level_index": 0,
             "x_cm": "2.0",
             "y_cm": "3.0",
@@ -89,10 +94,14 @@ async def test_layout_api_ciclo_completo(
     assert body["batch_id"] == batch.id
     assert body["version"] == 1
     assert body["kiln_width_cm_snapshot"] == "60.000000"
+    assert body["placed_quantity"] == 1
+    assert body["pending_quantity"] == 9
+    assert body["invalid_quantity"] == 0
     assert len(body["levels"]) == 1
     assert len(body["placements"]) == 1
     pl = body["placements"][0]
     assert pl["rotation_degrees"] == 0
+    assert pl["quantity"] == 1
     # Verificar que los snapshots fueron derivados desde la fuente productiva
     assert pl["piece_length_cm_snapshot"] == "1.000000"
     assert pl["piece_width_cm_snapshot"] == "1.000000"
@@ -108,6 +117,9 @@ async def test_layout_api_ciclo_completo(
     assert res_get.status_code == 200, res_get.text
     get_body = res_get.json()
     assert get_body["version"] == 1
+    assert get_body["placed_quantity"] == 1
+    assert get_body["pending_quantity"] == 9
+    assert get_body["invalid_quantity"] == 0
     assert len(get_body["levels"]) == 1
     assert len(get_body["placements"]) == 1
 
@@ -152,6 +164,14 @@ async def test_layout_api_rechaza_campos_snapshot_en_payload_422(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
     await db_session.commit()
 
+    levels_payload = [
+        {
+            "level_index": 0,
+            "name": "Nivel 0",
+            "z_cm": "0.0",
+            "usable_height_cm": "20.0",
+        }
+    ]
     forbidden_fields = [
         {"piece_length_cm_snapshot": "10.0"},
         {"piece_width_cm_snapshot": "8.0"},
@@ -175,7 +195,7 @@ async def test_layout_api_rechaza_campos_snapshot_en_payload_422(
             f"{KILN_BATCHES}/{batch.id}/layout",
             json={
                 "expected_version": 0,
-                "levels": [],
+                "levels": levels_payload,
                 "placements": [placement],
             },
             headers=head(admin_csrf),
@@ -191,18 +211,26 @@ async def test_layout_api_rotacion_invalida_422(
     db_session: AsyncSession,
 ) -> None:
     """Rotaciones distintas de 0 o 90 (ej. 45 o 180) son rechazadas con 422 por schema."""
-    kiln = await _kiln_with_dims(db_session, "K-API-ROT")
+    kiln = await _kiln_with_dims(db_session, "K-API-ROT", height=Decimal("80"))
     batch = await _batch(db_session, kiln, "HOR-API-ROT")
     load, line = await _load(db_session, "L-API-ROT", quantity=10, unit_volume=Decimal("50"))
     asgn = await _assign_internal(db_session, batch, load, line, quantity=10)
     await db_session.commit()
 
+    levels_payload = [
+        {
+            "level_index": 0,
+            "name": "Nivel 0",
+            "z_cm": "0.0",
+            "usable_height_cm": "60.0",
+        }
+    ]
     for invalid_deg in (45, 180, 270):
         res = await api.put(
             f"{KILN_BATCHES}/{batch.id}/layout",
             json={
                 "expected_version": 0,
-                "levels": [],
+                "levels": levels_payload,
                 "placements": [
                     {
                         "batch_assignment_id": asgn.id,
@@ -259,7 +287,7 @@ async def test_layout_api_idempotencia_http(
     4. PUT con distinta key pero expected_version obsoleto (0) -> 409.
     5. GET confirma que no hay duplicación de placements ni niveles.
     """
-    kiln = await _kiln_with_dims(db_session, "K-API-IDEMP")
+    kiln = await _kiln_with_dims(db_session, "K-API-IDEMP", height=Decimal("80"))
     batch = await _batch(db_session, kiln, "HOR-API-IDEMP")
     load, line = await _load(db_session, "L-API-IDEMP", quantity=10, unit_volume=Decimal("50"))
     asgn = await _assign_internal(db_session, batch, load, line, quantity=10)
@@ -271,7 +299,7 @@ async def test_layout_api_idempotencia_http(
             "level_index": 0,
             "name": "Nivel 0",
             "z_cm": "0.0",
-            "usable_height_cm": "20.0",
+            "usable_height_cm": "60.0",
             "plate_label": "Placa 1",
             "plate_thickness_cm": "1.5",
         }
@@ -281,7 +309,7 @@ async def test_layout_api_idempotencia_http(
             "batch_assignment_id": asgn.id,
             "group_index": 0,
             "unit_index": None,
-            "quantity": 4,
+            "quantity": 1,
             "level_index": 0,
             "x_cm": "5.0",
             "y_cm": "5.0",
@@ -354,4 +382,236 @@ async def test_layout_api_idempotencia_http(
     assert get_body["version"] == 1
     assert len(get_body["levels"]) == 1
     assert len(get_body["placements"]) == 1
-    assert get_body["placements"][0]["quantity"] == 4
+    assert get_body["placements"][0]["quantity"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Validaciones Geométricas M2 por HTTP
+# ---------------------------------------------------------------------------
+
+async def test_layout_api_rechaza_colision_422(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Dos placements en el mismo nivel que solapan áreas reservadas retornan 422 COLLISION."""
+    kiln = await _kiln_with_dims(db_session, "K-API-COL")
+    batch = await _batch(db_session, kiln, "HOR-API-COL")
+    load, line = await _load(db_session, "L-API-COL", quantity=5, unit_volume=Decimal("10"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("2.0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
+    ]
+    # Pieza 10x10 con sep 2 -> reservado 12x12
+    # P1 en (0, 0) -> [0..12, 0..12]
+    # P2 en (11, 0) -> [11..23, 0..12] -> solapa en [11..12]
+    placements_payload = [
+        {
+            "batch_assignment_id": asgn.id,
+            "group_index": 0,
+            "unit_index": None,
+            "quantity": 1,
+            "level_index": 0,
+            "x_cm": "0.0",
+            "y_cm": "0.0",
+            "rotation_degrees": 0,
+        },
+        {
+            "batch_assignment_id": asgn.id,
+            "group_index": 1,
+            "unit_index": None,
+            "quantity": 1,
+            "level_index": 0,
+            "x_cm": "11.0",
+            "y_cm": "0.0",
+            "rotation_degrees": 0,
+        },
+    ]
+    res = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": placements_payload,
+        },
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 422, res.text
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_COLLISION"
+
+
+async def test_layout_api_rechaza_out_of_bounds_422(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Placement que excede el ancho del horno retorna 422 KILN_LAYOUT_OUT_OF_BOUNDS."""
+    kiln = await _kiln_with_dims(db_session, "K-API-OOB", width=Decimal("50"))
+    batch = await _batch(db_session, kiln, "HOR-API-OOB")
+    load, line = await _load(db_session, "L-API-OOB", quantity=5, unit_volume=Decimal("10"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
+    ]
+    # x=45 para pieza de 10 -> right=55 > 50 (kiln_width)
+    res = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": [
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 0,
+                    "unit_index": None,
+                    "quantity": 1,
+                    "level_index": 0,
+                    "x_cm": "45.0",
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 422, res.text
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_OUT_OF_BOUNDS"
+
+
+async def test_layout_api_rechaza_quantity_invalida_422(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Placement con quantity != 1 retorna 422 KILN_LAYOUT_PHYSICAL_QUANTITY_INVALID."""
+    kiln = await _kiln_with_dims(db_session, "K-API-QINV")
+    batch = await _batch(db_session, kiln, "HOR-API-QINV")
+    load, line = await _load(db_session, "L-API-QINV", quantity=5, unit_volume=Decimal("10"))
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
+    ]
+    res = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": [
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 0,
+                    "unit_index": None,
+                    "quantity": 2,  # Inválido en M2
+                    "level_index": 0,
+                    "x_cm": "0.0",
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert res.status_code == 422, res.text
+    assert res.json()["error"]["code"] == "KILN_LAYOUT_PHYSICAL_QUANTITY_INVALID"
+
+
+async def test_layout_api_atomicidad_error_no_incrementa_version(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    """Si una actualización falla por colisión, la versión no cambia y el layout se conserva."""
+    kiln = await _kiln_with_dims(db_session, "K-API-ATOM")
+    batch = await _batch(db_session, kiln, "HOR-API-ATOM")
+    load, line = await _load(db_session, "L-API-ATOM", quantity=5, unit_volume=Decimal("10"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+    await db_session.commit()
+
+    levels_payload = [
+        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
+    ]
+
+    # 1. Crear versión 1 válida
+    res_v1 = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 0,
+            "levels": levels_payload,
+            "placements": [
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 0,
+                    "unit_index": None,
+                    "quantity": 1,
+                    "level_index": 0,
+                    "x_cm": "0.0",
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                }
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert res_v1.status_code == 200
+    assert res_v1.json()["version"] == 1
+
+    # 2. Intentar actualizar con placement colisionante
+    res_fail = await api.put(
+        f"{KILN_BATCHES}/{batch.id}/layout",
+        json={
+            "expected_version": 1,
+            "levels": levels_payload,
+            "placements": [
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 0,
+                    "unit_index": None,
+                    "quantity": 1,
+                    "level_index": 0,
+                    "x_cm": "0.0",
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                },
+                {
+                    "batch_assignment_id": asgn.id,
+                    "group_index": 1,
+                    "unit_index": None,
+                    "quantity": 1,
+                    "level_index": 0,
+                    "x_cm": "5.0",  # Colisión
+                    "y_cm": "0.0",
+                    "rotation_degrees": 0,
+                },
+            ],
+        },
+        headers=head(admin_csrf),
+    )
+    assert res_fail.status_code == 422
+    assert res_fail.json()["error"]["code"] == "KILN_LAYOUT_COLLISION"
+
+    # 3. GET confirma que la versión sigue siendo 1 y hay exactamente 1 placement
+    res_get = await api.get(f"{KILN_BATCHES}/{batch.id}/layout")
+    assert res_get.status_code == 200
+    assert res_get.json()["version"] == 1
+    assert len(res_get.json()["placements"]) == 1

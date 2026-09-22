@@ -1,4 +1,4 @@
-"""Pruebas del servicio de layout físico del horno (Fase 010M - M1).
+"""Pruebas del servicio de layout físico del horno (Fase 010M - M1 y M2).
 
 Cubre:
 1. Rechazo cuando el horno no tiene dimensiones lineales (422)
@@ -18,6 +18,14 @@ Cubre:
     - Mismo key + diferente payload: conflicto 409
     - Diferente key + versión obsoleta: conflicto 409
 11. Concurrencia en creación inicial sin 500
+12. Validaciones geométricas M2:
+    - Colisión 2D dentro del mismo nivel (422)
+    - Placement fuera de los límites X o Y del horno (422)
+    - Altura reservada excede altura útil del nivel (422)
+    - Solapamiento vertical entre niveles (422)
+    - Semántica física: quantity != 1 rechazado (422)
+    - Atomicidad: fallo en un placement no consume versión ni altera el layout existente
+    - Resumen operacional: placed_quantity y pending_quantity calculados correctamente
 """
 
 from __future__ import annotations
@@ -58,10 +66,16 @@ from app.services.kiln_batch_layout import (
     KilnBatchLayoutService,
     KilnLayoutAlreadyExistsError,
     KilnLayoutAssignmentMismatchError,
+    KilnLayoutCollisionError,
     KilnLayoutDimensionsMissingError,
+    KilnLayoutHeightExceededError,
     KilnLayoutIdempotencyKeyReusedError,
+    KilnLayoutLevelOutOfBoundsError,
+    KilnLayoutLevelOverlapError,
     KilnLayoutNotEditableError,
     KilnLayoutNotFoundError,
+    KilnLayoutOutOfBoundsError,
+    KilnLayoutPhysicalQuantityInvalidError,
     KilnLayoutPieceDimensionsMissingError,
     KilnLayoutQuantityExceededError,
     KilnLayoutVersionConflictError,
@@ -255,10 +269,10 @@ async def _assign_firing_v2(
     await session.flush()
 
     order = ProductionOrder(
-        code=f"OP-SQ-{code}",
+        code=f"OP-SQ-LAY-{code}",
         v2_firing_handoff_id=handoff.id,
         stock_location_id=location.id,
-        qr_token=f"qr-token-sq-{code}-1234567890-abcdefghijklmnopqrst",
+        qr_token=f"qr-token-sq-lay-{code}-1234567890-abcdefghijklmnop",
         created_by=USER.id,
         created_by_name=USER.display_name,
     )
@@ -281,10 +295,19 @@ async def _assign_firing_v2(
     return assignment, line
 
 
+# ---------------------------------------------------------------------------
+# Pruebas
+# ---------------------------------------------------------------------------
+
 async def test_dimensiones_horno_faltantes_rechazan_layout(db_session: AsyncSession) -> None:
-    """Un horno sin usable_width/depth/height_cm rechaza la creacion del layout con error 422."""
-    kiln = await _kiln(db_session, "K-NODIMS")
-    batch = await _batch(db_session, kiln, "HOR-NODIMS")
+    """Si el horno no tiene usable_width/depth/height, el layout se rechaza con 422."""
+    kiln = await _kiln(db_session, "K-NODIM")
+    kiln.usable_width_cm = None
+    kiln.usable_depth_cm = None
+    kiln.usable_height_cm = None
+    await db_session.flush()
+
+    batch = await _batch(db_session, kiln, "HOR-NODIM")
     service = KilnBatchLayoutService(db_session)
 
     with pytest.raises(KilnLayoutDimensionsMissingError) as exc_info:
@@ -325,12 +348,13 @@ async def test_crear_y_obtener_layout_con_geometria_derivada_internal(
             plate_thickness_cm=Decimal("1.5"),
         ),
     ]
+    # M2: cada placement representa exactamente quantity = 1 en posiciones no colisionantes
     placements = [
         PlacementSpec(
             batch_assignment_id=asgn.id,
             group_index=0,
             unit_index=None,
-            quantity=6,
+            quantity=1,
             level_index=0,
             x_cm=Decimal("5"),
             y_cm=Decimal("10"),
@@ -340,7 +364,7 @@ async def test_crear_y_obtener_layout_con_geometria_derivada_internal(
             batch_assignment_id=asgn.id,
             group_index=1,
             unit_index=None,
-            quantity=4,
+            quantity=1,
             level_index=0,
             x_cm=Decimal("20"),
             y_cm=Decimal("25"),
@@ -357,6 +381,9 @@ async def test_crear_y_obtener_layout_con_geometria_derivada_internal(
     )
     assert result.layout.version == 1
     assert len(result.placements) == 2
+    assert result.placed_quantity == 2
+    assert result.pending_quantity == 8
+    assert result.invalid_quantity == 0
 
     # Verificar que el backend congeló largo, ancho, alto y separación desde la carga interna
     p1 = result.placements[0]
@@ -387,16 +414,26 @@ async def test_geometria_derivada_desde_v2_quotation(db_session: AsyncSession) -
     )
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     result = await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=[
             PlacementSpec(
                 batch_assignment_id=asgn.id,
                 group_index=0,
                 unit_index=None,
-                quantity=5,
+                quantity=1,
                 level_index=0,
                 x_cm=Decimal("0"),
                 y_cm=Decimal("0"),
@@ -405,6 +442,8 @@ async def test_geometria_derivada_desde_v2_quotation(db_session: AsyncSession) -
         ],
         user=USER,
     )
+    assert result.placed_quantity == 1
+    assert result.pending_quantity == 4
     p = result.placements[0]
     assert p.piece_length_cm_snapshot == Decimal("14.0")
     assert p.piece_width_cm_snapshot == Decimal("11.0")
@@ -428,16 +467,26 @@ async def test_geometria_derivada_desde_firing_v2(db_session: AsyncSession) -> N
     )
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     result = await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=[
             PlacementSpec(
                 batch_assignment_id=asgn.id,
                 group_index=0,
                 unit_index=None,
-                quantity=8,
+                quantity=1,
                 level_index=0,
                 x_cm=Decimal("0"),
                 y_cm=Decimal("0"),
@@ -446,6 +495,8 @@ async def test_geometria_derivada_desde_firing_v2(db_session: AsyncSession) -> N
         ],
         user=USER,
     )
+    assert result.placed_quantity == 1
+    assert result.pending_quantity == 7
     p = result.placements[0]
     assert p.piece_length_cm_snapshot == Decimal("22.0")
     assert p.piece_width_cm_snapshot == Decimal("18.0")
@@ -471,17 +522,27 @@ async def test_geometria_invalida_o_faltante_rechaza_con_422(db_session: AsyncSe
     await db_session.flush()
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     with pytest.raises(KilnLayoutPieceDimensionsMissingError) as exc_info:
         await service.save_layout(
             batch.id,
             expected_version=0,
-            levels=[],
+            levels=levels,
             placements=[
                 PlacementSpec(
                     batch_assignment_id=asgn.id,
                     group_index=0,
                     unit_index=None,
-                    quantity=3,
+                    quantity=1,
                     level_index=0,
                     x_cm=Decimal("0"),
                     y_cm=Decimal("0"),
@@ -610,16 +671,26 @@ async def test_snapshot_pieza_inmutable_tras_mutar_maestro_y_origen(
     )
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=[
             PlacementSpec(
                 batch_assignment_id=asgn.id,
                 group_index=0,
                 unit_index=None,
-                quantity=5,
+                quantity=1,
                 level_index=0,
                 x_cm=Decimal("0"),
                 y_cm=Decimal("0"),
@@ -701,17 +772,27 @@ async def test_foreign_assignment_rechazada(db_session: AsyncSession) -> None:
     asgn_b = await _assign_internal(db_session, batch_b, load, line, quantity=5)
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     with pytest.raises(KilnLayoutAssignmentMismatchError) as exc_info:
         await service.save_layout(
             batch_a.id,
             expected_version=0,
-            levels=[],
+            levels=levels,
             placements=[
                 PlacementSpec(
                     batch_assignment_id=asgn_b.id,
                     group_index=0,
                     unit_index=None,
-                    quantity=5,
+                    quantity=1,
                     level_index=0,
                     x_cm=Decimal("0"),
                     y_cm=Decimal("0"),
@@ -725,23 +806,39 @@ async def test_foreign_assignment_rechazada(db_session: AsyncSession) -> None:
 
 
 async def test_cantidad_placements_no_supera_asignacion(db_session: AsyncSession) -> None:
-    """Suma de placements 6 + 4 <= 10 pasa; 6 + 5 > 10 falla con 409."""
+    """Dos placements de quantity=1 <= 2 pasan; tres placements de quantity=1 > 2 fallan (409)."""
     kiln = await _kiln_with_dims(db_session, "K-QTY")
     batch = await _batch(db_session, kiln, "HOR-QTY")
-    load, line = await _load(db_session, "L-QTY", quantity=10, unit_volume=Decimal("100"))
-    asgn = await _assign_internal(db_session, batch, load, line, quantity=10)
+    load, line = await _load(db_session, "L-QTY", quantity=2, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=2)
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # 2 placements de quantity=1 en posiciones no solapadas
     res = await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=[
             PlacementSpec(
                 batch_assignment_id=asgn.id,
                 group_index=0,
                 unit_index=None,
-                quantity=6,
+                quantity=1,
                 level_index=0,
                 x_cm=Decimal("0"),
                 y_cm=Decimal("0"),
@@ -751,29 +848,31 @@ async def test_cantidad_placements_no_supera_asignacion(db_session: AsyncSession
                 batch_assignment_id=asgn.id,
                 group_index=1,
                 unit_index=None,
-                quantity=4,
+                quantity=1,
                 level_index=0,
-                x_cm=Decimal("10"),
-                y_cm=Decimal("10"),
-                rotation_degrees=90,
+                x_cm=Decimal("20"),
+                y_cm=Decimal("20"),
+                rotation_degrees=0,
             ),
         ],
         user=USER,
     )
     assert len(res.placements) == 2
+    assert res.placed_quantity == 2
+    assert res.pending_quantity == 0
 
-    # 6 + 5 = 11 > 10 -> FAIL (409)
+    # 3 placements de quantity=1 > 2 asignados -> FAIL (409)
     with pytest.raises(KilnLayoutQuantityExceededError) as exc_info:
         await service.save_layout(
             batch.id,
             expected_version=1,
-            levels=[],
+            levels=levels,
             placements=[
                 PlacementSpec(
                     batch_assignment_id=asgn.id,
                     group_index=0,
                     unit_index=None,
-                    quantity=6,
+                    quantity=1,
                     level_index=0,
                     x_cm=Decimal("0"),
                     y_cm=Decimal("0"),
@@ -783,10 +882,20 @@ async def test_cantidad_placements_no_supera_asignacion(db_session: AsyncSession
                     batch_assignment_id=asgn.id,
                     group_index=1,
                     unit_index=None,
-                    quantity=5,
+                    quantity=1,
                     level_index=0,
-                    x_cm=Decimal("10"),
-                    y_cm=Decimal("10"),
+                    x_cm=Decimal("20"),
+                    y_cm=Decimal("20"),
+                    rotation_degrees=0,
+                ),
+                PlacementSpec(
+                    batch_assignment_id=asgn.id,
+                    group_index=2,
+                    unit_index=None,
+                    quantity=1,
+                    level_index=0,
+                    x_cm=Decimal("40"),
+                    y_cm=Decimal("0"),
                     rotation_degrees=0,
                 ),
             ],
@@ -803,15 +912,30 @@ async def test_reintento_idempotente_exacto_no_duplica_ni_falla_stale_version(
     kiln = await _kiln_with_dims(db_session, "K-IDEM-EXACT")
     batch = await _batch(db_session, kiln, "HOR-IDEM-EXACT")
     load, line = await _load(db_session, "L-IDEM-E", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     placements = [
         PlacementSpec(
             batch_assignment_id=asgn.id,
             group_index=0,
             unit_index=None,
-            quantity=5,
+            quantity=1,
             level_index=0,
             x_cm=Decimal("0"),
             y_cm=Decimal("0"),
@@ -823,7 +947,7 @@ async def test_reintento_idempotente_exacto_no_duplica_ni_falla_stale_version(
     res1 = await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=placements,
         user=USER,
         idempotency_key="idemp-layout-exact-001",
@@ -836,7 +960,7 @@ async def test_reintento_idempotente_exacto_no_duplica_ni_falla_stale_version(
     res2 = await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=placements,
         user=USER,
         idempotency_key="idemp-layout-exact-001",
@@ -853,15 +977,30 @@ async def test_idempotencia_misma_clave_diferente_payload_falla_409(
     kiln = await _kiln_with_dims(db_session, "K-IDEM-DIFF")
     batch = await _batch(db_session, kiln, "HOR-IDEM-DIFF")
     load, line = await _load(db_session, "L-IDEM-D", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
 
     service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
     p1 = [
         PlacementSpec(
             batch_assignment_id=asgn.id,
             group_index=0,
             unit_index=None,
-            quantity=2,
+            quantity=1,
             level_index=0,
             x_cm=Decimal("0"),
             y_cm=Decimal("0"),
@@ -873,10 +1012,10 @@ async def test_idempotencia_misma_clave_diferente_payload_falla_409(
             batch_assignment_id=asgn.id,
             group_index=0,
             unit_index=None,
-            quantity=3,
+            quantity=1,
             level_index=0,
-            x_cm=Decimal("5"),
-            y_cm=Decimal("5"),
+            x_cm=Decimal("15"),
+            y_cm=Decimal("15"),
             rotation_degrees=90,
         )
     ]
@@ -884,7 +1023,7 @@ async def test_idempotencia_misma_clave_diferente_payload_falla_409(
     await service.save_layout(
         batch.id,
         expected_version=0,
-        levels=[],
+        levels=levels,
         placements=p1,
         user=USER,
         idempotency_key="idemp-diff-001",
@@ -894,7 +1033,7 @@ async def test_idempotencia_misma_clave_diferente_payload_falla_409(
         await service.save_layout(
             batch.id,
             expected_version=0,
-            levels=[],
+            levels=levels,
             placements=p2,
             user=USER,
             idempotency_key="idemp-diff-001",
@@ -980,3 +1119,373 @@ async def test_get_layout_inexistente_404(db_session: AsyncSession) -> None:
         await service.get_layout(batch.id)
     assert exc_info.value.status_code == 404
     assert exc_info.value.code == "KILN_LAYOUT_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Validaciones Geométricas M2 en Servicio
+# ---------------------------------------------------------------------------
+
+async def test_layout_service_rechaza_colision_422(db_session: AsyncSession) -> None:
+    """Dos placements en mismo nivel con solape lanzan 422 KILN_LAYOUT_COLLISION."""
+    kiln = await _kiln_with_dims(db_session, "K-COL")
+    batch = await _batch(db_session, kiln, "HOR-COL")
+    load, line = await _load(db_session, "L-COL", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("2.0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # Pieza 10x10 con sep 2 -> reservada 12x12
+    # P1 en x=0, y=0 -> reservado [0..12, 0..12]
+    # P2 en x=11, y=0 -> reservado [11..23, 0..12] -> solapa en [11..12]
+    placements = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("0"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        ),
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=1,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("11"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        ),
+    ]
+
+    with pytest.raises(KilnLayoutCollisionError) as exc_info:
+        await service.save_layout(
+            batch.id,
+            expected_version=0,
+            levels=levels,
+            placements=placements,
+            user=USER,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_COLLISION"
+
+
+async def test_layout_service_rechaza_out_of_bounds_422(db_session: AsyncSession) -> None:
+    """Placement que excede ancho o profundidad del horno lanza 422 KILN_LAYOUT_OUT_OF_BOUNDS."""
+    kiln = await _kiln_with_dims(db_session, "K-OOB", width=Decimal("50"), depth=Decimal("50"))
+    batch = await _batch(db_session, kiln, "HOR-OOB")
+    load, line = await _load(db_session, "L-OOB", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # x=45 para pieza de 10 -> right=55 > 50 (kiln_width)
+    placements = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("45"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        )
+    ]
+
+    with pytest.raises(KilnLayoutOutOfBoundsError) as exc_info:
+        await service.save_layout(
+            batch.id,
+            expected_version=0,
+            levels=levels,
+            placements=placements,
+            user=USER,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_OUT_OF_BOUNDS"
+
+
+async def test_layout_service_rechaza_height_exceeded_422(db_session: AsyncSession) -> None:
+    """Pieza que excede altura de nivel lanza 422 KILN_LAYOUT_HEIGHT_EXCEEDED."""
+    kiln = await _kiln_with_dims(db_session, "K-HGT")
+    batch = await _batch(db_session, kiln, "HOR-HGT")
+    load, line = await _load(db_session, "L-HGT", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("25.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+
+    service = KilnBatchLayoutService(db_session)
+    # Nivel de altura útil 20 cm, pero pieza tiene 25 + 1 = 26 cm de altura reservada
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    placements = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("0"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        )
+    ]
+
+    with pytest.raises(KilnLayoutHeightExceededError) as exc_info:
+        await service.save_layout(
+            batch.id,
+            expected_version=0,
+            levels=levels,
+            placements=placements,
+            user=USER,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_HEIGHT_EXCEEDED"
+
+
+async def test_layout_service_rechaza_solapamiento_niveles_422(db_session: AsyncSession) -> None:
+    """Dos niveles que se solapan verticalmente lanzan 422 KILN_LAYOUT_LEVEL_OVERLAP."""
+    kiln = await _kiln_with_dims(db_session, "K-LVL-OV")
+    batch = await _batch(db_session, kiln, "HOR-LVL-OV")
+    service = KilnBatchLayoutService(db_session)
+
+    # Nivel 0: [0..25], Nivel 1: [20..35] -> solapan en [20..25]
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("25"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        ),
+        LevelSpec(
+            level_index=1,
+            name="Nivel 1",
+            z_cm=Decimal("20"),
+            usable_height_cm=Decimal("15"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        ),
+    ]
+
+    with pytest.raises(KilnLayoutLevelOverlapError) as exc_info:
+        await service.save_layout(
+            batch.id,
+            expected_version=0,
+            levels=levels,
+            placements=[],
+            user=USER,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_LEVEL_OVERLAP"
+
+
+async def test_layout_service_rechaza_nivel_out_of_bounds_422(
+    db_session: AsyncSession,
+) -> None:
+    """Nivel que supera la altura del horno lanza 422 KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS."""
+    kiln = await _kiln_with_dims(db_session, "K-LVL-OOB", height=Decimal("60"))
+    batch = await _batch(db_session, kiln, "HOR-LVL-OOB")
+    service = KilnBatchLayoutService(db_session)
+
+    # Nivel con z=50 y usable_height=20 -> total 70 > 60
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("50"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+
+    with pytest.raises(KilnLayoutLevelOutOfBoundsError) as exc_info:
+        await service.save_layout(
+            batch.id,
+            expected_version=0,
+            levels=levels,
+            placements=[],
+            user=USER,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS"
+
+
+async def test_layout_service_rechaza_quantity_distinta_de_1_422(
+    db_session: AsyncSession,
+) -> None:
+    """Un placement con quantity != 1 es rechazado con 422 KILN_LAYOUT_PHYSICAL_QUANTITY_INVALID."""
+    kiln = await _kiln_with_dims(db_session, "K-QTY-1")
+    batch = await _batch(db_session, kiln, "HOR-QTY-1")
+    load, line = await _load(db_session, "L-QTY-1", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    placements = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=None,
+            quantity=2,  # Inválido en M2
+            level_index=0,
+            x_cm=Decimal("0"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        )
+    ]
+
+    with pytest.raises(KilnLayoutPhysicalQuantityInvalidError) as exc_info:
+        await service.save_layout(
+            batch.id,
+            expected_version=0,
+            levels=levels,
+            placements=placements,
+            user=USER,
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "KILN_LAYOUT_PHYSICAL_QUANTITY_INVALID"
+
+
+async def test_layout_service_atomicidad_rechazo_no_altera_version(
+    db_session: AsyncSession,
+) -> None:
+    """Fallo por colisión mantiene layout previo intacto sin alterar versión."""
+    kiln = await _kiln_with_dims(db_session, "K-ATOM")
+    batch = await _batch(db_session, kiln, "HOR-ATOM")
+    load, line = await _load(db_session, "L-ATOM", quantity=5, unit_volume=Decimal("100"))
+    line.length_cm = Decimal("10.0")
+    line.width_cm = Decimal("10.0")
+    line.height_cm = Decimal("10.0")
+    load.piece_separation_cm = Decimal("1.0")
+    await db_session.flush()
+    asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
+
+    service = KilnBatchLayoutService(db_session)
+    levels = [
+        LevelSpec(
+            level_index=0,
+            name="Nivel 0",
+            z_cm=Decimal("0"),
+            usable_height_cm=Decimal("20"),
+            plate_label=None,
+            plate_thickness_cm=None,
+        )
+    ]
+    # 1. Crear layout versión 1 válido
+    p_init = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("0"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        )
+    ]
+    res1 = await service.save_layout(
+        batch.id,
+        expected_version=0,
+        levels=levels,
+        placements=p_init,
+        user=USER,
+    )
+    assert res1.layout.version == 1
+    assert len(res1.placements) == 1
+
+    # 2. Intentar actualizar con 1 placement válido + 1 placement colisionante
+    p_invalid = [
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=0,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("0"),
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        ),
+        PlacementSpec(
+            batch_assignment_id=asgn.id,
+            group_index=1,
+            unit_index=None,
+            quantity=1,
+            level_index=0,
+            x_cm=Decimal("5"),  # Colisión con [0..11]
+            y_cm=Decimal("0"),
+            rotation_degrees=0,
+        ),
+    ]
+    with pytest.raises(KilnLayoutCollisionError):
+        await service.save_layout(
+            batch.id,
+            expected_version=1,
+            levels=levels,
+            placements=p_invalid,
+            user=USER,
+        )
+
+    # 3. GET confirma que el layout sigue en versión 1 con exactamente 1 placement
+    got = await service.get_layout(batch.id)
+    assert got.layout.version == 1
+    assert len(got.placements) == 1
+    assert got.placements[0].x_cm == Decimal("0")

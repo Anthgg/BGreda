@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
@@ -76,6 +76,11 @@ from app.models.kiln_batches import (
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.kiln_layout_geometry import (
+    LevelGeometry,
+    PlacementGeometry,
+    validate_layout_geometry,
+)
 
 KILN_LAYOUT_ENTITY = "kiln_batch_layout"
 
@@ -161,6 +166,48 @@ class KilnLayoutIdempotencyKeyReusedError(APIError):
     message = "Esa clave de idempotencia ya se uso con otro contenido de layout"
 
 
+class KilnLayoutOutOfBoundsError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_OUT_OF_BOUNDS"
+    message = "El placement excede los límites físicos utilizables del horno (ancho o profundidad)"
+
+
+class KilnLayoutHeightExceededError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_HEIGHT_EXCEEDED"
+    message = "La altura reservada de la pieza excede la altura útil del nivel asignado"
+
+
+class KilnLayoutCollisionError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_COLLISION"
+    message = "Dos o más piezas colisionan o superponen sus áreas reservadas en el mismo nivel"
+
+
+class KilnLayoutLevelOutOfBoundsError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_LEVEL_OUT_OF_BOUNDS"
+    message = "La configuración de un nivel excede la altura del horno o es inválida"
+
+
+class KilnLayoutLevelOverlapError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_LEVEL_OVERLAP"
+    message = "Dos o más niveles se solapan verticalmente en el horno"
+
+
+class KilnLayoutLevelNotFoundError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_LEVEL_NOT_FOUND"
+    message = "El placement hace referencia a un nivel que no existe en el layout"
+
+
+class KilnLayoutPhysicalQuantityInvalidError(APIError):
+    status_code = 422
+    code = "KILN_LAYOUT_PHYSICAL_QUANTITY_INVALID"
+    message = "Cada placement físico debe tener cantidad exactamente 1"
+
+
 # ---------------------------------------------------------------------------
 # Data Transfer Objects
 # ---------------------------------------------------------------------------
@@ -198,6 +245,9 @@ class LayoutView:
     layout: KilnBatchLayout
     levels: tuple[KilnBatchLayoutLevel, ...]
     placements: tuple[KilnBatchLayoutPlacement, ...]
+    placed_quantity: int
+    pending_quantity: int
+    invalid_quantity: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -329,10 +379,24 @@ class KilnBatchLayoutService:
                 .order_by(KilnBatchLayoutPlacement.id)
             )
         ).all()
+        placed_quantity = sum(p.quantity for p in placements)
+        total_assigned = (
+            await self._session.scalar(
+                select(func.coalesce(func.sum(KilnBatchAssignment.quantity), 0)).where(
+                    KilnBatchAssignment.batch_id == layout.batch_id,
+                    KilnBatchAssignment.status == KilnBatchAssignmentStatus.ACTIVE,
+                )
+            )
+            or 0
+        )
+        pending_quantity = max(0, int(total_assigned) - placed_quantity)
         return LayoutView(
             layout=layout,
             levels=tuple(levels),
             placements=tuple(placements),
+            placed_quantity=placed_quantity,
+            pending_quantity=pending_quantity,
+            invalid_quantity=0,
         )
 
     def _audit_layout(
@@ -630,6 +694,81 @@ class KilnBatchLayoutService:
             geometry_by_assignment = await self.resolve_assignments_geometry(
                 list(active_assignments.values())
             )
+
+        # ── Validar geometría física del layout (Fase 010M - M2) ─────────
+        kiln_width = (
+            existing_layout.kiln_width_cm_snapshot
+            if existing_layout is not None
+            else kiln.usable_width_cm
+        )
+        kiln_depth = (
+            existing_layout.kiln_depth_cm_snapshot
+            if existing_layout is not None
+            else kiln.usable_depth_cm
+        )
+        kiln_height = (
+            existing_layout.kiln_height_cm_snapshot
+            if existing_layout is not None
+            else kiln.usable_height_cm
+        )
+
+        level_geoms = [
+            LevelGeometry(
+                level_index=lvl.level_index,
+                z_cm=lvl.z_cm,
+                usable_height_cm=lvl.usable_height_cm,
+            )
+            for lvl in levels
+        ]
+
+        placement_geoms: list[PlacementGeometry] = []
+        for idx, p in enumerate(placements):
+            geom = geometry_by_assignment.get(p.batch_assignment_id)
+            if geom is None:
+                raise KilnLayoutPieceDimensionsMissingError()
+            length, width, height, sep = geom
+            placement_geoms.append(
+                PlacementGeometry(
+                    index=idx,
+                    batch_assignment_id=p.batch_assignment_id,
+                    quantity=p.quantity,
+                    level_index=p.level_index,
+                    x_cm=p.x_cm,
+                    y_cm=p.y_cm,
+                    rotation_degrees=p.rotation_degrees,
+                    piece_length_cm=length,
+                    piece_width_cm=width,
+                    piece_height_cm=height,
+                    separation_cm=sep,
+                )
+            )
+
+        try:
+            validate_layout_geometry(
+                kiln_width=kiln_width,
+                kiln_depth=kiln_depth,
+                kiln_height=kiln_height,
+                levels=level_geoms,
+                placements=placement_geoms,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if msg.startswith("OUT_OF_BOUNDS:"):
+                raise KilnLayoutOutOfBoundsError(msg) from e
+            elif msg.startswith("HEIGHT_EXCEEDED:"):
+                raise KilnLayoutHeightExceededError(msg) from e
+            elif msg.startswith("COLLISION:"):
+                raise KilnLayoutCollisionError(msg) from e
+            elif msg.startswith("LEVEL_OUT_OF_BOUNDS:"):
+                raise KilnLayoutLevelOutOfBoundsError(msg) from e
+            elif msg.startswith("LEVEL_OVERLAP:"):
+                raise KilnLayoutLevelOverlapError(msg) from e
+            elif msg.startswith("LEVEL_NOT_FOUND:"):
+                raise KilnLayoutLevelNotFoundError(msg) from e
+            elif msg.startswith("PHYSICAL_QUANTITY_INVALID:"):
+                raise KilnLayoutPhysicalQuantityInvalidError(msg) from e
+            else:
+                raise KilnLayoutOutOfBoundsError(msg) from e
 
         # ── Persistir en una sola transaccion ─────────────────────────────
         if existing_layout is None:

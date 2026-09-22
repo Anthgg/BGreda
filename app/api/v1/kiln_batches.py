@@ -359,6 +359,9 @@ def _layout_out(view: LayoutView) -> KilnBatchLayoutOut:
         kiln_width_cm_snapshot=view.layout.kiln_width_cm_snapshot,
         kiln_depth_cm_snapshot=view.layout.kiln_depth_cm_snapshot,
         kiln_height_cm_snapshot=view.layout.kiln_height_cm_snapshot,
+        placed_quantity=view.placed_quantity,
+        pending_quantity=view.pending_quantity,
+        invalid_quantity=view.invalid_quantity,
         updated_at=view.layout.updated_at,
         levels=[
             KilnBatchLayoutLevelOut(
