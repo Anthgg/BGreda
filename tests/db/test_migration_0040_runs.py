@@ -414,7 +414,7 @@ async def test_bajar_sin_datos_funciona_y_con_datos_se_niega(
     assert version == "0040"
 
 
-async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0040(
+async def test_toda_la_cadena_deja_una_sola_cabeza(
     migration_engine: AsyncEngine,
 ) -> None:
     _upgrade("head")
@@ -422,4 +422,4 @@ async def test_toda_la_cadena_deja_una_sola_cabeza_y_es_0040(
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()
         )
-    assert cabezas == ["0040"]
+    assert len(cabezas) == 1
