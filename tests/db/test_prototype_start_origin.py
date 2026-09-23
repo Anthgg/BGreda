@@ -405,6 +405,10 @@ async def test_el_modelo_y_la_migracion_0024_dicen_exactamente_lo_mismo(
             text(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
                 " WHERE conname = 'ck_prototypes_started_requires_origin'"
+                # Fase 010J (DEFERRED_04): solo el esquema de ESTA sesion. Una
+                # base con otro esquema migrado al lado tiene la misma
+                # restriccion dos veces, y `scalar_one` fallaba por eso.
+                " AND connamespace = current_schema()::regnamespace"
             )
         )
     ).scalar_one()

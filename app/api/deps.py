@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.cookies import ACCESS_COOKIE_NAME
 from app.core.config import Settings, get_settings
 from app.core.errors import (
+    APIError,
     AuthAccountInactiveError,
     AuthInsufficientRoleError,
     AuthNotAuthenticatedError,
@@ -69,6 +70,36 @@ from app.services.supabase_auth import SupabaseAuthClient
 from app.services.users import UserService
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+class LegacyQuotationCreationDisabledError(APIError):
+    """Crear una cotizacion Legacy nueva despues del corte. Fase 010J.
+
+    Un error de dominio y no un 404: la ruta sigue existiendo para quien la
+    llame con un cliente antiguo, y la respuesta le dice a donde ir.
+    """
+
+    status_code = 409
+    code = "LEGACY_QUOTATION_CREATION_DISABLED"
+    message = (
+        "Las cotizaciones Legacy ya no se crean. Usa el Cotizador V2; las "
+        "cotizaciones Legacy existentes siguen disponibles para consulta."
+    )
+
+
+async def require_legacy_quotation_creation(settings: SettingsDep) -> None:
+    """Corta la creacion de cotizaciones Legacy si el interruptor esta apagado.
+
+    Va en las RUTAS generales de creacion, no en el servicio: la cotizacion
+    final de una muestra aprobada llama al servicio directamente y es la
+    excepcion aprobada para 010J. Para usarla hace falta una muestra real
+    aprobada y vigente; no es una puerta para crear Legacy arbitrarias.
+    """
+    if not settings.LEGACY_QUOTATION_CREATION_ENABLED:
+        raise LegacyQuotationCreationDisabledError()
+
+
+LegacyQuotationCreationGuardDep = Annotated[None, Depends(require_legacy_quotation_creation)]
 
 
 def get_supabase_auth_client(request: Request) -> SupabaseAuthClient:

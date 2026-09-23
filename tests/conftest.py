@@ -26,6 +26,10 @@ os.environ.update(
         "COOKIE_DOMAIN": "",
         "CSRF_SECRET": "clave-de-pruebas-suficientemente-larga-0123456789",
         "LOG_LEVEL": "WARNING",
+        # Fase 010J. Las suites Legacy existentes siguen creando cotizaciones
+        # Legacy para probar lo historico. El corte se prueba aparte, con el
+        # interruptor apagado (tests/db/test_legacy_creation_cutover.py).
+        "LEGACY_QUOTATION_CREATION_ENABLED": "true",
     }
 )
 
