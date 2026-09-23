@@ -150,6 +150,18 @@ class InventoryService:
         )
         return [tuple(row) for row in rows.all()], int(total or 0)
 
+    async def get_movement(
+        self, movement_id: int
+    ) -> tuple[StockMovement, Product, StockLocation] | None:
+        stmt = (
+            select(StockMovement, Product, StockLocation)
+            .join(Product, Product.id == StockMovement.product_id)
+            .join(StockLocation, StockLocation.id == StockMovement.location_id)
+            .where(StockMovement.id == movement_id)
+        )
+        row = (await self._session.execute(stmt)).first()
+        return tuple(row) if row is not None else None
+
     # -- escritura ----------------------------------------------------------
     async def apply_movement(
         self,

@@ -154,8 +154,10 @@ async def create_adjustment(
     """Ajusta existencia dejando siempre el movimiento que lo justifica."""
     movement = await service.adjust(payload, user)
     await session.commit()
-    rows, _total = await service.list_movements(product_id=movement.product_id, limit=1)
-    stored, product, location = rows[0]
+    row = await service.get_movement(movement.id)
+    if row is None:
+        raise RuntimeError("Stock movement was not found after commit")
+    stored, product, location = row
     return StockMovementOut(
         id=stored.id,
         product_id=product.id,
