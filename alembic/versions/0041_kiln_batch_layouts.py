@@ -205,12 +205,8 @@ def upgrade() -> None:
             "level_index >= 0",
             name="ck_kiln_batch_layout_placements_level_index_non_negative",
         ),
-        sa.CheckConstraint(
-            "x_cm >= 0", name="ck_kiln_batch_layout_placements_x_non_negative"
-        ),
-        sa.CheckConstraint(
-            "y_cm >= 0", name="ck_kiln_batch_layout_placements_y_non_negative"
-        ),
+        sa.CheckConstraint("x_cm >= 0", name="ck_kiln_batch_layout_placements_x_non_negative"),
+        sa.CheckConstraint("y_cm >= 0", name="ck_kiln_batch_layout_placements_y_non_negative"),
         sa.CheckConstraint(
             "rotation_degrees IN (0, 90)",
             name="ck_kiln_batch_layout_placements_rotation_allowed",

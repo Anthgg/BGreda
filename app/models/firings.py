@@ -124,9 +124,7 @@ class Kiln(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint("capacity_volume_cm3 > 0", name="capacity_positive"),
-        CheckConstraint(
-            "firing_days_per_batch >= 1", name="firing_days_per_batch_positive"
-        ),
+        CheckConstraint("firing_days_per_batch >= 1", name="firing_days_per_batch_positive"),
         CheckConstraint(
             "usable_width_cm IS NULL OR usable_width_cm > 0",
             name="usable_width_positive",

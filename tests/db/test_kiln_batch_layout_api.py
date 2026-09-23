@@ -246,9 +246,9 @@ async def test_layout_api_rotacion_invalida_422(
             },
             headers=head(admin_csrf),
         )
-        assert (
-            res.status_code == 422
-        ), f"Expected 422 for rotation {invalid_deg}, got {res.status_code}"
+        assert res.status_code == 422, (
+            f"Expected 422 for rotation {invalid_deg}, got {res.status_code}"
+        )
 
 
 async def test_layout_api_rechaza_put_en_estado_no_editable(
@@ -389,6 +389,7 @@ async def test_layout_api_idempotencia_http(
 # Validaciones Geométricas M2 por HTTP
 # ---------------------------------------------------------------------------
 
+
 async def test_layout_api_rechaza_colision_422(
     api: httpx.AsyncClient,
     admin_csrf: str,
@@ -406,9 +407,7 @@ async def test_layout_api_rechaza_colision_422(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}]
     # Pieza 10x10 con sep 2 -> reservado 12x12
     # P1 en (0, 0) -> [0..12, 0..12]
     # P2 en (11, 0) -> [11..23, 0..12] -> solapa en [11..12]
@@ -464,9 +463,7 @@ async def test_layout_api_rechaza_out_of_bounds_422(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}]
     # x=45 para pieza de 10 -> right=55 > 50 (kiln_width)
     res = await api.put(
         f"{KILN_BATCHES}/{batch.id}/layout",
@@ -504,9 +501,7 @@ async def test_layout_api_rechaza_quantity_invalida_422(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}]
     res = await api.put(
         f"{KILN_BATCHES}/{batch.id}/layout",
         json={
@@ -548,9 +543,7 @@ async def test_layout_api_atomicidad_error_no_incrementa_version(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}]
 
     # 1. Crear versión 1 válida
     res_v1 = await api.put(
@@ -621,6 +614,7 @@ async def test_layout_api_atomicidad_error_no_incrementa_version(
 # Sugerencia de Layout M3 en API
 # ---------------------------------------------------------------------------
 
+
 async def test_suggest_layout_api_ciclo_y_no_mutacion(
     api: httpx.AsyncClient,
     admin_csrf: str,
@@ -638,9 +632,7 @@ async def test_suggest_layout_api_ciclo_y_no_mutacion(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=5)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}]
     # Guardar versión 1 con 1 placement
     res_init = await api.put(
         f"{KILN_BATCHES}/{batch.id}/layout",
@@ -702,9 +694,7 @@ async def test_suggest_layout_api_expected_version_invalida_409(
     batch = await _batch(db_session, kiln, "HOR-API-SUG-ST")
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0", "usable_height_cm": "20"}]
     # Crear versión 1
     res_init = await api.put(
         f"{KILN_BATCHES}/{batch.id}/layout",
@@ -765,9 +755,7 @@ async def test_suggest_to_put_roundtrip_api(
     await _assign_internal(db_session, batch, load, line, quantity=3)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0.0", "usable_height_cm": "20.0"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0.0", "usable_height_cm": "20.0"}]
 
     # 1. POST suggest con candidate_levels para el batch sin layout previo
     sug_res = await api.post(
@@ -834,9 +822,7 @@ async def test_suggest_api_rechaza_candidate_level_out_of_bounds_422(
     await _assign_internal(db_session, batch, load, line, quantity=1)
     await db_session.commit()
 
-    invalid_levels = [
-        {"level_index": 0, "name": "N0", "z_cm": "70.0", "usable_height_cm": "20.0"}
-    ]
+    invalid_levels = [{"level_index": 0, "name": "N0", "z_cm": "70.0", "usable_height_cm": "20.0"}]
     res = await api.post(
         f"{KILN_BATCHES}/{batch.id}/layout/suggest",
         json={
@@ -870,9 +856,7 @@ async def test_suggest_api_rechaza_unit_index_none_422(
     asgn = await _assign_internal(db_session, batch, load, line, quantity=2)
     await db_session.commit()
 
-    levels_payload = [
-        {"level_index": 0, "name": "N0", "z_cm": "0.0", "usable_height_cm": "20.0"}
-    ]
+    levels_payload = [{"level_index": 0, "name": "N0", "z_cm": "0.0", "usable_height_cm": "20.0"}]
     # Guardar layout con unit_index = null
     put_res = await api.put(
         f"{KILN_BATCHES}/{batch.id}/layout",
@@ -904,4 +888,3 @@ async def test_suggest_api_rechaza_unit_index_none_422(
     )
     assert res.status_code == 422, res.text
     assert res.json()["error"]["code"] == "KILN_LAYOUT_UNIT_IDENTITY_MISSING"
-

@@ -301,6 +301,7 @@ async def _assign_firing_v2(
 # Pruebas
 # ---------------------------------------------------------------------------
 
+
 async def test_dimensiones_horno_faltantes_rechazan_layout(db_session: AsyncSession) -> None:
     """Si el horno no tiene usable_width/depth/height, el layout se rechaza con 422."""
     kiln = await _kiln(db_session, "K-NODIM")
@@ -1127,6 +1128,7 @@ async def test_get_layout_inexistente_404(db_session: AsyncSession) -> None:
 # Validaciones Geométricas M2 en Servicio
 # ---------------------------------------------------------------------------
 
+
 async def test_layout_service_rechaza_colision_422(db_session: AsyncSession) -> None:
     """Dos placements en mismo nivel con solape lanzan 422 KILN_LAYOUT_COLLISION."""
     kiln = await _kiln_with_dims(db_session, "K-COL")
@@ -1496,6 +1498,7 @@ async def test_layout_service_atomicidad_rechazo_no_altera_version(
 # ---------------------------------------------------------------------------
 # Sugerencia de Layout M3 en Servicio
 # ---------------------------------------------------------------------------
+
 
 async def test_suggest_layout_service_con_placements_existentes(
     db_session: AsyncSession,
@@ -1975,4 +1978,3 @@ async def test_suggest_layout_service_unidades_no_contiguas(
     assert suggestion.suggested_count == 2
     suggested_uids = [p.unit_index for p in suggestion.suggested_placements]
     assert set(suggested_uids) == {2, 4}
-

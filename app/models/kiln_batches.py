@@ -499,10 +499,10 @@ class KilnBatchOperation(Base, TimestampMixin):
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Layout fisico del horno — Fase 010M
 # ---------------------------------------------------------------------------
+
 
 class KilnBatchLayout(Base, TimestampMixin):
     """Mapa fisico de una hornada: como se acomodan las piezas en el horno.
@@ -534,12 +534,8 @@ class KilnBatchLayout(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        CheckConstraint(
-            "kiln_width_cm_snapshot > 0", name="ck_kiln_batch_layouts_width_positive"
-        ),
-        CheckConstraint(
-            "kiln_depth_cm_snapshot > 0", name="ck_kiln_batch_layouts_depth_positive"
-        ),
+        CheckConstraint("kiln_width_cm_snapshot > 0", name="ck_kiln_batch_layouts_width_positive"),
+        CheckConstraint("kiln_depth_cm_snapshot > 0", name="ck_kiln_batch_layouts_depth_positive"),
         CheckConstraint(
             "kiln_height_cm_snapshot > 0",
             name="ck_kiln_batch_layouts_height_positive",

@@ -355,6 +355,7 @@ async def cancel_kiln_batch(
 # Fase 010M: layout fisico del horno
 # ---------------------------------------------------------------------------
 
+
 def _layout_out(view: LayoutView) -> KilnBatchLayoutOut:
     """Convierte un LayoutView al schema de respuesta de la API."""
     return KilnBatchLayoutOut(
@@ -544,5 +545,3 @@ async def suggest_kiln_batch_layout(
             candidate_levels=candidate_levels,
         )
     )
-
-

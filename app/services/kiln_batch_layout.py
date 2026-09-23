@@ -102,6 +102,7 @@ LAYOUT_IDEMPOTENCY_LOCK_NAMESPACE = 90111
 # Errores de negocio
 # ---------------------------------------------------------------------------
 
+
 class KilnLayoutBatchNotFoundError(APIError):
     status_code = 404
     code = "KILN_BATCH_NOT_FOUND"
@@ -143,18 +144,14 @@ class KilnLayoutVersionConflictError(APIError):
     status_code = 409
     code = "KILN_LAYOUT_VERSION_CONFLICT"
     message = (
-        "El layout fue modificado por otra persona o sesion. "
-        "Vuelva a cargarlo antes de guardar"
+        "El layout fue modificado por otra persona o sesion. Vuelva a cargarlo antes de guardar"
     )
 
 
 class KilnLayoutAlreadyExistsError(APIError):
     status_code = 409
     code = "KILN_LAYOUT_ALREADY_EXISTS"
-    message = (
-        "Ya existe un layout para esta hornada. "
-        "Use expected_version > 0 para actualizarlo"
-    )
+    message = "Ya existe un layout para esta hornada. Use expected_version > 0 para actualizarlo"
 
 
 class KilnLayoutAssignmentMismatchError(APIError):
@@ -239,6 +236,7 @@ class KilnLayoutUnitIdentityInconsistentError(APIError):
 # Data Transfer Objects
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class LevelSpec:
     """Especificacion de un nivel para el servicio."""
@@ -295,6 +293,7 @@ class LayoutSuggestionView:
 # Huella del contenido
 # ---------------------------------------------------------------------------
 
+
 def _layout_fingerprint(
     expected_version: int,
     levels: list[LevelSpec],
@@ -311,9 +310,7 @@ def _layout_fingerprint(
                 "usable_height_cm": str(s.usable_height_cm),
                 "plate_label": s.plate_label,
                 "plate_thickness_cm": (
-                    str(s.plate_thickness_cm)
-                    if s.plate_thickness_cm is not None
-                    else None
+                    str(s.plate_thickness_cm) if s.plate_thickness_cm is not None else None
                 ),
             }
             for s in sorted(levels, key=lambda x: x.level_index)
@@ -348,6 +345,7 @@ def _layout_fingerprint(
 # ---------------------------------------------------------------------------
 # Servicio
 # ---------------------------------------------------------------------------
+
 
 class KilnBatchLayoutService:
     """Unica autoridad sobre el layout fisico de una hornada. Fase 010M."""
@@ -398,9 +396,7 @@ class KilnBatchLayoutService:
 
     async def _get_layout_for_batch_locked(self, batch_id: int) -> KilnBatchLayout | None:
         return await self._session.scalar(
-            select(KilnBatchLayout)
-            .where(KilnBatchLayout.batch_id == batch_id)
-            .with_for_update()
+            select(KilnBatchLayout).where(KilnBatchLayout.batch_id == batch_id).with_for_update()
         )
 
     async def _load_full_layout(self, layout: KilnBatchLayout) -> LayoutView:
@@ -574,8 +570,7 @@ class KilnBatchLayoutService:
         int_asgns = [
             a
             for a in assignments
-            if a.source_kind == KilnBatchSourceKind.INTERNAL
-            and a.internal_load_line_id is not None
+            if a.source_kind == KilnBatchSourceKind.INTERNAL and a.internal_load_line_id is not None
         ]
         if int_asgns:
             int_line_ids = [a.internal_load_line_id for a in int_asgns]
@@ -837,9 +832,7 @@ class KilnBatchLayoutService:
             # el layout pero aqui los borramos explicitamente para el caso de
             # actualizacion donde el layout persiste).
             for lvl in await self._session.scalars(
-                select(KilnBatchLayoutLevel).where(
-                    KilnBatchLayoutLevel.layout_id == layout.id
-                )
+                select(KilnBatchLayoutLevel).where(KilnBatchLayoutLevel.layout_id == layout.id)
             ):
                 await self._session.delete(lvl)
             for plc in await self._session.scalars(
@@ -866,9 +859,7 @@ class KilnBatchLayoutService:
 
         # Insertar los nuevos placements con dimensiones congeladas desde la fuente productiva.
         for placement_spec in placements:
-            length, width, height, sep = geometry_by_assignment[
-                placement_spec.batch_assignment_id
-            ]
+            length, width, height, sep = geometry_by_assignment[placement_spec.batch_assignment_id]
             self._session.add(
                 KilnBatchLayoutPlacement(
                     layout_id=layout.id,
@@ -1036,9 +1027,7 @@ class KilnBatchLayoutService:
         # 8. Identidad de unidades lógicas y cálculo de pendientes
         pieces_to_pack: list[PieceToPack] = []
         for asgn in assignments:
-            asgn_placements = [
-                p for p in existing_placements if p.batch_assignment_id == asgn.id
-            ]
+            asgn_placements = [p for p in existing_placements if p.batch_assignment_id == asgn.id]
 
             # Validar unit_index en placements existentes
             used_indices: list[int] = []

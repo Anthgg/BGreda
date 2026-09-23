@@ -219,6 +219,7 @@ async def _placement(
 # Pruebas
 # ---------------------------------------------------------------------------
 
+
 async def test_sube_y_crea_tablas_de_layout(migration_engine: AsyncEngine) -> None:
     """La migracion 0041 crea las tres tablas del layout y las columnas del horno."""
     _upgrade("0041")
@@ -235,7 +236,9 @@ async def test_sube_y_crea_tablas_de_layout(migration_engine: AsyncEngine) -> No
                         " ORDER BY table_name"
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         columnas = list(
             (
@@ -249,7 +252,9 @@ async def test_sube_y_crea_tablas_de_layout(migration_engine: AsyncEngine) -> No
                         " ORDER BY column_name"
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
     assert tablas == [
         "kiln_batch_layout_levels",

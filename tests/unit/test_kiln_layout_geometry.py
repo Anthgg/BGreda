@@ -57,6 +57,7 @@ from app.services.kiln_layout_geometry import (
 # 1. Footprint Reservado
 # ---------------------------------------------------------------------------
 
+
 def test_reserved_footprint_rotacion_0() -> None:
     """Pieza 20x10x8 con sep=3 y rot=0 -> 23x13x11."""
     fp = get_reserved_footprint(
@@ -115,6 +116,7 @@ def test_reserved_footprint_rotacion_invalida_falla() -> None:
 # 2. Validación de Niveles
 # ---------------------------------------------------------------------------
 
+
 def test_niveles_validos_y_adyacentes() -> None:
     """Dos niveles adyacentes que tocan en la frontera (top_A == z_B) son válidos."""
     levels = [
@@ -165,6 +167,7 @@ def test_niveles_solapados_verticalmente_falla() -> None:
 # ---------------------------------------------------------------------------
 # 3. Límites del Placement (Bounds & Height)
 # ---------------------------------------------------------------------------
+
 
 def test_placement_exact_fit_en_limites() -> None:
     """Pieza reservada 20x20 en horno 100x100 ubicada en (80, 80) pasa exactamente."""
@@ -271,6 +274,7 @@ def test_placement_altura_excedida_por_un_microcentimetro_falla() -> None:
 # ---------------------------------------------------------------------------
 # 4. Detección de Colisiones 2D
 # ---------------------------------------------------------------------------
+
 
 def test_colision_por_separacion_sin_toque_fisico_directo() -> None:
     """Piezas físicas 10x10 con separación 2 cm.
@@ -386,6 +390,7 @@ def test_misma_coordenada_mismo_nivel_colisiona() -> None:
 # 5. Semántica de Cantidad Física
 # ---------------------------------------------------------------------------
 
+
 def test_placement_quantity_distinto_de_1_falla() -> None:
     """placement.quantity != 1 lanza PHYSICAL_QUANTITY_INVALID."""
     levels = [LevelGeometry(level_index=0, z_cm=Decimal("0"), usable_height_cm=Decimal("30"))]
@@ -446,6 +451,7 @@ def test_placement_nivel_inexistente_falla() -> None:
 # 6. Precisión Decimal Pura
 # ---------------------------------------------------------------------------
 
+
 def test_precision_decimal_sin_float_leakage() -> None:
     """Valores con decimales arbitrarios (10.333333, 3.125000) mantienen precisión exacta."""
     fp = get_reserved_footprint(
@@ -479,6 +485,7 @@ def test_precision_decimal_sin_float_leakage() -> None:
 # ---------------------------------------------------------------------------
 # 7. Medición de Rendimiento (100 y 500 Placements)
 # ---------------------------------------------------------------------------
+
 
 def test_rendimiento_100_placements() -> None:
     """Valida 100 placements sin colisión en una cuadrícula 10x10.

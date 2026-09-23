@@ -175,6 +175,7 @@ class KilnBatchSuggestionOut(BaseModel):
 # Fase 010M: layout fisico del horno
 # ---------------------------------------------------------------------------
 
+
 class KilnBatchLayoutPlacementInput(BaseModel):
     """Un placement individual en el PUT del layout."""
 
@@ -278,6 +279,7 @@ class KilnBatchLayoutOut(BaseModel):
 # Fase 010M - M3: Sugerencia de acomodo físico (Auto-packing)
 # ---------------------------------------------------------------------------
 
+
 class KilnBatchLayoutSuggestIn(BaseModel):
     """Cuerpo opcional del POST /kiln-batches/{batch_id}/layout/suggest."""
 
@@ -327,5 +329,3 @@ class KilnBatchLayoutSuggestionOut(BaseModel):
     levels_used: list[int]
     suggested_placements: list[SuggestedPlacementOut]
     unplaced_pieces: list[UnplacedPieceOut]
-
-
