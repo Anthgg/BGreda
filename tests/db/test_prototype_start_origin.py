@@ -403,8 +403,10 @@ async def test_el_modelo_y_la_migracion_0024_dicen_exactamente_lo_mismo(
     definicion = (
         await db_session.execute(
             text(
-                "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
-                " WHERE conname = 'ck_prototypes_started_requires_origin'"
+                "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint AS c "
+                "JOIN pg_namespace AS n ON n.oid = c.connamespace "
+                "WHERE n.nspname = current_schema() "
+                "AND c.conname = 'ck_prototypes_started_requires_origin'"
             )
         )
     ).scalar_one()

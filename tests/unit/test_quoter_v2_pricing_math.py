@@ -25,6 +25,7 @@ from app.core.quoter_v2_pricing import (
     apply_factor,
     ceil_to_step,
     margin_percent,
+    persisted_margin_percent,
     quantize_money,
     share,
     tax_amount,
@@ -255,6 +256,20 @@ def test_sin_precio_no_hay_margen() -> None:
 def test_una_venta_a_perdida_da_margen_negativo() -> None:
     """Esconderlo tras un cero seria mentir sobre el unico numero que importa."""
     assert margin_percent(Decimal(-100), Decimal(1000)) == Decimal(-10)
+
+
+def test_margen_persistido_se_normaliza_a_numeric_18_6() -> None:
+    assert persisted_margin_percent(Decimal("1.2345678"), Decimal(100)) == Decimal("1.234568")
+    assert persisted_margin_percent(Decimal("-1.2345678"), Decimal(100)) == Decimal("-1.234568")
+    assert persisted_margin_percent(Decimal("9999999999.99999999"), Decimal(1)) == Decimal(
+        "999999999999.999999"
+    )
+    assert persisted_margin_percent(Decimal(1), Decimal(0)) == Decimal(0)
+
+
+def test_margen_fuera_de_numeric_18_6_se_rechaza_sin_clamp() -> None:
+    with pytest.raises(PricingMathError, match="precisión persistible"):
+        persisted_margin_percent(Decimal("1000000000000"), Decimal("0.000001"))
 
 
 def test_el_importe_se_guarda_a_la_escala_del_dinero() -> None:

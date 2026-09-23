@@ -46,9 +46,9 @@ regla del negocio, no el codigo.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
 
-from app.core.precision import CALCULATION_SCALE, MONEY_SCALE
+from app.core.precision import CALCULATION_SCALE, MONEY_SCALE, QUANTITY_PRECISION, QUANTITY_SCALE
 
 ZERO = Decimal(0)
 ONE = Decimal(1)
@@ -226,6 +226,22 @@ def margin_percent(profit: Decimal, price: Decimal) -> Decimal:
     return profit / price * HUNDRED
 
 
+def persisted_margin_percent(profit: Decimal, price: Decimal) -> Decimal:
+    """Quantize and range-check a margin for the NUMERIC(18, 6) column."""
+    value = margin_percent(profit, price)
+    quantum = Decimal(1).scaleb(-QUANTITY_SCALE)
+    limit = Decimal(10) ** (QUANTITY_PRECISION - QUANTITY_SCALE)
+    if value.copy_abs() >= limit:
+        raise PricingMathError("El margen calculado excede la precisión persistible")
+    with localcontext() as context:
+        context.prec = QUANTITY_PRECISION + 8
+        normalized = value.quantize(quantum, rounding=ROUND_HALF_UP)
+    max_value = limit - quantum
+    if normalized.copy_abs() > max_value:
+        raise PricingMathError("El margen calculado excede la precisión persistible")
+    return normalized
+
+
 def within_factor_range(factor: Decimal, minimum: Decimal, maximum: Decimal) -> bool:
     """Si el factor cabe en el rango que la cotizacion congelo.
 
@@ -241,6 +257,7 @@ __all__ = [
     "apply_factor",
     "ceil_to_step",
     "margin_percent",
+    "persisted_margin_percent",
     "quantize_money",
     "share",
     "tax_amount",

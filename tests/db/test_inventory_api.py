@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import Any
 
@@ -166,6 +167,28 @@ class TestAjustes:
                 method, path, json={"quantity": "999"}, headers={"X-CSRF-Token": admin_csrf}
             )
             assert response.status_code in {404, 405}, f"{method} {path}"
+
+    async def test_dos_primeros_ajustes_concurrentes_comparten_saldo_canonico(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        product_id, location_id = await _setup(api, admin_csrf)
+        first, second = await asyncio.gather(
+            _adjust(api, admin_csrf, product_id, location_id, "5"),
+            _adjust(api, admin_csrf, product_id, location_id, "7"),
+        )
+
+        assert first.status_code == second.status_code == 201, (first.text, second.text)
+        assert {
+            Decimal(first.json()["balance_after"]),
+            Decimal(second.json()["balance_after"]),
+        } == {
+            Decimal(5),
+            Decimal(12),
+        }
+        stock = (await api.get(INVENTORY)).json()
+        assert len(stock["items"]) == 1
+        assert Decimal(stock["items"][0]["quantity"]) == Decimal(12)
+        assert (await api.get(MOVEMENTS)).json()["total"] == 2
 
 
 class TestFiltros:

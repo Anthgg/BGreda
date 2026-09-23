@@ -72,7 +72,7 @@ from app.core.quoter_v2_pricing import (
     allocate_by_weight,
     apply_factor,
     ceil_to_step,
-    margin_percent,
+    persisted_margin_percent,
     quantize_money,
     tax_amount,
     to_base_currency,
@@ -449,7 +449,12 @@ async def _recalculate(
     quotation.rounding_adjustment = subtotal_base - quotation.negotiated_price
     # Contra el costo REAL y sin el IGV: el impuesto no es ingreso del taller.
     quotation.estimated_profit = subtotal_base - quotation.real_cost_total
-    quotation.effective_margin_percent = margin_percent(quotation.estimated_profit, subtotal_base)
+    try:
+        quotation.effective_margin_percent = persisted_margin_percent(
+            quotation.estimated_profit, subtotal_base
+        )
+    except PricingMathError as error:
+        raise V2PricingInputInvalid(str(error)) from error
     if subtotal_base > ZERO and quotation.estimated_profit < ZERO:
         avisos.append(WARN_SELLING_BELOW_COST)
 

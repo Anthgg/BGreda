@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.cookies import ACCESS_COOKIE_NAME
 from app.core.config import Settings, get_settings
 from app.core.errors import (
+    APIError,
     AuthAccountInactiveError,
     AuthInsufficientRoleError,
     AuthNotAuthenticatedError,
@@ -69,6 +70,24 @@ from app.services.supabase_auth import SupabaseAuthClient
 from app.services.users import UserService
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+def require_legacy_quotation_creation(settings: SettingsDep) -> None:
+    if not settings.LEGACY_CREATION_ENABLED:
+        raise APIError(
+            "La creación general de cotizaciones Legacy está retirada; use Cotizador V2",
+            code="LEGACY_QUOTATION_CREATION_DISABLED",
+            status_code=409,
+        )
+
+
+def require_legacy_firing_creation(settings: SettingsDep) -> None:
+    if not settings.LEGACY_CREATION_ENABLED:
+        raise APIError(
+            "La creación general de quemas Legacy está retirada; use Solo Quema V2",
+            code="LEGACY_FIRING_CREATION_DISABLED",
+            status_code=409,
+        )
 
 
 def get_supabase_auth_client(request: Request) -> SupabaseAuthClient:

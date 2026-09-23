@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
 from app.api.deps import (
     AdminUserDep,
@@ -17,6 +17,7 @@ from app.api.deps import (
     DbSessionDep,
     FiringServiceDep,
     KilnServiceDep,
+    require_legacy_firing_creation,
 )
 from app.models.firings import FiringStatus, FiringType
 from app.schemas.firings import (
@@ -210,7 +211,12 @@ async def list_confirmed_firing_lines(
     return ConfirmedFiringLinePage(items=items, total=total, limit=limit, offset=offset)
 
 
-@router.post("/firings", response_model=FiringOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/firings",
+    response_model=FiringOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_legacy_firing_creation)],
+)
 async def create_firing(
     payload: FiringIn,
     service: FiringServiceDep,

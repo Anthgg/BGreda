@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
@@ -13,6 +13,7 @@ from app.api.deps import (
     DbSessionDep,
     QuotationPdfServiceDep,
     QuotationServiceDep,
+    require_legacy_quotation_creation,
 )
 from app.models.quotations import QuotationStatus
 from app.schemas.quotations import (
@@ -233,7 +234,12 @@ async def quotation_totals(
     )
 
 
-@router.post("/quotations", response_model=QuotationOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/quotations",
+    response_model=QuotationOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_legacy_quotation_creation)],
+)
 async def create_quotation(
     payload: QuotationCreateIn,
     service: QuotationServiceDep,
@@ -296,6 +302,7 @@ async def cancel_quotation(
     "/quotations/{quotation_id}/duplicate",
     response_model=QuotationOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_legacy_quotation_creation)],
 )
 async def duplicate_quotation(
     quotation_id: int,
