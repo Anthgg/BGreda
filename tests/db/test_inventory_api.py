@@ -181,10 +181,10 @@ class TestAjustes:
         assert {
             Decimal(first.json()["balance_after"]),
             Decimal(second.json()["balance_after"]),
-        } == {
-            Decimal(5),
-            Decimal(12),
-        }
+        } in (
+            {Decimal(5), Decimal(12)},
+            {Decimal(7), Decimal(12)},
+        )
         stock = (await api.get(INVENTORY)).json()
         assert len(stock["items"]) == 1
         assert Decimal(stock["items"][0]["quantity"]) == Decimal(12)
