@@ -36,6 +36,7 @@ from app.services.identity_providers import IdentityProvider
 from app.services.importing import ImportService
 from app.services.importing.recipes import RecipeImportService
 from app.services.inventory import InventoryService
+from app.services.kiln_batch_layout import KilnBatchLayoutService
 from app.services.kiln_batches import KilnBatchService
 from app.services.masters import MasterDataService
 from app.services.preparations import PreparationService
@@ -690,6 +691,18 @@ async def get_kiln_batch_service(
 
 
 KilnBatchServiceDep = Annotated[KilnBatchService, Depends(get_kiln_batch_service)]
+
+
+async def get_kiln_batch_layout_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> KilnBatchLayoutService:
+    return KilnBatchLayoutService(session, audit)
+
+
+KilnBatchLayoutServiceDep = Annotated[
+    KilnBatchLayoutService, Depends(get_kiln_batch_layout_service)
+]
 
 
 # ---------------------------------------------------------------------------

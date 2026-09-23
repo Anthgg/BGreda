@@ -169,3 +169,163 @@ class KilnBatchSuggestionOut(BaseModel):
     available_cm3: Decimal
     covers_all: bool
     covered_percent: Decimal
+
+
+# ---------------------------------------------------------------------------
+# Fase 010M: layout fisico del horno
+# ---------------------------------------------------------------------------
+
+
+class KilnBatchLayoutPlacementInput(BaseModel):
+    """Un placement individual en el PUT del layout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_assignment_id: int = Field(gt=0)
+    group_index: int = Field(default=0, ge=0)
+    unit_index: int | None = Field(default=None, ge=0)
+    quantity: int = Field(gt=0)
+    level_index: int = Field(ge=0)
+    x_cm: Decimal = Field(ge=0)
+    y_cm: Decimal = Field(ge=0)
+    rotation_degrees: int = Field(default=0)
+
+    @model_validator(mode="after")
+    def _rotation_only_0_or_90(self) -> KilnBatchLayoutPlacementInput:
+        if self.rotation_degrees not in (0, 90):
+            raise ValueError("rotation_degrees debe ser 0 o 90")
+        return self
+
+
+class KilnBatchLayoutLevelInput(BaseModel):
+    """Un nivel del horno en el PUT del layout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    level_index: int = Field(ge=0)
+    name: str | None = Field(default=None, max_length=120)
+    z_cm: Decimal = Field(ge=0)
+    usable_height_cm: Decimal = Field(gt=0)
+    plate_label: str | None = Field(default=None, max_length=100)
+    plate_thickness_cm: Decimal | None = Field(default=None, ge=0)
+
+
+class KilnBatchLayoutUpdate(BaseModel):
+    """Cuerpo del PUT /kiln-batches/{batch_id}/layout.
+
+    `expected_version = 0` indica creacion inicial (no existe layout todavia).
+    Cualquier otro valor debe coincidir con el `version` actual del layout.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=0)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
+    levels: list[KilnBatchLayoutLevelInput] = Field(default_factory=list)
+    placements: list[KilnBatchLayoutPlacementInput] = Field(default_factory=list)
+
+
+class KilnBatchLayoutPlacementOut(BaseModel):
+    """Un placement devuelto por el GET del layout."""
+
+    id: int
+    batch_assignment_id: int
+    group_index: int
+    unit_index: int | None
+    quantity: int
+    level_index: int
+    x_cm: Decimal
+    y_cm: Decimal
+    rotation_degrees: int
+    piece_length_cm_snapshot: Decimal
+    piece_width_cm_snapshot: Decimal
+    piece_height_cm_snapshot: Decimal
+    separation_cm_snapshot: Decimal
+
+
+class KilnBatchLayoutLevelOut(BaseModel):
+    """Un nivel devuelto por el GET del layout."""
+
+    id: int
+    level_index: int
+    name: str | None
+    z_cm: Decimal
+    usable_height_cm: Decimal
+    plate_label: str | None
+    plate_thickness_cm: Decimal | None
+
+
+class KilnBatchLayoutOut(BaseModel):
+    """Respuesta completa del GET y PUT del layout.
+
+    Solo incluye informacion operacional. Nunca precios, IGV, factor ni margen.
+    """
+
+    batch_id: int
+    layout_id: int
+    version: int
+    kiln_width_cm_snapshot: Decimal
+    kiln_depth_cm_snapshot: Decimal
+    kiln_height_cm_snapshot: Decimal
+    placed_quantity: int
+    pending_quantity: int
+    invalid_quantity: int = 0
+    levels: list[KilnBatchLayoutLevelOut]
+    placements: list[KilnBatchLayoutPlacementOut]
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Fase 010M - M3: Sugerencia de acomodo físico (Auto-packing)
+# ---------------------------------------------------------------------------
+
+
+class KilnBatchLayoutSuggestIn(BaseModel):
+    """Cuerpo opcional del POST /kiln-batches/{batch_id}/layout/suggest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int | None = Field(default=None, ge=0)
+    levels: list[KilnBatchLayoutLevelInput] | None = None
+
+
+class SuggestedPlacementOut(BaseModel):
+    """Un placement sugerido por el motor de auto-packing."""
+
+    batch_assignment_id: int
+    group_index: int
+    unit_index: int | None
+    quantity: int = 1
+    level_index: int
+    x_cm: Decimal
+    y_cm: Decimal
+    rotation_degrees: int
+    piece_length_cm_snapshot: Decimal
+    piece_width_cm_snapshot: Decimal
+    piece_height_cm_snapshot: Decimal
+    separation_cm_snapshot: Decimal
+
+
+class UnplacedPieceOut(BaseModel):
+    """Una pieza/unidad que no pudo ser ubicada en la sugerencia."""
+
+    batch_assignment_id: int
+    unit_index: int | None
+    quantity: int = 1
+    reason: str
+
+
+class KilnBatchLayoutSuggestionOut(BaseModel):
+    """Respuesta completa del POST /kiln-batches/{batch_id}/layout/suggest.
+
+    Solo incluye información operacional. Nunca precios, IGV, factor ni margen.
+    """
+
+    batch_id: int
+    base_version: int
+    total_pending: int
+    suggested_count: int
+    unplaced_count: int
+    levels_used: list[int]
+    suggested_placements: list[SuggestedPlacementOut]
+    unplaced_pieces: list[UnplacedPieceOut]

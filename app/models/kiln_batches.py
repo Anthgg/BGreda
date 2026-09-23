@@ -457,6 +457,7 @@ class KilnBatchOperationKind(StrEnum):
     ASSIGN = "ASSIGN"
     RELEASE = "RELEASE"
     MOVE = "MOVE"
+    LAYOUT = "LAYOUT"
 
 
 class KilnBatchOperation(Base, TimestampMixin):
@@ -490,11 +491,232 @@ class KilnBatchOperation(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('CREATE_BATCH', 'ASSIGN', 'RELEASE', 'MOVE')", name="kind_allowed"
+            "kind IN ('CREATE_BATCH', 'ASSIGN', 'RELEASE', 'MOVE', 'LAYOUT')",
+            name="kind_allowed",
         ),
         CheckConstraint("length(btrim(idempotency_key)) >= 8", name="idempotency_key_long_enough"),
         CheckConstraint("length(payload_fingerprint) = 64", name="fingerprint_is_sha256"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Layout fisico del horno — Fase 010M
+# ---------------------------------------------------------------------------
+
+
+class KilnBatchLayout(Base, TimestampMixin):
+    """Mapa fisico de una hornada: como se acomodan las piezas en el horno.
+
+    Es un snapshot de los datos del horno en el momento de crear el layout.
+    Si el maestro Kiln cambia despues, este snapshot NO cambia: el historico
+    queda intacto.
+
+    Existe como maximo UN layout por hornada (UNIQUE batch_id).
+    Versiones optimistas: `version` sube con cada PUT, y el cliente debe
+    mandar `expected_version` para guardar.
+    """
+
+    __tablename__ = "kiln_batch_layouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("kiln_batches.id", ondelete="CASCADE", name="fk_kiln_batch_layouts_batch_id"),
+        nullable=False,
+        unique=True,
+    )
+    #: Snapshot de las dimensiones utiles del horno al momento de crear el layout.
+    kiln_width_cm_snapshot: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    kiln_depth_cm_snapshot: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    kiln_height_cm_snapshot: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    #: Contador de version para concurrencia optimista.
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+
+    __table_args__ = (
+        CheckConstraint("kiln_width_cm_snapshot > 0", name="ck_kiln_batch_layouts_width_positive"),
+        CheckConstraint("kiln_depth_cm_snapshot > 0", name="ck_kiln_batch_layouts_depth_positive"),
+        CheckConstraint(
+            "kiln_height_cm_snapshot > 0",
+            name="ck_kiln_batch_layouts_height_positive",
+        ),
+        CheckConstraint("version >= 1", name="ck_kiln_batch_layouts_version_positive"),
+    )
+
+    levels: Mapped[list[KilnBatchLayoutLevel]] = relationship(
+        "KilnBatchLayoutLevel",
+        back_populates="layout",
+        cascade="all, delete-orphan",
+        order_by=lambda: KilnBatchLayoutLevel.level_index.asc(),
+    )
+    placements: Mapped[list[KilnBatchLayoutPlacement]] = relationship(
+        "KilnBatchLayoutPlacement",
+        back_populates="layout",
+        cascade="all, delete-orphan",
+        order_by=lambda: KilnBatchLayoutPlacement.id.asc(),
+    )
+
+
+class KilnBatchLayoutLevel(Base, TimestampMixin):
+    """Un nivel (estante) planificable del layout del horno.
+
+    Cada nivel tiene un indice (level_index), una altura de la base (z_cm)
+    y una altura util (usable_height_cm). Los campos de placa son opcionales
+    porque no existe todavia una configuracion maestra de placas.
+    """
+
+    __tablename__ = "kiln_batch_layout_levels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    layout_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "kiln_batch_layouts.id",
+            ondelete="CASCADE",
+            name="fk_kiln_batch_layout_levels_layout_id",
+        ),
+        nullable=False,
+        index=True,
+    )
+    #: Orden del nivel de abajo a arriba, empezando en 0.
+    level_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Etiqueta descriptiva del nivel (opcional).
+    name: Mapped[str | None] = mapped_column(String(120))
+    #: Altura de la base del nivel desde el suelo del horno, en cm.
+    z_cm: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    #: Espacio libre entre la base de este nivel y el techo del siguiente (o del horno).
+    usable_height_cm: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    #: Etiqueta de la placa usada en este nivel (opcional; no existe maestro todavia).
+    plate_label: Mapped[str | None] = mapped_column(String(100))
+    #: Grosor de la placa en cm (nullable: sin maestro de placas todavia).
+    plate_thickness_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "layout_id",
+            "level_index",
+            name="uq_kiln_batch_layout_levels_layout_level",
+        ),
+        CheckConstraint(
+            "level_index >= 0",
+            name="ck_kiln_batch_layout_levels_level_index_non_negative",
+        ),
+        CheckConstraint("z_cm >= 0", name="ck_kiln_batch_layout_levels_z_non_negative"),
+        CheckConstraint(
+            "usable_height_cm > 0",
+            name="ck_kiln_batch_layout_levels_usable_height_positive",
+        ),
+        CheckConstraint(
+            "plate_thickness_cm IS NULL OR plate_thickness_cm >= 0",
+            name="ck_kiln_batch_layout_levels_plate_thickness_non_negative",
+        ),
+    )
+
+    layout: Mapped[KilnBatchLayout] = relationship("KilnBatchLayout", back_populates="levels")
+
+
+class KilnBatchLayoutPlacement(Base, TimestampMixin):
+    """El acomodo de un grupo de piezas de una asignacion en un nivel del layout.
+
+    Las dimensiones de las piezas se copian del snapshot de la asignacion
+    en el momento de guardar el placement. Si despues cambia el producto
+    maestro, este snapshot NO cambia.
+
+    rotation_degrees: solo 0 o 90. Geometricamente, 180 y 270 son redundantes
+    para bounding boxes rectangulares.
+    """
+
+    __tablename__ = "kiln_batch_layout_placements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    layout_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "kiln_batch_layouts.id",
+            ondelete="CASCADE",
+            name="fk_kiln_batch_layout_placements_layout_id",
+        ),
+        nullable=False,
+        index=True,
+    )
+    batch_assignment_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "kiln_batch_assignments.id",
+            ondelete="RESTRICT",
+            name="fk_kiln_batch_layout_placements_assignment_id",
+        ),
+        nullable=False,
+        index=True,
+    )
+    #: Indice de grupo dentro de la asignacion (para multiples sub-grupos).
+    group_index: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    #: Indice de unidad dentro del grupo (nullable si el grupo no distingue unidades).
+    unit_index: Mapped[int | None] = mapped_column(Integer)
+    #: Cantidad de piezas representadas por este placement.
+    quantity: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    #: Nivel en el que se ubica el placement (referencia logica al level_index).
+    level_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Posicion X en cm desde el borde izquierdo del nivel.
+    x_cm: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    #: Posicion Y en cm desde el borde frontal del nivel.
+    y_cm: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    #: Rotacion en grados. Solo 0 o 90.
+    rotation_degrees: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    #: Snapshots de dimensiones de la pieza al momento de guardar.
+    piece_length_cm_snapshot: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    piece_width_cm_snapshot: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    piece_height_cm_snapshot: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    separation_cm_snapshot: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, default=Decimal(0), server_default=text("0")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "quantity > 0",
+            name="ck_kiln_batch_layout_placements_quantity_positive",
+        ),
+        CheckConstraint(
+            "level_index >= 0",
+            name="ck_kiln_batch_layout_placements_level_index_non_negative",
+        ),
+        CheckConstraint("x_cm >= 0", name="ck_kiln_batch_layout_placements_x_non_negative"),
+        CheckConstraint("y_cm >= 0", name="ck_kiln_batch_layout_placements_y_non_negative"),
+        CheckConstraint(
+            "rotation_degrees IN (0, 90)",
+            name="ck_kiln_batch_layout_placements_rotation_allowed",
+        ),
+        CheckConstraint(
+            "piece_length_cm_snapshot > 0",
+            name="ck_kiln_batch_layout_placements_length_positive",
+        ),
+        CheckConstraint(
+            "piece_width_cm_snapshot > 0",
+            name="ck_kiln_batch_layout_placements_width_positive",
+        ),
+        CheckConstraint(
+            "piece_height_cm_snapshot > 0",
+            name="ck_kiln_batch_layout_placements_height_positive",
+        ),
+        CheckConstraint(
+            "separation_cm_snapshot >= 0",
+            name="ck_kiln_batch_layout_placements_separation_non_negative",
+        ),
+        CheckConstraint(
+            "group_index >= 0",
+            name="ck_kiln_batch_layout_placements_group_index_non_negative",
+        ),
+        CheckConstraint(
+            "unit_index IS NULL OR unit_index >= 0",
+            name="ck_kiln_batch_layout_placements_unit_index_non_negative",
+        ),
+    )
+
+    layout: Mapped[KilnBatchLayout] = relationship("KilnBatchLayout", back_populates="placements")
+    assignment: Mapped[KilnBatchAssignment] = relationship("KilnBatchAssignment")
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +839,9 @@ __all__ = [
     "KilnBatch",
     "KilnBatchAssignment",
     "KilnBatchAssignmentStatus",
+    "KilnBatchLayout",
+    "KilnBatchLayoutLevel",
+    "KilnBatchLayoutPlacement",
     "KilnBatchOperation",
     "KilnBatchOperationKind",
     "KilnBatchSourceKind",

@@ -117,11 +117,26 @@ class Kiln(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true"), index=True
     )
+    usable_width_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric(), nullable=True)
+    usable_depth_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric(), nullable=True)
+    usable_height_cm: Mapped[Decimal | None] = mapped_column(quantity_numeric(), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint("capacity_volume_cm3 > 0", name="capacity_positive"),
         CheckConstraint("firing_days_per_batch >= 1", name="firing_days_per_batch_positive"),
+        CheckConstraint(
+            "usable_width_cm IS NULL OR usable_width_cm > 0",
+            name="usable_width_positive",
+        ),
+        CheckConstraint(
+            "usable_depth_cm IS NULL OR usable_depth_cm > 0",
+            name="usable_depth_positive",
+        ),
+        CheckConstraint(
+            "usable_height_cm IS NULL OR usable_height_cm > 0",
+            name="usable_height_positive",
+        ),
     )
 
     rates: Mapped[list[KilnRate]] = relationship(
