@@ -346,7 +346,12 @@ def api_app(
     from app.core.config import get_settings
 
     get_settings.cache_clear()
-    application = create_app(get_settings())
+    settings = get_settings()
+    application = create_app(settings)
+    # Historical behavior stays testable; retirement tests override this flag.
+    application.dependency_overrides[get_settings] = lambda: settings.model_copy(
+        update={"LEGACY_CREATION_ENABLED": True}
+    )
 
     supabase = supabase_fake
 

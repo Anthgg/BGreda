@@ -2,13 +2,14 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.deps import (
     AdminUserDep,
     CurrentUserDep,
     DbSessionDep,
     QuotationBuilderServiceDep,
+    require_legacy_quotation_creation,
 )
 from app.schemas.quotation_builder import (
     BodyMaterialOptionOut,
@@ -113,7 +114,12 @@ async def list_body_materials(
     )
 
 
-@router.post("", response_model=QuotationBuilderOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=QuotationBuilderOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_legacy_quotation_creation)],
+)
 async def create_quotation_builder(
     payload: QuotationBuilderCreateIn,
     service: QuotationBuilderServiceDep,
@@ -201,7 +207,11 @@ async def mark_quotation_builder_paid(
     return result
 
 
-@router.post("/{quotation_id}/duplicate", response_model=QuotationBuilderOut)
+@router.post(
+    "/{quotation_id}/duplicate",
+    response_model=QuotationBuilderOut,
+    dependencies=[Depends(require_legacy_quotation_creation)],
+)
 async def duplicate_quotation_builder(
     quotation_id: int,
     service: QuotationBuilderServiceDep,

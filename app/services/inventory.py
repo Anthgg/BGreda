@@ -11,6 +11,7 @@ import uuid
 from decimal import Decimal
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
@@ -149,6 +150,18 @@ class InventoryService:
         )
         return [tuple(row) for row in rows.all()], int(total or 0)
 
+    async def get_movement(
+        self, movement_id: int
+    ) -> tuple[StockMovement, Product, StockLocation] | None:
+        stmt = (
+            select(StockMovement, Product, StockLocation)
+            .join(Product, Product.id == StockMovement.product_id)
+            .join(StockLocation, StockLocation.id == StockMovement.location_id)
+            .where(StockMovement.id == movement_id)
+        )
+        row = (await self._session.execute(stmt)).first()
+        return tuple(row) if row is not None else None
+
     # -- escritura ----------------------------------------------------------
     async def apply_movement(
         self,
@@ -172,6 +185,15 @@ class InventoryService:
         if product.base_uom_code is None:
             raise MissingUomError()
 
+        # FOR UPDATE no bloquea una fila ausente. El upsert crea el saldo cero
+        # canónico; una primera operación concurrente espera en la UNIQUE.
+        await self._session.execute(
+            pg_insert(StockBalance)
+            .values(product_id=product.id, location_id=location.id, quantity=Decimal(0))
+            .on_conflict_do_nothing(
+                index_elements=[StockBalance.product_id, StockBalance.location_id]
+            )
+        )
         balance = await self._session.scalar(
             select(StockBalance)
             .where(
@@ -181,10 +203,7 @@ class InventoryService:
             .with_for_update()
         )
         if balance is None:
-            balance = StockBalance(
-                product_id=product.id, location_id=location.id, quantity=Decimal(0)
-            )
-            self._session.add(balance)
+            raise RuntimeError("Stock balance upsert did not produce a row")
 
         if movement_type is MovementType.PROTOTYPE_OUT and prototype_id is None:
             # Un consumo de muestra sin muestra detras seria un gasto sin

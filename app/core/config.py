@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     APP_NAME: str = "Cotizador Greda API"
     APP_VERSION: str = "0.1.0"
     LOG_LEVEL: str = "INFO"
+    #: Permite una ventana de compatibilidad; N4 la apaga tras actualizar el frontend.
+    LEGACY_CREATION_ENABLED: bool = False
 
     # ---- Supabase -------------------------------------------------------
     SUPABASE_URL: str = ""
