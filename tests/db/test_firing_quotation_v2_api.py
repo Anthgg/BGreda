@@ -861,3 +861,28 @@ class TestAutorizacion:
         assert (await api.get(f"{FQ}/1/pdf")).status_code == 403
         creada = await api.post(FQ, json={"name": "Del operador"}, headers=h(csrf))
         assert creada.status_code == 403
+
+
+class TestListado:
+    async def test_listar_cotizaciones_vacias_y_con_borrador(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        """La lista serializa correctamente y effective_status no es coroutine."""
+        # 1. Con la BD vacia devuelve 200 y lista vacia
+        vacia = await api.get(FQ)
+        assert vacia.status_code == 200
+        assert vacia.json()["items"] == []
+        assert vacia.json()["total"] == 0
+
+        # 2. Con al menos un borrador
+        ids = await preparar(api, admin_csrf)
+        ctz = await cotizacion_del_excel(api, admin_csrf, ids)
+
+        # 3. Listar con borrador no debe fallar con 500 por coroutine
+        respuesta = await api.get(FQ)
+        assert respuesta.status_code == 200, respuesta.text
+        datos = respuesta.json()
+        assert datos["total"] >= 1
+        item = next(i for i in datos["items"] if i["id"] == ctz["id"])
+        assert item["effective_status"] == "DRAFT"
+        assert not hasattr(item["effective_status"], "__await__")

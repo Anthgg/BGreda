@@ -425,7 +425,7 @@ class V2FiringQuotationService:
             )
         ).all()
         ahora = await self.db_now()
-        return [(fila, self._effective(fila, ahora)) for fila in filas], int(total or 0)
+        return [(fila, await self._effective(fila, ahora)) for fila in filas], int(total or 0)
 
     async def get_state(self, quotation_id: int) -> FiringQuotationState:
         """La lectura interna. Recalcula un borrador; la ruta no confirma nada."""
