@@ -301,13 +301,9 @@ class QuotationBuilderDraftIn(_Strict):
     #: Fase 009E. Factor de PRODUCCION de esta cotizacion. Multiplica el costo
     #: tecnico y no tiene nada que ver con el margen. `None` usa el canonico.
     #:
-    #: Fase 009K.3: el Cotizador ya NO lo envia. Sigue existiendo porque por
-    #: aqui vuelve el factor congelado de un borrador cuando se confirma —sin
-    #: eso, confirmar recalcularia con el valor de hoy y perderia el que se
-    #: guardo— y porque romperlo dejaria colgados a los consumidores previos.
-    #: No es una via para elegir un factor arbitrario desde la pantalla nueva:
-    #: cuando el modo esta ACTIVADO y no viene override, la autoridad del
-    #: valor es Configuracion.
+    #: Fase 009K.4.2: el valor vuelve a ser editable por cotizacion. Cuando el
+    #: factor esta activado, este override gana al default de Configuracion; si
+    #: no viene, Configuracion sigue dando la sugerencia inicial.
     production_factor: Annotated[
         Decimal | None, Field(gt=0, le=1_000, max_digits=18, decimal_places=6)
     ] = None
