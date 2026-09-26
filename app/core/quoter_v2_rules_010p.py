@@ -4,10 +4,8 @@ Funciones puras, sin base de datos ni sesion, como `quoter_v2_labor` y
 `quoter_v2_pricing`: son las que deciden cuanto cuesta producir, y una formula
 que solo vive dentro de un servicio asincrono no se puede fijar con una prueba.
 
-**W0 (preparacion en rojo).** Este modulo declara solo la INTERFAZ aprobada en
-010P_PLAN_REV2. Cada funcion levanta `NotImplementedError` hasta W1, y
-`tests/unit/test_quoter_v2_rules_010p.py` esta en ROJO a proposito: fija los
-numeros (F1-F9) antes de que exista el codigo que tiene que producirlos.
+Implementado en W1 (010P_PLAN_REV2). Las pruebas que fijan cada numero,
+calculado a mano, estan en `tests/unit/test_quoter_v2_rules_010p.py`.
 
 ## Reglas (autoridad: 010P_PLAN_REV2 §1)
 
@@ -24,12 +22,21 @@ numeros (F1-F9) antes de que exista el codigo que tiene que producirlos.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import StrEnum
 
+from app.core.quoter_v2_pricing import allocate_by_weight
 from app.models.quoter_v2 import V2ProductionType
+from app.models.quoter_v2_labor import V2LaborAssignmentOrigin
+
+#: Quien eligio al trabajador (DEFAULT / MANUAL). Vive en el modelo porque es
+#: una columna; aqui se reexporta con el nombre que usan las reglas.
+LaborAssignmentOrigin = V2LaborAssignmentOrigin
+
+ZERO = Decimal(0)
+MINUTES_PER_HOUR = Decimal(60)
 
 #: Aviso: aceptar «Por mayor» sin trabajador externo por defecto configurado.
 WARN_WHOLESALE_EXTERNAL_WORKER_MISSING = "V2_WHOLESALE_EXTERNAL_WORKER_MISSING"
@@ -39,15 +46,8 @@ WARN_WHOLESALE_MANUAL_WORKERS_KEPT = "V2_WHOLESALE_MANUAL_WORKERS_KEPT"
 WARN_WHOLESALE_DEFAULT_WORKER_LACKS_TECHNIQUE = "V2_WHOLESALE_DEFAULT_WORKER_LACKS_TECHNIQUE"
 
 
-class LaborAssignmentOrigin(StrEnum):
-    """Quien eligio al trabajador de un proceso (decision 4 de 010P).
-
-    DEFAULT: lo puso el sistema con el trabajador por defecto del tipo de
-    pedido. MANUAL: lo eligio una persona, y ningun automatismo lo pisa.
-    """
-
-    DEFAULT = "DEFAULT"
-    MANUAL = "MANUAL"
+class RulesMathError(ValueError):
+    """Una entrada que las reglas 010P no pueden aceptar (negativa, jornada 0)."""
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,7 @@ class ExternalWorkerSnapshot:
 @dataclass(frozen=True)
 class ExternalWorkerCost:
     worker_id: int
+    daily_rate: Decimal
     workday_hours: Decimal
     hourly_equivalent: Decimal
     days_paid: int
@@ -115,29 +116,43 @@ class WholesaleLaborPlan:
     warnings: tuple[str, ...]
 
 
-def _w1() -> NotImplementedError:
-    return NotImplementedError("010P W1: regla aprobada en 010P_PLAN_REV2, aun sin implementar")
+def _sin_negativos(nombre: str, valor: Decimal) -> None:
+    if valor < ZERO:
+        raise RulesMathError(f"{nombre} no puede ser negativo")
 
 
 def production_cycles(quantity: int, mold_count: int) -> int:
-    """ceil(cantidad / moldes). Moldes ≥ 1."""
-    raise _w1()
+    """ceil(cantidad / moldes). Un molde incompleto es un ciclo mas."""
+    if mold_count < 1:
+        raise ValueError("Hace falta al menos un molde")
+    if quantity < 0:
+        raise ValueError("La cantidad no puede ser negativa")
+    # Division entera hacia arriba sin pasar por coma flotante.
+    return -(-quantity // mold_count)
 
 
 def line_active_minutes(
     quantity: int, mold_count: int, minutes_per_unit: Decimal | None
 ) -> Decimal | None:
     """ciclos x minutos por unidad; None si la linea aun no tiene tiempo."""
-    raise _w1()
+    if minutes_per_unit is None:
+        return None
+    _sin_negativos("El tiempo por unidad", minutes_per_unit)
+    return Decimal(production_cycles(quantity, mold_count)) * minutes_per_unit
 
 
 def order_active_minutes(line_minutes: Sequence[Decimal | None]) -> Decimal:
-    """El MAXIMO de las lineas con tiempo (paralelismo); 0 si ninguna lo tiene."""
-    raise _w1()
+    """El MAXIMO de las lineas con tiempo: productos distintos van en paralelo.
+
+    Sumarlas cobraria dos veces el mismo tiempo de taller. Las lineas sin
+    tiempo no entran; sin ninguna, el pedido no tiene tiempo activo.
+    """
+    con_tiempo = [minutos for minutos in line_minutes if minutos is not None]
+    return max(con_tiempo, default=ZERO)
 
 
 def minutes_to_hours(minutes: Decimal) -> Decimal:
-    raise _w1()
+    return minutes / MINUTES_PER_HOUR
 
 
 def external_labor_cost(
@@ -145,26 +160,74 @@ def external_labor_cost(
     workers: Sequence[ExternalWorkerSnapshot],
     default_workday_hours: Decimal,
 ) -> ExternalLaborCost:
-    """Comercial = horas x Σ(jornal/jornada); real = Σ ceil(horas/jornada) x jornal."""
-    raise _w1()
+    """Lo que se COBRA y lo que se PAGA por el personal externo del pedido.
+
+    Comercial: horas activas x (jornal / jornada) de cada externo. Es lo que se
+    imputa al cliente: las horas reales, no los jornales enteros.
+
+    Real: ceil(horas activas / jornada) jornales x jornal de cada externo. Es
+    lo que el taller desembolsa, porque un jornal empezado se paga entero.
+
+    Cada externo con SU jornal y SU jornada; sin jornada propia, la de la
+    cotizacion. Dos externos no reducen las horas: las trabajan los dos.
+    """
+    _sin_negativos("Las horas activas", active_hours)
+    if default_workday_hours <= ZERO:
+        raise RulesMathError("La jornada de la cotizacion tiene que ser positiva")
+    filas: list[ExternalWorkerCost] = []
+    for worker in workers:
+        _sin_negativos("El jornal", worker.daily_rate)
+        jornada = (
+            worker.workday_hours
+            if worker.workday_hours is not None and worker.workday_hours > ZERO
+            else default_workday_hours
+        )
+        por_hora = worker.daily_rate / jornada
+        jornales = math.ceil(active_hours / jornada) if active_hours > ZERO else 0
+        filas.append(
+            ExternalWorkerCost(
+                worker_id=worker.worker_id,
+                daily_rate=worker.daily_rate,
+                workday_hours=jornada,
+                hourly_equivalent=por_hora,
+                days_paid=jornales,
+                commercial_cost=active_hours * por_hora,
+                real_cost=Decimal(jornales) * worker.daily_rate,
+            )
+        )
+    comercial = sum((fila.commercial_cost for fila in filas), ZERO)
+    real = sum((fila.real_cost for fila in filas), ZERO)
+    return ExternalLaborCost(
+        commercial=comercial, real=real, gap=real - comercial, per_worker=tuple(filas)
+    )
 
 
 def space_cost_per_hour(space_cost_per_day: Decimal, workday_hours: Decimal) -> Decimal:
-    raise _w1()
+    _sin_negativos("El costo de espacio por dia", space_cost_per_day)
+    if workday_hours <= ZERO:
+        raise RulesMathError("La jornada tiene que ser positiva")
+    return space_cost_per_day / workday_hours
 
 
 def space_cost(active_hours: Decimal, cost_per_hour: Decimal) -> Decimal:
-    raise _w1()
+    """Espacio por hora ACTIVA del pedido (el MAXIMO de sus lineas)."""
+    _sin_negativos("Las horas activas", active_hours)
+    _sin_negativos("El costo de espacio por hora", cost_per_hour)
+    return active_hours * cost_per_hour
 
 
 def passive_space_suggestion(passive_hours: Decimal, cost_per_hour: Decimal) -> Decimal:
     """Lo que costaria el tiempo pasivo si se considerara. Nunca entra en totales."""
-    raise _w1()
+    _sin_negativos("El tiempo pasivo", passive_hours)
+    _sin_negativos("El costo de espacio por hora", cost_per_hour)
+    return passive_hours * cost_per_hour
 
 
 def administrative_cost(production_type: V2ProductionType, configured_cost: Decimal) -> Decimal:
-    """RETAIL = 0; WHOLESALE = lo configurado."""
-    raise _w1()
+    """RETAIL = 0; WHOLESALE = lo configurado. Decision del owner (010P, P7)."""
+    if production_type is V2ProductionType.RETAIL:
+        return ZERO
+    return configured_cost
 
 
 def wholesale_suggested(
@@ -173,8 +236,10 @@ def wholesale_suggested(
     threshold: int | None,
     declined: bool,
 ) -> bool:
-    """Solo RETAIL, solo si el TOTAL de unidades supera el umbral y no se rechazo."""
-    raise _w1()
+    """Solo RETAIL, solo si el TOTAL del pedido SUPERA el umbral y no se rechazo."""
+    if production_type is not V2ProductionType.RETAIL or threshold is None or declined:
+        return False
+    return total_units > threshold
 
 
 def allocate_by_active_minutes(
@@ -182,17 +247,59 @@ def allocate_by_active_minutes(
     line_minutes: Sequence[Decimal],
     quantities: Sequence[Decimal],
 ) -> list[Decimal]:
-    """Reparte un total del pedido por peso normalizado de minutos activos.
+    """Reparte un total del PEDIDO por peso normalizado de minutos activos.
 
-    Reserva: por cantidad y, sin cantidades, a partes iguales (`_pesos`). La
-    suma de lo repartido es exactamente el total (`allocate_by_weight`).
+    Primero se calcula el total (espacio, externo comercial, externo real) con
+    el tiempo del pedido; despues se reparte. Nunca se calcula por linea con
+    sus propias horas: en paralelo, eso cobraria dos veces el mismo tiempo.
+
+    Reservas: sin minutos, por cantidad; sin cantidades, a partes iguales. La
+    suma es exactamente el total (`allocate_by_weight`, resto mayor).
     """
-    raise _w1()
+    if len(line_minutes) != len(quantities):
+        raise RulesMathError("Cada linea necesita sus minutos y su cantidad")
+    if not line_minutes:
+        return []
+    if sum(line_minutes, ZERO) > ZERO:
+        pesos = list(line_minutes)
+    elif sum(quantities, ZERO) > ZERO:
+        pesos = list(quantities)
+    else:
+        pesos = [Decimal(1) for _ in line_minutes]
+    return allocate_by_weight(total, pesos)
 
 
 def plan_wholesale_labor(
     assignments: Sequence[ProcessAssignment],
     external_default: DefaultWorker | None,
 ) -> WholesaleLaborPlan:
-    """Aplica el externo por defecto a lo DEFAULT y a lo sin asignar; respeta lo MANUAL."""
-    raise _w1()
+    """Que cambiar en el personal al aceptar «Por mayor» (decision 4).
+
+    - Lo MANUAL no se toca nunca: lo eligio una persona. Se avisa.
+    - Lo DEFAULT y lo sin asignar pasan al externo por defecto, solo si sabe la
+      tecnica del proceso; si no la sabe, se deja como estaba y se avisa.
+    - Sin externo por defecto no se reasigna nada y se avisa.
+    """
+    avisos: list[str] = []
+    if any(fila.origin is LaborAssignmentOrigin.MANUAL for fila in assignments):
+        avisos.append(WARN_WHOLESALE_MANUAL_WORKERS_KEPT)
+    if external_default is None:
+        return WholesaleLaborPlan(
+            reassignments=(), warnings=(*avisos, WARN_WHOLESALE_EXTERNAL_WORKER_MISSING)
+        )
+    cambios: list[Reassignment] = []
+    falta_tecnica = False
+    for fila in assignments:
+        if fila.origin is LaborAssignmentOrigin.MANUAL:
+            continue
+        if fila.worker_id == external_default.worker_id:
+            continue
+        if fila.technique_id not in external_default.technique_ids:
+            falta_tecnica = True
+            continue
+        cambios.append(
+            Reassignment(process_id=fila.process_id, worker_id=external_default.worker_id)
+        )
+    if falta_tecnica:
+        avisos.append(WARN_WHOLESALE_DEFAULT_WORKER_LACKS_TECHNIQUE)
+    return WholesaleLaborPlan(reassignments=tuple(cambios), warnings=tuple(avisos))

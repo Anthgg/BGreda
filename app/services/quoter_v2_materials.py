@@ -126,6 +126,37 @@ class V2QuotationNotEditableError(APIError):
     message = "La cotizacion ya no es un borrador y su material no puede cambiarse"
 
 
+def _apply_production_time(linea: V2QuotationProduct, data: dict[str, Any]) -> None:
+    """Tiempo por pieza (minutos) y moldes de la linea. Fase 010P.
+
+    Se guarda en la LINEA, no en el maestro: cada pedido dice cuanto tarda y
+    con cuantos moldes. El tiempo puede quedar sin decidir (NULL) y entonces la
+    linea bloquea la emision; los moldes son al menos uno.
+    """
+    if "production_time_per_unit_minutes" in data:
+        minutos = data["production_time_per_unit_minutes"]
+        if minutos is not None and Decimal(str(minutos)) <= 0:
+            raise V2LineProductionTimeInvalid("El tiempo por pieza tiene que ser mayor que cero")
+        linea.production_time_per_unit_minutes = (
+            Decimal(str(minutos)) if minutos is not None else None
+        )
+    if "mold_count" in data:
+        moldes = data["mold_count"]
+        if moldes is None:
+            moldes = 1
+        if int(moldes) < 1:
+            raise V2LineProductionTimeInvalid("Hace falta al menos un molde")
+        linea.mold_count = int(moldes)
+
+
+class V2LineProductionTimeInvalid(APIError):
+    """Tiempo por pieza o moldes imposibles (Fase 010P)."""
+
+    status_code = 422
+    code = "V2_LINE_PRODUCTION_TIME_INVALID"
+    message = "El tiempo por pieza o los moldes no son validos"
+
+
 class V2MaterialService:
     """Valorizacion de materiales y costeo de la linea de cotizacion."""
 
@@ -425,14 +456,16 @@ class V2MaterialService:
             v2_quotation_id=quotation.id,
             sort_order=int(siguiente or 0),
             quantity=int(data.get("quantity") or 0),
+            mold_count=1,
         )
+        _apply_production_time(linea, data)
         self._session.add(linea)
         avisos = await self._fill_line(linea, data, quotation.piece_separation_cm_snapshot)
         await self._session.flush()
         # Correccion 010H. La pieza trae sus procesos: torno, asa, acabado. Que
         # aparezcan solos es justo el punto de la correccion; si el catalogo no
         # los tiene configurados, se avisa y se eligen a mano.
-        avisos += await self._procesos().generate_for_line(linea)
+        avisos += await self._procesos().generate_for_line(linea, user=user)
         # Fase 010E. La quema depende del volumen de TODAS las lineas: anadir
         # una pieza puede cambiar el numero de hornadas y el reparto del costo
         # entre productos. Sin este recalculo la cabecera seguiria diciendo las
@@ -467,6 +500,7 @@ class V2MaterialService:
         cantidad_antes = linea.quantity
         if "quantity" in data:
             linea.quantity = int(data["quantity"] or 0)
+        _apply_production_time(linea, data)
         avisos = await self._fill_line(linea, data, quotation.piece_separation_cm_snapshot)
         await self._session.flush()
         if linea.product_id != producto_antes:

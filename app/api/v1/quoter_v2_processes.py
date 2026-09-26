@@ -382,6 +382,7 @@ async def _pagina(session: AsyncSession, calculados: list[ProcesoCalculado]) -> 
                 worker_name=tarea.worker_name_snapshot if tarea else None,
                 final_hours=tarea.final_hours if tarea else None,
                 labor_cost=tarea.labor_cost if tarea else None,
+                assignment_origin=str(tarea.assignment_origin) if tarea else None,
                 warnings=calculado.warnings,
             )
         )

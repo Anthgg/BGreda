@@ -62,6 +62,7 @@ from app.services.quoter_v2_pricing import V2PricingService
 from app.services.quoter_v2_processes import V2ProcessService
 from app.services.quoter_v2_reductions import V2ReductionsService
 from app.services.quoter_v2_settings import V2SettingsService
+from app.services.quoter_v2_wholesale import V2WholesaleService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -503,6 +504,17 @@ async def get_v2_reductions_service(
 
 
 V2ReductionsServiceDep = Annotated[V2ReductionsService, Depends(get_v2_reductions_service)]
+
+
+async def get_v2_wholesale_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2WholesaleService:
+    """Fase 010P. Aceptar o rechazar la sugerencia de pasar a por mayor."""
+    return V2WholesaleService(session, audit)
+
+
+V2WholesaleServiceDep = Annotated[V2WholesaleService, Depends(get_v2_wholesale_service)]
 
 
 async def get_v2_quotation_service(

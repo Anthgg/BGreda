@@ -78,6 +78,8 @@ class V2ProcessOut(BaseModel):
     worker_name: str | None
     final_hours: Decimal | None
     labor_cost: Decimal | None
+    #: Fase 010P. DEFAULT = lo puso el sistema; MANUAL = alguien a mano.
+    assignment_origin: str | None = None
     warnings: list[str] = Field(default_factory=list)
 
 

@@ -37,6 +37,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,7 +56,9 @@ from app.core.quoter_v2_pricing import quantize_money
 from app.models.audit import AuditAction
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
 from app.models.quoter_v2_labor import (
+    V2LaborAssignmentOrigin,
     V2QuotationLabor,
+    V2QuotationWorker,
     V2Technique,
     V2Worker,
     V2WorkerTechnique,
@@ -66,7 +69,7 @@ from app.models.quoter_v2_settings import V2CommercialSettings
 from app.models.settings import SINGLETON_ID
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
-from app.services.quoter_v2_pricing import refresh_pricing
+from app.services.quoter_v2_pricing import PRICING_RULES_V2, refresh_pricing
 
 ZERO = Decimal(0)
 
@@ -193,10 +196,24 @@ class V2LaborService:
             )
         return Decimal(horas)
 
-    async def resolve_workday_hours(self, worker: V2Worker) -> Decimal:
-        """La jornada de una persona: la suya, o la del taller si no declara una."""
+    async def resolve_workday_hours(
+        self,
+        worker: V2Worker,
+        *,
+        quotation: V2Quotation | None = None,
+        frozen: V2QuotationWorker | None = None,
+    ) -> Decimal:
+        """La jornada congelada para la cotizacion, o la del maestro al asignar."""
+        if frozen is not None:
+            if frozen.workday_hours_snapshot is not None:
+                return frozen.workday_hours_snapshot
+            if quotation is not None and quotation.workday_hours_snapshot is not None:
+                return quotation.workday_hours_snapshot
+            return await self.global_workday_hours()
         if worker.workday_hours is not None:
             return worker.workday_hours
+        if quotation is not None and quotation.workday_hours_snapshot is not None:
+            return quotation.workday_hours_snapshot
         return await self.global_workday_hours()
 
     async def hourly_rate_for(self, worker: V2Worker) -> Decimal:
@@ -207,9 +224,16 @@ class V2LaborService:
         con la tarifa que despues lee quien revisa la cotizacion.
         """
         try:
-            return quantize_rate(
-                hourly_rate(worker.daily_rate, await self.resolve_workday_hours(worker))
+            return self._hourly_rate_from_values(
+                worker.daily_rate, await self.resolve_workday_hours(worker)
             )
+        except LaborMathError as error:
+            raise V2LaborInputInvalid(str(error)) from error
+
+    @staticmethod
+    def _hourly_rate_from_values(daily_rate: Decimal, workday_hours: Decimal) -> Decimal:
+        try:
+            return quantize_rate(hourly_rate(daily_rate, workday_hours))
         except LaborMathError as error:
             raise V2LaborInputInvalid(str(error)) from error
 
@@ -594,7 +618,12 @@ class V2LaborService:
         return list((await self._session.scalars(consulta)).all())
 
     async def add_labor(
-        self, quotation_id: int, data: dict[str, Any], *, user: AuthenticatedUser
+        self,
+        quotation_id: int,
+        data: dict[str, Any],
+        *,
+        user: AuthenticatedUser,
+        recalcular: bool = True,
     ) -> tuple[V2QuotationLabor, list[str]]:
         quotation = await self._draft(quotation_id)
         siguiente = await self._session.scalar(
@@ -625,11 +654,13 @@ class V2LaborService:
             avisos = await self._fill_labor(tarea, data, creando=True)
             await self._check_process_duplicate(tarea)
         await self._session.flush()
+        await self._freeze_worker(quotation, tarea.worker_id)
         avisos += await self._workday_warning(tarea)
         # Fase 010F. La mano de obra entra en el costo directo de su producto y
-        # en la base por horas con la que se reparte el espacio: sin recalcular,
-        # el precio quedaria explicandose con un costo que ya no es el suyo.
-        avisos += await refresh_pricing(self._session, quotation)
+        # en la base por horas con la que se reparte el espacio. Los lotes de
+        # asignaciones DEFAULT difieren un unico recalculo hasta terminar.
+        if recalcular:
+            avisos += await refresh_pricing(self._session, quotation)
 
         self._audit.record_action(
             entity_type=V2_LABOR_ENTITY,
@@ -664,6 +695,7 @@ class V2LaborService:
         with self._session.no_autoflush:
             avisos = await self._fill_labor(tarea, data, creando=False)
         await self._session.flush()
+        await self._freeze_worker(quotation, tarea.worker_id)
         avisos += await self._workday_warning(tarea)
         if recalcular:
             avisos += await refresh_pricing(self._session, quotation)
@@ -714,6 +746,15 @@ class V2LaborService:
 
         trabajador_antes = None if creando else tarea.worker_id
         tecnica_antes = None if creando else tarea.technique_id
+        # Fase 010P. Quien eligio a esta persona. Solo el sistema, al aplicar
+        # un trabajador por defecto, dice DEFAULT; la API nunca lo expone. Elegir
+        # o cambiar de persona por cualquier otra via es una decision MANUAL.
+        if "assignment_origin" in data:
+            tarea.assignment_origin = data["assignment_origin"]
+        elif creando or (
+            data.get("worker_id") is not None and data["worker_id"] != trabajador_antes
+        ):
+            tarea.assignment_origin = V2LaborAssignmentOrigin.MANUAL
         avisos += await self._apply_worker(tarea, data, creando=creando)
         avisos += await self._apply_technique(tarea, data, creando=creando)
         avisos += await self._check_capacity(
@@ -725,6 +766,26 @@ class V2LaborService:
         avisos += await self._apply_hours(tarea, data)
         avisos += await self._check_glaze(tarea)
         return avisos
+
+    async def _freeze_worker(self, quotation: V2Quotation, worker_id: int) -> None:
+        """Congela la tarifa de una persona la PRIMERA vez que entra en la cotizacion.
+
+        Fase 010P. Una fila por persona y cotizacion; si ya existe, no se toca:
+        subir manana su jornal no cambia lo ya presupuestado. La jornada que se
+        congela es la PROPIA; NULL es «la de la cotizacion».
+        """
+        worker = await self.get_worker(worker_id)
+        await self._session.execute(
+            pg_insert(V2QuotationWorker)
+            .values(
+                v2_quotation_id=quotation.id,
+                worker_id=worker.id,
+                worker_type_snapshot=worker.worker_type,
+                daily_rate_snapshot=worker.daily_rate,
+                workday_hours_snapshot=worker.workday_hours,
+            )
+            .on_conflict_do_nothing(index_elements=["v2_quotation_id", "worker_id"])
+        )
 
     async def _check_process_duplicate(self, tarea: V2QuotationLabor) -> None:
         """Una tarea normal no puede repetir un proceso vivo de su pieza.
@@ -795,13 +856,25 @@ class V2LaborService:
                 )
             return [WARN_WORKER_UNAVAILABLE]
 
-        jornada = await self.resolve_workday_hours(worker)
+        quotation = await self._session.get(V2Quotation, tarea.v2_quotation_id)
+        congelado = await self._session.scalar(
+            select(V2QuotationWorker).where(
+                V2QuotationWorker.v2_quotation_id == tarea.v2_quotation_id,
+                V2QuotationWorker.worker_id == worker.id,
+            )
+        )
+        jornada = await self.resolve_workday_hours(worker, quotation=quotation, frozen=congelado)
+        jornal = congelado.daily_rate_snapshot if congelado is not None else worker.daily_rate
+        tipo_trabajador = (
+            congelado.worker_type_snapshot if congelado is not None else worker.worker_type
+        )
         tarifa_manual = self._explicit(data, "hourly_rate_override")
 
-        tarea.worker_name_snapshot = worker.name
-        tarea.worker_type_snapshot = worker.worker_type
-        tarea.daily_rate_snapshot = worker.daily_rate
-        tarea.workday_hours_snapshot = jornada
+        if cambia:
+            tarea.worker_name_snapshot = worker.name
+            tarea.worker_type_snapshot = tipo_trabajador
+            tarea.daily_rate_snapshot = jornal
+            tarea.workday_hours_snapshot = jornada
 
         if tarifa_manual is not None:
             # Una tarifa acordada para ESTA cotizacion. No toca el maestro: la
@@ -810,12 +883,12 @@ class V2LaborService:
             tarea.rate_overridden = True
         elif "hourly_rate_override" in data:
             # Presente y en nulo: se retira el acuerdo y vuelve la tarifa real.
-            tarea.hourly_rate_snapshot = await self.hourly_rate_for(worker)
+            tarea.hourly_rate_snapshot = self._hourly_rate_from_values(jornal, jornada)
             tarea.rate_overridden = False
-        elif not tarea.rate_overridden or cambia:
-            # Ausente y sin acuerdo previo —o con la persona CAMBIADA, porque un
-            # acuerdo se tomo sobre alguien concreto y no se hereda—.
-            tarea.hourly_rate_snapshot = await self.hourly_rate_for(worker)
+        elif cambia:
+            # El jornal también sale del snapshot de la cotización si esta
+            # persona ya habia sido asignada antes y cambió el maestro.
+            tarea.hourly_rate_snapshot = self._hourly_rate_from_values(jornal, jornada)
             tarea.rate_overridden = False
         return []
 
@@ -873,6 +946,13 @@ class V2LaborService:
         elif not tarea.hours_overridden:
             tarea.final_hours = tarea.calculated_hours
 
+        cotizacion = await self._session.get(V2Quotation, tarea.v2_quotation_id)
+        if cotizacion is not None and cotizacion.pricing_rules_version >= PRICING_RULES_V2:
+            # Fase 010P. El costo del personal es del PEDIDO: sale de su tiempo
+            # activo y de los externos distintos (comercial y real), no de cada
+            # tarea. Las horas se conservan como informacion.
+            tarea.labor_cost = ZERO
+            return []
         if tarea.worker_type_snapshot is V2WorkerType.INTERNAL:
             # Fase 010J, regla del Excel final: el personal INTERNO no suma
             # costo a la cotizacion —su sueldo ya lo paga el taller—. Las horas
@@ -1164,6 +1244,11 @@ class V2LaborService:
         return max(int(fila["minimum_days"]) for fila in carga)
 
     async def labor_total(self, quotation_id: int) -> Decimal:
+        quotation = await self._session.get(V2Quotation, quotation_id)
+        if quotation is not None and quotation.pricing_rules_version >= PRICING_RULES_V2:
+            # Fase 010P: la tarea ya no lleva costo; la mano de obra es del
+            # PEDIDO (externos, comercial) y la calcula el motor de precio.
+            return Decimal(quotation.labor_cost_total or 0)
         total = await self._session.scalar(
             select(func.coalesce(func.sum(V2QuotationLabor.labor_cost), 0)).where(
                 V2QuotationLabor.v2_quotation_id == quotation_id

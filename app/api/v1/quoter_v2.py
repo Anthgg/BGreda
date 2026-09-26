@@ -26,6 +26,7 @@ from app.api.deps import (
     V2LifecycleServiceDep,
     V2QuotationPdfServiceDep,
     V2QuotationServiceDep,
+    V2WholesaleServiceDep,
 )
 from app.core.quoter_v2_lifecycle import V2EffectiveStatus, effective_status
 from app.models.audit import AuditAction, AuditEvent
@@ -46,6 +47,7 @@ from app.schemas.quoter_v2 import (
     V2QuotationPage,
     V2QuotationUpdateIn,
     V2SendToProductionOut,
+    V2WholesaleDefaultsOut,
 )
 from app.services.quoter_v2 import V2_QUOTATION_ENTITY
 from app.services.quoter_v2_firing import refresh_firing
@@ -106,6 +108,10 @@ def _present(vista: LifecycleView) -> V2QuotationOut:
         duplicated_from_id=fila.duplicated_from_id,
         open_duplicate_id=vista.open_duplicate_id,
         production_handoff=_handoff_out(vista.handoff) if vista.handoff else None,
+        pricing_rules_version=fila.pricing_rules_version,
+        space_cost_per_hour=fila.space_cost_per_hour_snapshot,
+        wholesale_threshold=fila.wholesale_threshold_snapshot,
+        wholesale_suggestion_declined_at=fila.wholesale_suggestion_declined_at,
     )
 
 
@@ -206,6 +212,45 @@ async def update_v2_quotation(
     # refresco sobre cambios sin consolidar los sustituye por lo que haya en la
     # base. Y SOLO `updated_at`: un refresco a ciegas expira tambien el resto
     # de la fila y obliga a releerla entera para nada.
+    await session.flush()
+    await session.refresh(fila, attribute_names=["updated_at"])
+    resultado = _present(await lifecycle.view(fila))
+    await session.commit()
+    return resultado
+
+
+@router.post("/{quotation_id}/apply-wholesale-defaults", response_model=V2WholesaleDefaultsOut)
+async def apply_v2_wholesale_defaults(
+    quotation_id: Annotated[int, Path(ge=1)],
+    service: V2WholesaleServiceDep,
+    lifecycle: V2LifecycleServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> V2WholesaleDefaultsOut:
+    """Fase 010P. Acepta la sugerencia: configura el borrador como por mayor.
+
+    Tipo, horno por mayor con tarifas congeladas de nuevo, administracion
+    vigente y personal por defecto. Lo elegido a mano se conserva y se avisa.
+    """
+    fila, avisos = await service.apply_defaults(quotation_id, user=admin)
+    await session.flush()
+    await session.refresh(fila, attribute_names=["updated_at"])
+    presentada = _present(await lifecycle.view(fila))
+    resultado = V2WholesaleDefaultsOut(quotation=presentada, warnings=avisos)
+    await session.commit()
+    return resultado
+
+
+@router.post("/{quotation_id}/decline-wholesale-suggestion", response_model=V2QuotationOut)
+async def decline_v2_wholesale_suggestion(
+    quotation_id: Annotated[int, Path(ge=1)],
+    service: V2WholesaleServiceDep,
+    lifecycle: V2LifecycleServiceDep,
+    admin: AdminUserDep,
+    session: DbSessionDep,
+) -> V2QuotationOut:
+    """Fase 010P. Rechaza la sugerencia: solo la anota. No cambia nada del pedido."""
+    fila = await service.decline_suggestion(quotation_id, user=admin)
     await session.flush()
     await session.refresh(fila, attribute_names=["updated_at"])
     resultado = _present(await lifecycle.view(fila))

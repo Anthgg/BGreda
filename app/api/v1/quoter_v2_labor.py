@@ -110,6 +110,7 @@ def _labor_out(fila: V2QuotationLabor, warnings: list[str]) -> V2LaborOut:
         hours_overridden=fila.hours_overridden,
         is_additional_personnel=fila.is_additional_personnel,
         labor_cost=fila.labor_cost,
+        assignment_origin=str(fila.assignment_origin),
         warnings=warnings,
     )
 

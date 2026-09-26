@@ -37,9 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
 from app.core.quoter_v2_config import BASE_CURRENCY
+from app.core.quoter_v2_rules_010p import administrative_cost, space_cost_per_hour
 from app.models.audit import AuditAction
 from app.models.firings import FiringType, Kiln
 from app.models.quoter_v2 import V2CustomerKind, V2FiringMode, V2ProductionType
+from app.models.quoter_v2_labor import V2Worker, V2WorkerType
 from app.models.quoter_v2_settings import V2CommercialSettings, V2KilnRate
 from app.models.settings import SINGLETON_ID, CommercialSettings
 from app.schemas.auth import AuthenticatedUser
@@ -109,6 +111,16 @@ class V2FactorOutOfRangeError(APIError):
     status_code = 422
     code = "V2_FACTOR_OUT_OF_RANGE"
     message = "El factor comercial esta fuera del rango permitido"
+
+
+class V2DefaultWorkerInvalidError(APIError):
+    status_code = 422
+    code = "V2_DEFAULT_WORKER_INVALID"
+    message = "El trabajador por defecto no es valido"
+
+
+#: Las reglas comerciales con las que nace todo borrador desde 010P.
+PRICING_RULES_VERSION_010P = 2
 
 
 class V2SettingsService:
@@ -223,11 +235,39 @@ class V2SettingsService:
             if not horno.active:
                 raise V2KilnInactiveError(f"«{horno.name}» esta dado de baja")
 
+        # Fase 010P. El trabajador por defecto de cada tipo de pedido: INTERNO
+        # para por menor, EXTERNO para por mayor, y activo al elegirlo. Que se
+        # de de baja DESPUES no rompe nada: se conserva aqui como historia y
+        # simplemente deja de aplicarse (`default_worker_for`).
+        for campo, tipo in (
+            ("retail_default_worker_id", V2WorkerType.INTERNAL),
+            ("wholesale_default_worker_id", V2WorkerType.EXTERNAL),
+        ):
+            valor = data.get(campo)
+            if valor is None or valor == getattr(fila, campo):
+                continue
+            trabajador = await self._session.get(V2Worker, valor)
+            if trabajador is None:
+                raise V2DefaultWorkerInvalidError("Ese trabajador no existe")
+            if not trabajador.active:
+                raise V2DefaultWorkerInvalidError(f"«{trabajador.name}» esta dado de baja")
+            if trabajador.worker_type is not tipo:
+                raise V2DefaultWorkerInvalidError(
+                    f"El trabajador por defecto de este tipo de pedido tiene que ser {tipo.value}"
+                )
+
         # `None` significa «no lo mandes» en casi todo el contrato, pero en los
         # dos hornos sugeridos significa «quitalo»: son anulables justamente
         # para poder no tener ninguno, y sin esta excepcion, una vez elegido,
         # no habria forma de deshacerlo desde la API.
-        anulables = {"retail_kiln_id", "wholesale_kiln_id"}
+        anulables = {
+            "retail_kiln_id",
+            "wholesale_kiln_id",
+            # Fase 010P: tambien se pueden retirar.
+            "wholesale_quantity_threshold",
+            "retail_default_worker_id",
+            "wholesale_default_worker_id",
+        }
         cambios: dict[str, tuple[Any, Any]] = {}
         for campo, nuevo in data.items():
             if not hasattr(fila, campo):
@@ -380,7 +420,17 @@ class V2SettingsService:
             "validity_days_snapshot": v2.quotation_validity_days,
             "workday_hours_snapshot": v2.workday_hours,
             "space_service_cost_per_day_snapshot": v2.space_service_cost_per_day,
-            "administrative_cost_snapshot": v2.administrative_cost_per_quote,
+            # Fase 010P: por menor no paga administracion (P7 del owner).
+            "administrative_cost_snapshot": administrative_cost(
+                tipo, v2.administrative_cost_per_quote
+            ),
+            # Fase 010P: reglas v2. El espacio se cobra por hora ACTIVA, con el
+            # costo por hora congelado aqui; el umbral tambien se congela.
+            "pricing_rules_version": PRICING_RULES_VERSION_010P,
+            "space_cost_per_hour_snapshot": space_cost_per_hour(
+                v2.space_service_cost_per_day, v2.workday_hours
+            ),
+            "wholesale_threshold_snapshot": v2.wholesale_quantity_threshold,
             "rounding_step_snapshot": politica.rounding_step,
             "commercial_factor": factor,
             "commercial_factor_min_snapshot": v2.commercial_factor_min,
@@ -427,6 +477,34 @@ class V2SettingsService:
             "currency_symbol_snapshot": CURRENCY_SYMBOLS[moneda],
             "exchange_rate_snapshot": tasa,
         }
+
+    async def default_worker_for(self, production_type: V2ProductionType) -> V2Worker | None:
+        """El trabajador por defecto de un tipo de pedido, si sigue activo (010P).
+
+        Uno dado de baja despues de configurarlo NO se aplica: nacer sin
+        asignacion y que alguien elija es mejor que asignar a quien ya no esta.
+        """
+        v2 = await self.get()
+        worker_id = (
+            v2.retail_default_worker_id
+            if production_type is V2ProductionType.RETAIL
+            else v2.wholesale_default_worker_id
+        )
+        if worker_id is None:
+            return None
+        trabajador = await self._session.get(V2Worker, worker_id)
+        tipo_esperado = (
+            V2WorkerType.INTERNAL
+            if production_type is V2ProductionType.RETAIL
+            else V2WorkerType.EXTERNAL
+        )
+        if (
+            trabajador is None
+            or not trabajador.active
+            or trabajador.worker_type is not tipo_esperado
+        ):
+            return None
+        return trabajador
 
     async def suggested_kiln_for(self, production_type: V2ProductionType) -> Kiln | None:
         """El horno sugerido para un tipo de produccion. Publico desde 010G.

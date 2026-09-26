@@ -28,12 +28,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
 from app.core.pricing_engine import PricingEngineVersion
+from app.core.quoter_v2_rules_010p import administrative_cost
 from app.models.audit import AuditAction
 from app.models.masters import Partner, PartnerRole
 from app.models.quoter_v2 import V2ProductionType, V2Quotation, V2QuotationStatus
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_firing import freeze_kiln_rates
 from app.services.quoter_v2_settings import V2SettingsService
 from app.services.sequences import SequenceService
 
@@ -172,6 +174,11 @@ class V2QuotationService:
             # pone la configuracion. Nunca se deduce de la cantidad.
             **snapshot,
         )
+        # Fase 010P. Las tarifas del horno sugerido se congelan AHORA, al nacer,
+        # y no al primer calculo: un cambio de Configuracion entre crear y
+        # calcular ya no se cuela en esta cotizacion. Antes del INSERT: solo
+        # hace falta el horno y el tipo de cliente, y asi la fila nace completa.
+        await freeze_kiln_rates(self._session, fila)
         self._session.add(fila)
         await self._session.flush()
         self._audit.record_action(
@@ -307,6 +314,13 @@ class V2QuotationService:
         if anterior is production_type:
             return
 
+        # Fase 010P (P7). La administracion depende del tipo de pedido: por
+        # menor no paga; por mayor paga lo que diga HOY la configuracion.
+        ajustes = await self._settings.get()
+        quotation.administrative_cost_snapshot = administrative_cost(
+            production_type, ajustes.administrative_cost_per_quote
+        )
+
         sugerido_antes = await self._settings.suggested_kiln_for(anterior)
         if quotation.kiln_id is not None and (
             sugerido_antes is None or quotation.kiln_id != sugerido_antes.id
@@ -346,6 +360,7 @@ class V2QuotationService:
             "commercial_high_is_override",
         ):
             setattr(quotation, marca, False)
+        await freeze_kiln_rates(self._session, quotation)
 
     async def _draft(self, quotation_id: int) -> V2Quotation:
         """La cotizacion, bloqueada, si todavia admite cambios de cabecera.
