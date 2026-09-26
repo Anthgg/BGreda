@@ -15,6 +15,10 @@ from app.core.quoter_v2_reductions import (
     savings_from_factor,
 )
 
+#: Caso canonico del Excel anterior a 010P: referencia historica, no oraculo de
+#: las reglas 010P (tests/fixtures/LEGACY_REFERENCE_PRE_010P.json).
+pytestmark = pytest.mark.legacy_reference_pre_010p
+
 SUBTOTAL = Decimal("10055")
 COSTO = Decimal("3347.830588")
 FACTOR = Decimal(3)

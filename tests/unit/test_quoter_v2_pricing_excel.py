@@ -59,6 +59,10 @@ from tests.fixtures.excel_v2_modelo import (
     TOTALS,
 )
 
+#: Caso canonico del Excel anterior a 010P: referencia historica, no oraculo de
+#: las reglas 010P (tests/fixtures/LEGACY_REFERENCE_PRE_010P.json).
+pytestmark = pytest.mark.legacy_reference_pre_010p
+
 CANTIDADES = [linea["quantity"] for linea in LINES]
 VOLUMENES = [linea["total_volume_cm3"] for linea in LINES]
 MATERIALES = [linea["materials_cost"] for linea in LINES]

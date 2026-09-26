@@ -96,6 +96,7 @@ asyncio_default_test_loop_scope = "session"
 addopts = "-ra --strict-markers"
 markers = [
     "smoke: pruebas contra un entorno real desplegado (requieren red y credenciales)",
+    "legacy_reference_pre_010p: caso canonico del Excel anterior a 010P; referencia historica, no oraculo de las reglas 010P",
 ]
 
 # --------------------------------------------------------------------------

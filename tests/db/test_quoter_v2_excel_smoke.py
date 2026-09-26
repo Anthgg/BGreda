@@ -28,9 +28,14 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 from pypdf import PdfReader
 
 from tests.db.v2_capacidades import habilitar
+
+#: Caso canonico del Excel anterior a 010P: referencia historica, no oraculo de
+#: las reglas 010P (tests/fixtures/LEGACY_REFERENCE_PRE_010P.json).
+pytestmark = pytest.mark.legacy_reference_pre_010p
 
 V2 = "/api/v1/quotations-v2"
 KILNS = "/api/v1/kilns"
