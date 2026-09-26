@@ -37,6 +37,7 @@ que se hagan 40 no lo baja. Medir a las personas es otro producto.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -44,12 +45,14 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -65,6 +68,19 @@ from app.db.types import StrEnumType
 
 if TYPE_CHECKING:
     from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
+
+
+class V2LaborAssignmentOrigin(StrEnum):
+    """Quien eligio al trabajador de una tarea (Fase 010P, decision 4).
+
+    DEFAULT: lo puso el sistema con el trabajador por defecto del tipo de
+    pedido. MANUAL: lo eligio una persona, y ningun automatismo lo pisa. Todo
+    lo anterior a 010P es MANUAL: nunca se supone que algo historico fue
+    automatico.
+    """
+
+    DEFAULT = "DEFAULT"
+    MANUAL = "MANUAL"
 
 
 class V2WorkerType(StrEnum):
@@ -300,6 +316,13 @@ class V2QuotationLabor(Base, TimestampMixin):
     is_additional_personnel: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    #: Fase 010P. Quien eligio a esta persona: el sistema (DEFAULT del tipo de
+    #: pedido) o alguien (MANUAL). Aceptar «Por mayor» solo cambia lo DEFAULT.
+    assignment_origin: Mapped[V2LaborAssignmentOrigin] = mapped_column(
+        StrEnumType(V2LaborAssignmentOrigin, 8),
+        nullable=False,
+        server_default=text("'MANUAL'"),
+    )
 
     labor_cost: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
@@ -320,8 +343,52 @@ class V2QuotationLabor(Base, TimestampMixin):
             name="workday_hours_range",
         ),
         CheckConstraint("standard_capacity_snapshot > 0", name="capacity_positive"),
+        CheckConstraint(
+            "assignment_origin IN ('DEFAULT', 'MANUAL')", name="assignment_origin_allowed"
+        ),
         Index("ix_v2_quotation_labor_quotation", "v2_quotation_id", "sort_order"),
         # La jornada compartida se calcula agrupando por trabajador dentro de
         # una cotizacion, y es la consulta que se hace en cada guardado.
         Index("ix_v2_quotation_labor_worker", "v2_quotation_id", "worker_id"),
+    )
+
+
+class V2QuotationWorker(Base):
+    """Una persona asignada a una cotizacion, con su tarifa CONGELADA (Fase 010P).
+
+    La fila nace con la PRIMERA asignacion de esa persona a esa cotizacion y
+    no se actualiza despues: subir manana su jornal no cambia lo que ya se
+    presupuesto. De aqui salen los externos DISTINTOS del pedido: una persona
+    en tres procesos es UNA persona, con UN jornal.
+
+    `workday_hours_snapshot` es la jornada PROPIA del trabajador; NULL significa
+    «la de la cotizacion», que es la que se usa al calcular (F9).
+    """
+
+    __tablename__ = "v2_quotation_workers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    v2_quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("v2_quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    worker_id: Mapped[int] = mapped_column(
+        ForeignKey("v2_workers.id", ondelete="RESTRICT"), nullable=False
+    )
+    worker_type_snapshot: Mapped[V2WorkerType] = mapped_column(
+        StrEnumType(V2WorkerType, 16), nullable=False
+    )
+    daily_rate_snapshot: Mapped[Decimal] = mapped_column(money_numeric(), nullable=False)
+    workday_hours_snapshot: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("v2_quotation_id", "worker_id", name="uq_v2_quotation_workers_worker"),
+        CheckConstraint("daily_rate_snapshot >= 0", name="daily_rate_non_negative"),
+        CheckConstraint(
+            "workday_hours_snapshot IS NULL"
+            " OR (workday_hours_snapshot > 0 AND workday_hours_snapshot <= 24)",
+            name="workday_hours_range",
+        ),
     )

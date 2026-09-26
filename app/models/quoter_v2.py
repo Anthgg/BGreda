@@ -40,6 +40,8 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
+    SmallInteger,
     String,
     Text,
     text,
@@ -310,7 +312,45 @@ class V2Quotation(Base, TimestampMixin):
     #:
     #: No confundir con la vigencia de la cotizacion, que es cuanto tiempo se
     #: respeta el precio. 010F cobrara el espacio por ESTOS dias.
+    #:
+    #: Fase 010P: con `pricing_rules_version = 2` ya no mueve el precio (el
+    #: espacio se cobra por hora ACTIVA); se conserva para las reglas v1.
     effective_work_days: Mapped[int | None] = mapped_column(Integer)
+
+    # ---- Fase 010P: reglas comerciales v2 ---------------------------------
+    #: Con que reglas se calculo esta cotizacion. 1 = anteriores a 010P (lo
+    #: emitido conserva su historia y no se recalcula); 2 = 010P. Todo borrador
+    #: nuevo nace en 2.
+    pricing_rules_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("2")
+    )
+    #: Costo de espacio por hora, congelado al crear: costo/dia / jornada.
+    space_cost_per_hour_snapshot: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    #: Acuerdo de ESTA cotizacion. Presente, manda sobre el congelado.
+    space_cost_per_hour_override: Mapped[Decimal | None] = mapped_column(unit_cost_numeric())
+    #: Secado, espera... Solo se SUGIERE en precio: nunca suma a un costo.
+    passive_time_hours: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Umbral de unidades congelado al crear: un cambio posterior de la
+    #: configuracion no cambia como se lee esta cotizacion.
+    wholesale_threshold_snapshot: Mapped[int | None] = mapped_column(Integer)
+    #: Cuando se rechazo la sugerencia de pasar a por mayor. No se reabre sola.
+    wholesale_suggestion_declined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    #: El MAXIMO de los minutos activos de las lineas (paralelismo).
+    active_production_minutes: Mapped[Decimal] = mapped_column(
+        quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    #: Personal externo: lo que se imputa al cliente (horas x jornal/jornada)...
+    commercial_external_labor_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    #: ...y lo que paga el taller (jornales enteros). La brecha no se esconde.
+    real_external_labor_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
 
     # ---- Fase 010E: quema -------------------------------------------------
     #: El horno de ESTA cotizacion. Nace del sugerido por el tipo de produccion
@@ -596,6 +636,22 @@ class V2Quotation(Base, TimestampMixin):
         CheckConstraint("illustration_quantity >= 0", name="illustration_quantity_non_negative"),
         CheckConstraint("illustration_hours >= 0", name="illustration_hours_non_negative"),
         CheckConstraint("illustration_cost >= 0", name="illustration_cost_non_negative"),
+        # Fase 010P.
+        CheckConstraint("pricing_rules_version IN (1, 2)", name="pricing_rules_version_known"),
+        CheckConstraint(
+            "space_cost_per_hour_override IS NULL OR space_cost_per_hour_override >= 0",
+            name="space_cost_per_hour_override_non_negative",
+        ),
+        CheckConstraint("passive_time_hours >= 0", name="passive_time_hours_non_negative"),
+        CheckConstraint(
+            "wholesale_threshold_snapshot IS NULL OR wholesale_threshold_snapshot > 0",
+            name="wholesale_threshold_positive",
+        ),
+        CheckConstraint("active_production_minutes >= 0", name="active_minutes_non_negative"),
+        CheckConstraint(
+            "commercial_external_labor_cost >= 0", name="external_commercial_non_negative"
+        ),
+        CheckConstraint("real_external_labor_cost >= 0", name="external_real_non_negative"),
         CheckConstraint(
             "illustration_capacity_snapshot IS NULL OR illustration_capacity_snapshot > 0",
             name="illustration_capacity_positive",
@@ -1011,6 +1067,23 @@ class V2QuotationProduct(Base, TimestampMixin):
         calculation_numeric(), nullable=False, server_default=text("0")
     )
 
+    # ---- Fase 010P: tiempo de produccion y reparto del personal externo ----
+    #: Cuanto tarda UNA pieza, en minutos. Unidad canonica: la pantalla la
+    #: muestra como convenga, la base guarda minutos. NULL = aun sin decidir.
+    production_time_per_unit_minutes: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    #: Cuantos moldes trabajan a la vez. ciclos = ceil(cantidad / moldes).
+    mold_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    #: ciclos x minutos por unidad. NULL mientras la linea no tenga tiempo.
+    line_active_minutes: Mapped[Decimal | None] = mapped_column(quantity_numeric())
+    #: La parte de la linea del personal externo del PEDIDO, repartida por peso
+    #: de minutos activos (nunca calculada con las horas propias de la linea).
+    allocated_external_commercial_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+    allocated_external_real_cost: Mapped[Decimal] = mapped_column(
+        calculation_numeric(), nullable=False, server_default=text("0")
+    )
+
     #: `costo de produccion asignado x factor`, en moneda base.
     line_price: Mapped[Decimal] = mapped_column(
         calculation_numeric(), nullable=False, server_default=text("0")
@@ -1050,6 +1123,23 @@ class V2QuotationProduct(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint("quantity >= 0", name="quantity_non_negative"),
+        # Fase 010P.
+        CheckConstraint(
+            "production_time_per_unit_minutes IS NULL OR production_time_per_unit_minutes > 0",
+            name="time_per_unit_positive",
+        ),
+        CheckConstraint("mold_count >= 1", name="mold_count_positive"),
+        CheckConstraint(
+            "line_active_minutes IS NULL OR line_active_minutes >= 0",
+            name="line_active_minutes_non_negative",
+        ),
+        CheckConstraint(
+            "allocated_external_commercial_cost >= 0",
+            name="line_external_commercial_non_negative",
+        ),
+        CheckConstraint(
+            "allocated_external_real_cost >= 0", name="line_external_real_non_negative"
+        ),
         CheckConstraint(
             "body_unit_weight IS NULL OR body_unit_weight >= 0",
             name="body_unit_weight_non_negative",

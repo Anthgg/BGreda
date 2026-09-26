@@ -108,7 +108,9 @@ from app.models.quoter_v2 import (
     V2QuotationStatus,
 )
 from app.models.quoter_v2_labor import (
+    V2LaborAssignmentOrigin,
     V2QuotationLabor,
+    V2QuotationWorker,
     V2Technique,
     V2Worker,
     V2WorkerTechnique,
@@ -247,6 +249,7 @@ __all__ = [
     "V2FiringQuotationLine",
     "V2GlazeCostSource",
     "V2KilnRate",
+    "V2LaborAssignmentOrigin",
     "V2MaterialCost",
     "V2MaterialKind",
     "V2MaterialOrigin",
@@ -261,6 +264,7 @@ __all__ = [
     "V2QuotationProcess",
     "V2QuotationProduct",
     "V2QuotationStatus",
+    "V2QuotationWorker",
     "V2Technique",
     "V2Worker",
     "V2WorkerTechnique",

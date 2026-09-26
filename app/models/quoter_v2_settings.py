@@ -179,6 +179,21 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         server_default=text(str(DEFAULT_FIRING_SERVICE_FACTOR)),
     )
 
+    # ---- Fase 010P: umbral por mayor y personal por defecto ---------------
+    #: Unidades del pedido ENTERO por encima de las cuales se SUGIERE pasar a
+    #: por mayor. NULL = sin sugerencia. Nunca cambia un pedido solo.
+    wholesale_quantity_threshold: Mapped[int | None] = mapped_column(Integer)
+    #: Quien hace, por defecto, los procesos de un pedido por menor (INTERNO) y
+    #: de uno por mayor (EXTERNO). RESTRICT como el resto de maestros: a un
+    #: trabajador se le da de baja, no se le borra. Dado de baja sigue aqui como
+    #: historia, pero NO se aplica como default.
+    retail_default_worker_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_workers.id", ondelete="RESTRICT", name="fk_v2_settings_retail_worker")
+    )
+    wholesale_default_worker_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_workers.id", ondelete="RESTRICT", name="fk_v2_settings_wholesale_worker")
+    )
+
     retail_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[retail_kiln_id])
     wholesale_kiln: Mapped[Kiln | None] = relationship("Kiln", foreign_keys=[wholesale_kiln_id])
 
@@ -222,6 +237,10 @@ class V2CommercialSettings(Base, VersionedSingletonMixin):
         CheckConstraint(
             "firing_service_factor_default >= 1 AND firing_service_factor_default <= 2",
             name="firing_service_factor_range",
+        ),
+        CheckConstraint(
+            "wholesale_quantity_threshold IS NULL OR wholesale_quantity_threshold > 0",
+            name="wholesale_threshold_positive",
         ),
     )
 

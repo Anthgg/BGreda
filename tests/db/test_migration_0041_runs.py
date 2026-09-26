@@ -10,7 +10,7 @@ Lo que se prueba aqui es lo que la base garantiza SOLA, sin servicio delante:
 5. las constraints de rotation (solo 0 o 90), quantity > 0, x/y >= 0;
 6. el UNIQUE de (layout_id, level_index) en niveles;
 7. bajar funciona sin datos de 041, se niega con datos;
-8. la cadena deja una sola cabeza, y es 0041.
+8. 0041 se aplica y queda sellada.
 """
 
 from __future__ import annotations
@@ -378,8 +378,9 @@ async def test_bajar_sin_datos_funciona_con_datos_se_niega(migration_engine: Asy
     assert "0041" in resultado.stderr + resultado.stdout
 
 
-async def test_cadena_deja_una_sola_cabeza_y_es_0041(migration_engine: AsyncEngine) -> None:
-    _upgrade("head")
+async def test_0041_se_aplica_y_se_sella(migration_engine: AsyncEngine) -> None:
+    """0041 se aplica y queda sellada. La cabeza la lleva la migracion mas nueva."""
+    _upgrade("0041")
     async with migration_engine.connect() as connection:
         cabezas = list(
             (await connection.scalars(text("SELECT version_num FROM alembic_version"))).all()

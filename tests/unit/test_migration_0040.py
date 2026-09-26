@@ -57,11 +57,13 @@ def _downgrade() -> str:
     return _codigo().split("def downgrade()")[1]
 
 
-def test_0040_cuelga_de_0039_y_la_cabeza_es_0041() -> None:
+def test_0040_cuelga_de_0039_y_la_cadena_llega_a_0043() -> None:
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert list(script.get_heads()) == ["0041"]
+    assert list(script.get_heads()) == ["0043"]
     assert script.get_revision("0040").down_revision == "0039"
     assert script.get_revision("0041").down_revision == "0040"
+    assert script.get_revision("0042").down_revision == "0041"
+    assert script.get_revision("0043").down_revision == "0042"
 
 
 def test_el_upgrade_no_borra_datos() -> None:
