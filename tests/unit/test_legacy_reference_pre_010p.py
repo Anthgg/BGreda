@@ -43,6 +43,15 @@ def test_el_caso_final_conserva_su_total_historico() -> None:
     )
 
 
+def test_la_decision_del_owner_y_el_caso_010g_se_conservan() -> None:
+    datos = _referencia()
+    assert "owner, respuesta P3 a 010P_PLAN" in datos["decided_by"]
+    assert "Casos deterministas F1-F9" in datos["replacement"]
+    caso_010g = datos["cases"]["excel_modelo_010g"]
+    assert caso_010g["source"] == "Cotizador_Greda_V2_modelo.xlsx"
+    assert "total 9077,74" in caso_010g["note"]
+
+
 def test_cada_valor_esta_clasificado_una_sola_vez() -> None:
     caso = _referencia()["cases"]["excel_final_010j"]
     vivos = set(caso["still_live_under_010p"])
