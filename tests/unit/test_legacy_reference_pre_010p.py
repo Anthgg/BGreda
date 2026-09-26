@@ -21,7 +21,7 @@ pytestmark = pytest.mark.legacy_reference_pre_010p
 
 TESTS = Path(__file__).resolve().parents[1]
 FIXTURE = TESTS / "fixtures" / "LEGACY_REFERENCE_PRE_010P.json"
-EXCEL_SMOKE = TESTS / "db" / "test_quoter_v2_excel_smoke.py"
+EXCEL_SMOKE = TESTS / "db" / "test_legacy_reference_pre_010p.py"
 
 
 def _referencia() -> dict:  # type: ignore[type-arg]
