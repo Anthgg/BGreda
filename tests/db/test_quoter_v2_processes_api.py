@@ -284,7 +284,8 @@ class TestElTrabajadorVaDespues:
         assert asignado["worker_name"] == "Juan"
         # 20 piezas a 50 por jornada de 8 h son 3,2 h; a S/15 la hora, S/48.
         assert Decimal(asignado["final_hours"]) == Decimal("3.2")
-        assert Decimal(asignado["labor_cost"]) == Decimal(48)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(asignado["labor_cost"]) == Decimal(0)
 
     async def test_asignar_a_quien_no_sabe_la_tecnica_se_rechaza(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -359,7 +360,8 @@ class TestElTrabajadorVaDespues:
         assert Decimal(actualizado["quantity"]) == Decimal(50)
         # 50 piezas a 50 por jornada son 8 h; a S/15, S/120.
         assert Decimal(actualizado["final_hours"]) == Decimal(8)
-        assert Decimal(actualizado["labor_cost"]) == Decimal(120)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(actualizado["labor_cost"]) == Decimal(0)
 
 
 class TestAdicionales:

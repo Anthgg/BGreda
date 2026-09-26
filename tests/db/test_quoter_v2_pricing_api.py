@@ -167,18 +167,24 @@ async def escenario(
     *,
     dias: int | None = 2,
     piezas: int = 10,
+    minutos: str | None = "96",
+    tipo: str = "RETAIL",
 ) -> tuple[int, dict[str, Any]]:
-    """Una cotizacion completa: material, quema, mano de obra y dias.
+    """Una cotizacion completa: material, quema, mano de obra y tiempo.
 
     Diez piezas de 10 x 10 x 10 ocupan 10.000 cm3 de los 17.000 del horno: una
     sola hornada, con las dos quemas encendidas. De ahi S/450 de tarifa
     comercial y S/105 de gas.
+
+    Fase 010P: el espacio sale de las horas ACTIVAS. Diez piezas de 96 min con
+    un molde son 16 h; a S/140 / 8 h = S/17,50 la hora, S/280 (lo mismo que
+    daban los 2 dias de antes, para que los importes de siempre sigan valiendo).
     """
     marca = next(_SECUENCIA)
     await configurar_igv(api, csrf)
     horno = await crear_horno(api, csrf, f"Horno del precio {marca}")
     pasta = await crear_pasta(api, csrf, f"Arcilla del precio {marca}")
-    cotizacion = await crear_cotizacion(api, csrf)
+    cotizacion = await crear_cotizacion(api, csrf, production_type=tipo)
 
     await api.put(
         f"{V2}/{cotizacion}/firing",
@@ -204,6 +210,7 @@ async def escenario(
         height_cm="10",
         body_material_id=pasta,
         body_unit_weight="500",
+        **({} if minutos is None else {"production_time_per_unit_minutes": minutos}),
     )
     if dias is not None:
         respuesta = await api.put(
@@ -245,7 +252,8 @@ class TestCostos:
         assert Decimal(datos["firing_commercial_cost"]) == Decimal(450)
         assert Decimal(datos["gas_cost"]) == Decimal(105)
         assert Decimal(datos["space_cost"]) == Decimal(280)
-        assert Decimal(datos["administration_cost"]) == Decimal(200)
+        # 010P: por menor no se cobra administracion.
+        assert Decimal(datos["administration_cost"]) == Decimal(0)
 
     async def test_el_costo_de_produccion_lleva_la_tarifa_y_el_real_el_gas(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -266,30 +274,32 @@ class TestCostos:
         assert Decimal(datos["firing_difference"]) == Decimal(450) - Decimal(105)
         assert produccion > real
 
-    async def test_el_espacio_sale_de_los_dias_efectivos(
+    async def test_el_espacio_sale_de_las_horas_activas(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        """2 dias x S/140. Por dias EFECTIVOS, nunca por vigencia de la oferta."""
-        cotizacion, _ = await escenario(api, admin_csrf, dias=4)
+        """010P: 32 h activas x S/17,50. Los dias efectivos ya no lo mueven."""
+        con_dias, _ = await escenario(api, admin_csrf, dias=4, minutos="192")
+        sin_dias, _ = await escenario(api, admin_csrf, dias=None, minutos="192")
 
-        assert Decimal((await precio(api, cotizacion))["space_cost"]) == Decimal(560)
+        assert Decimal((await precio(api, con_dias))["space_cost"]) == Decimal(560)
+        assert Decimal((await precio(api, sin_dias))["space_cost"]) == Decimal(560)
 
-    async def test_sin_dias_decididos_el_espacio_no_se_inventa(
+    async def test_sin_tiempo_por_pieza_el_espacio_no_se_inventa(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        """Los dias son una decision humana (010D): sin ella se avisa."""
-        cotizacion, _ = await escenario(api, admin_csrf, dias=None)
+        """El tiempo es una decision humana: sin el no hay horas, y se avisa."""
+        cotizacion, _ = await escenario(api, admin_csrf, minutos=None)
 
         datos = await precio(api, cotizacion)
         assert Decimal(datos["space_cost"]) == Decimal(0)
-        assert "V2_PRICING_WORK_DAYS_NOT_SET" in datos["warnings"]
+        assert "V2_PRICING_LINE_TIME_MISSING" in datos["warnings"]
 
     async def test_la_administracion_se_cobra_una_vez_por_cotizacion(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        """Mil piezas cuestan administrativamente lo mismo que diez."""
-        pocas, _ = await escenario(api, admin_csrf, piezas=10)
-        muchas, _ = await escenario(api, admin_csrf, piezas=16)
+        """Mil piezas cuestan administrativamente lo mismo que diez (por mayor)."""
+        pocas, _ = await escenario(api, admin_csrf, piezas=10, tipo="WHOLESALE")
+        muchas, _ = await escenario(api, admin_csrf, piezas=16, tipo="WHOLESALE")
 
         assert (
             Decimal((await precio(api, pocas))["administration_cost"])
@@ -526,7 +536,8 @@ class TestReparto:
         llegar igualmente a la linea. Antes se quedaban en la cabecera y la
         suma de lo repartido dejaba de ser el total.
         """
-        cotizacion, _ = await escenario(api, admin_csrf, piezas=0)
+        # Por mayor: la administracion es un general real que repartir.
+        cotizacion, _ = await escenario(api, admin_csrf, piezas=0, tipo="WHOLESALE")
 
         datos = await precio(api, cotizacion)
         repartido = sum(Decimal(linea["production_cost"]) for linea in datos["lines"])

@@ -369,11 +369,16 @@ class TestSnapshot:
     async def test_la_cotizacion_nace_con_los_valores_de_la_configuracion(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        creada = await crear_cotizacion(api, admin_csrf)
+        creada = await crear_cotizacion(api, admin_csrf, production_type="WHOLESALE")
 
         assert Decimal(creada["workday_hours"]) == Decimal(8)
         assert Decimal(creada["space_service_cost_per_day"]) == Decimal(140)
         assert Decimal(creada["administrative_cost"]) == Decimal(200)
+        # 010P: por menor no se cobra administracion; el costo por hora del
+        # espacio se congela al crear (140 / 8).
+        por_menor = await crear_cotizacion(api, admin_csrf, production_type="RETAIL")
+        assert Decimal(por_menor["administrative_cost"]) == Decimal(0)
+        assert Decimal(por_menor["space_cost_per_hour"]) == Decimal("17.5")
         assert Decimal(creada["commercial_factor"]) == Decimal(3)
         assert creada["validity_days"] == 20
         assert creada["settings_version"] == 1

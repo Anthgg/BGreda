@@ -70,6 +70,7 @@ async def otra_enviada_a_produccion(
             "height_cm": "10",
             "body_material_id": primera["pasta_id"],
             "body_unit_weight": "300",
+            "production_time_per_unit_minutes": "6",
         },
         headers=h(csrf),
     )

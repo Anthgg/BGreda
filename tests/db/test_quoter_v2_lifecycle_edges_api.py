@@ -144,6 +144,7 @@ class TestMaestrosDeBaja:
                 "height_cm": "3",
                 "body_material_id": datos["pasta_id"],
                 "body_unit_weight": "300",
+                "production_time_per_unit_minutes": "6",
             },
             headers=h(admin_csrf),
         )
@@ -158,6 +159,7 @@ class TestMaestrosDeBaja:
                 "height_cm": "9",
                 "body_material_id": datos["pasta_id"],
                 "body_unit_weight": "200",
+                "production_time_per_unit_minutes": "6",
                 "requires_glaze": True,
                 "glaze_material_id": esmalte,
             },

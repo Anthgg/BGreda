@@ -187,7 +187,9 @@ class TestTrabajadores:
             technique_id=tecnica["id"],
             final_hours_override="4",
         )
-        assert Decimal(tarea["labor_cost"]) == Decimal(110)
+        assert Decimal(tarea["hourly_rate"]) == Decimal("27.5")
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
 
     async def test_una_jornada_propia_gana_sobre_la_del_taller(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -236,7 +238,9 @@ class TestTrabajadores:
             technique_id=tecnica["id"],
             quantity="50",
         )
-        assert Decimal(tarea["labor_cost"]) == Decimal(120)
+        assert Decimal(tarea["hourly_rate"]) == Decimal(15)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
 
         subida = await api.put(
             f"{WORKERS}/{worker['id']}",
@@ -247,7 +251,7 @@ class TestTrabajadores:
 
         cuerpo = await pagina(api, cotizacion)
         assert Decimal(cuerpo["items"][0]["hourly_rate"]) == Decimal(15)
-        assert Decimal(cuerpo["items"][0]["labor_cost"]) == Decimal(120)
+        assert Decimal(cuerpo["items"][0]["labor_cost"]) == Decimal(0)
 
     async def test_dos_administradores_no_se_pisan_el_jornal(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -300,7 +304,8 @@ class TestTecnicas:
 
         assert Decimal(tarea["calculated_hours"]) == Decimal(12)
         assert Decimal(tarea["final_hours"]) == Decimal(12)
-        assert Decimal(tarea["labor_cost"]) == Decimal(180)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
 
     async def test_la_tecnica_no_guarda_precio(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -409,7 +414,8 @@ class TestJornadaCompartida:
 
         cuerpo = await pagina(api, cotizacion)
 
-        assert Decimal(cuerpo["labor_cost"]) == Decimal(120)
+        # 010P: el personal interno no cuesta. La jornada sigue siendo UNA.
+        assert Decimal(cuerpo["labor_cost"]) == Decimal(0)
         carga = cuerpo["workday_load"][0]
         assert Decimal(carga["assigned_hours"]) == JORNADA
         assert carga["exceeds_workday"] is False
@@ -456,7 +462,8 @@ class TestJornadaCompartida:
         )
 
         assert "V2_LABOR_WORKDAY_EXCEEDED" in tarea["warnings"]
-        assert Decimal(tarea["labor_cost"]) == Decimal(150)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
 
     async def test_el_aviso_mira_el_total_y_no_cada_tarea(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -600,8 +607,11 @@ class TestPersonalAdicional:
         )
 
         assert extra["is_additional_personnel"] is True
-        assert Decimal(extra["labor_cost"]) == Decimal(120)
-        assert Decimal((await pagina(api, cotizacion))["labor_cost"]) == antes + Decimal(120)
+        # 010P: el externo cuesta por las horas ACTIVAS del pedido, no por su
+        # tarea; sin tiempo por pieza aun no hay horas que cobrar.
+        assert Decimal(extra["labor_cost"]) == Decimal(0)
+        assert Decimal(extra["hourly_rate"]) == Decimal(20)
+        assert Decimal((await pagina(api, cotizacion))["labor_cost"]) == antes
 
     async def test_anadir_personal_no_reduce_el_plazo(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -664,7 +674,9 @@ class TestOverrides:
         )
 
         assert tarea["rate_overridden"] is True
-        assert Decimal(tarea["labor_cost"]) == Decimal(140)
+        assert Decimal(tarea["hourly_rate"]) == Decimal("17.5")
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
         maestro = (await api.get(WORKERS)).json()["items"]
         fila = next(w for w in maestro if w["id"] == worker["id"])
         assert Decimal(fila["daily_rate"]) == Decimal(120)
@@ -704,7 +716,8 @@ class TestOverrides:
         assert cuerpo["rate_overridden"] is True
         assert Decimal(cuerpo["hourly_rate"]) == Decimal("17.5")
         assert Decimal(cuerpo["final_hours"]) == Decimal(16)
-        assert Decimal(cuerpo["labor_cost"]) == Decimal(280)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(cuerpo["labor_cost"]) == Decimal(0)
 
     async def test_retirar_el_acuerdo_es_una_decision_explicita(
         self, api: httpx.AsyncClient, admin_csrf: str
@@ -1248,7 +1261,9 @@ class TestLoQueEncontroLaAuditoria:
         horas = Decimal(tarea["final_hours"])
         tarifa = Decimal(tarea["hourly_rate"])
         assert horas == Decimal("2.666667")
-        assert Decimal(tarea["labor_cost"]) == horas * tarifa
+        assert tarifa == Decimal(15)
+        # 010P: la tarea ya no lleva costo; el costo es del pedido (externos x horas activas).
+        assert Decimal(tarea["labor_cost"]) == Decimal(0)
 
 
 class TestReenviarNoEsElegir:
