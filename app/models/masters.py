@@ -210,6 +210,9 @@ class Product(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     notes: Mapped[str | None] = mapped_column(Text)
+    source_v2_quotation_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_quotation_products.id", ondelete="RESTRICT"), nullable=True
+    )
 
     #: Dimensiones tecnicas para produccion y cotizador
     material: Mapped[str | None] = mapped_column(String(200))
@@ -231,6 +234,9 @@ class Product(Base, TimestampMixin):
         Index("ix_products_name", "name"),
         Index("ix_products_category", "product_category_id"),
         Index("ix_products_type_active", "product_type", "active"),
+        UniqueConstraint(
+            "source_v2_quotation_product_id", name="uq_products_source_v2_quotation_product"
+        ),
     )
 
 

@@ -12,7 +12,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
-from app.api.deps import AdminUserDep, CurrentUserDep, DbSessionDep, MasterDataServiceDep
+from app.api.deps import (
+    AdminUserDep,
+    CurrentUserDep,
+    DbSessionDep,
+    MasterDataServiceDep,
+    MastersQuickCreateDep,
+)
+from app.core.errors import AuthInsufficientRoleError
 from app.models.masters import (
     Partner,
     PartnerRole,
@@ -22,6 +29,7 @@ from app.models.masters import (
     ProductType,
     UnitOfMeasure,
 )
+from app.models.profile import UserRole
 from app.schemas.common import ErrorResponse
 from app.schemas.masters import (
     PartnerCreate,
@@ -226,10 +234,16 @@ async def read_product(
 )
 async def create_product(
     payload: ProductCreate,
-    user: AdminUserDep,
+    user: MastersQuickCreateDep,
     service: MasterDataServiceDep,
     session: DbSessionDep,
 ) -> ProductOut:
+    if user.role is UserRole.OPERATOR and payload.product_type not in {
+        ProductType.FINISHED_PRODUCT,
+        ProductType.RAW_MATERIAL,
+        ProductType.PREPARED_MATERIAL,
+    }:
+        raise AuthInsufficientRoleError()
     product = await service.create_product(payload, user)
     await session.commit()
     await session.refresh(product)

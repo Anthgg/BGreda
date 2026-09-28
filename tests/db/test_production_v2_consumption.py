@@ -26,12 +26,13 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory import StockBalance, StockMovement
+from app.models.inventory import StockBalance, StockLotBalance, StockMovement
 from app.models.production import ProductionConsumption, ProductionConsumptionKind
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.production import ProductionConsumptionCreateIn
 from app.services.production import ProductionOrderService
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
+from tests.db.test_production_orders_api import completar_orden
 from tests.db.test_production_v2_origin import (
     ORDERS,
     crear_orden,
@@ -39,6 +40,15 @@ from tests.db.test_production_v2_origin import (
     otra_enviada_a_produccion,
 )
 from tests.db.test_quoter_v2_lifecycle_api import h
+from tests.db.test_recipe_preparations_api import (
+    PREPARATIONS,
+)
+from tests.db.test_recipe_preparations_api import (
+    _payload as preparation_payload,
+)
+from tests.db.test_recipe_preparations_api import (
+    _scenario as preparation_scenario,
+)
 
 V2 = "/api/v1/quotations-v2"
 ADJUSTMENTS = "/api/v1/inventory/adjustments"
@@ -453,6 +463,79 @@ class TestIdempotencia:
 # Concurrencia sobre el mismo saldo
 # ---------------------------------------------------------------------------
 class TestConcurrencia:
+    async def test_dos_consumos_de_seis_sobre_lote_de_diez_solo_uno_gana(
+        self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+    ) -> None:
+        """El bloqueo del lote impide sobreconsumirlo aunque el saldo agregado baste."""
+        scenario = await preparation_scenario(
+            api, admin_csrf, suffix="_lot_concurrency_010p", stock_g="10000"
+        )
+        prepared = await api.post(
+            PREPARATIONS,
+            json=preparation_payload(
+                scenario,
+                total_dry_weight_g="10",
+                water_amount_ml="0",
+                final_yield_ml="10",
+                idempotency_key="lot-concurrency-010p",
+            ),
+            headers=h(admin_csrf),
+        )
+        assert prepared.status_code == 201, prepared.text
+        preparation_id = prepared.json()["id"]
+
+        quotation = await enviada_a_produccion(api, admin_csrf)
+        order = await crear_orden(
+            api,
+            admin_csrf,
+            v2_quotation_id=quotation["id"],
+            location_id=scenario["location_id"],
+        )
+        assert order.status_code == 201, order.text
+        order_id = int(order.json()["id"])
+        prepared_product_id = scenario["prepared"]["id"]
+
+        first, second = await asyncio.gather(
+            consumir(
+                api,
+                admin_csrf,
+                order_id,
+                product_id=prepared_product_id,
+                quantity="6",
+                key="lot-consumption-010p-a",
+                kind="OTHER",
+                preparation_id=preparation_id,
+            ),
+            consumir(
+                api,
+                admin_csrf,
+                order_id,
+                product_id=prepared_product_id,
+                quantity="6",
+                key="lot-consumption-010p-b",
+                kind="OTHER",
+                preparation_id=preparation_id,
+            ),
+        )
+        assert sorted((first.status_code, second.status_code)) == [201, 422], (
+            first.text,
+            second.text,
+        )
+        rejected = first if first.status_code == 422 else second
+        assert rejected.json()["error"]["code"] == "NEGATIVE_STOCK_NOT_ALLOWED"
+        assert await saldo(db_session, prepared_product_id, scenario["location_id"]) == Decimal(4)
+        lot = await db_session.scalar(
+            select(StockLotBalance).where(
+                StockLotBalance.preparation_id == preparation_id,
+                StockLotBalance.product_id == prepared_product_id,
+                StockLotBalance.location_id == scenario["location_id"],
+            )
+        )
+        assert lot is not None
+        assert lot.quantity == Decimal(4)
+        assert lot.quantity >= 0
+        assert await consumos(db_session) == 1
+
     async def test_dos_consumos_de_700_sobre_1000_solo_uno_gana(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
     ) -> None:
@@ -564,7 +647,7 @@ class TestCuandoSePuedeConsumir:
             key="antes-de-cerrar",
         )
         await api.post(f"{ORDERS}/{datos['order_id']}/start", headers=h(admin_csrf))
-        cerrada = await api.post(f"{ORDERS}/{datos['order_id']}/complete", headers=h(admin_csrf))
+        cerrada = await completar_orden(api, admin_csrf, int(datos["order_id"]))
         assert cerrada.status_code == 200, cerrada.text
 
         r = await consumir(

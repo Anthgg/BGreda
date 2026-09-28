@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.firings import Kiln
-from app.models.inventory import StockMovement
+from app.models.inventory import MovementType, StockMovement
 from app.models.masters import Product, ProductType
 from app.models.production import ProductionOrderNote
 from app.models.quoter_v2 import V2QuotationProduct
@@ -45,7 +45,9 @@ async def arrancar(api: httpx.AsyncClient, csrf: str, order_id: int) -> None:
 
 
 async def finalizar(api: httpx.AsyncClient, csrf: str, order_id: int) -> httpx.Response:
-    return await api.post(f"{ORDERS}/{order_id}/complete", headers=h(csrf))
+    from tests.db.test_production_orders_api import completar_orden
+
+    return await completar_orden(api, csrf, order_id)
 
 
 async def horno(api: httpx.AsyncClient, csrf: str, nombre: str = "Horno grande") -> int:
@@ -128,8 +130,8 @@ class TestFinalizarConMaterialReal:
         cerrada = await finalizar(api, admin_csrf, datos["order_id"])
 
         assert cerrada.status_code == 200, cerrada.text
-        assert cerrada.json()["status"] == "COMPLETED"
-        assert cerrada.json()["pending_consumption_kinds"] == []
+        assert cerrada.json()["order"]["status"] == "COMPLETED"
+        assert cerrada.json()["order"]["pending_consumption_kinds"] == []
 
     async def test_caso_b_sin_material_inventariable_finaliza_sin_consumos(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
@@ -148,23 +150,29 @@ class TestFinalizarConMaterialReal:
             .values(product_type=ProductType.SERVICE)
         )
         await db_session.commit()
-        movs_antes = int(
-            await db_session.scalar(select(func.count()).select_from(StockMovement)) or 0
-        )
         await arrancar(api, admin_csrf, datos["order_id"])
         assert await pendientes(api, datos["order_id"]) == []
 
         cerrada = await finalizar(api, admin_csrf, datos["order_id"])
 
         assert cerrada.status_code == 200, cerrada.text
-        assert cerrada.json()["status"] == "COMPLETED"
+        assert cerrada.json()["order"]["status"] == "COMPLETED"
         consumos = await api.get(f"{ORDERS}/{datos['order_id']}/consumptions")
         assert consumos.json()["total"] == 0
         db_session.expire_all()
-        assert (
-            int(await db_session.scalar(select(func.count()).select_from(StockMovement)) or 0)
-            == movs_antes
+        pasta_consumida = int(
+            await db_session.scalar(
+                select(func.count())
+                .select_from(StockMovement)
+                .where(
+                    StockMovement.production_order_id == datos["order_id"],
+                    StockMovement.product_id == datos["pasta_id"],
+                    StockMovement.movement_type == MovementType.PRODUCTION_OUT,
+                )
+            )
+            or 0
         )
+        assert pasta_consumida == 0
 
     async def test_si_pide_esmalte_hace_falta_tambien_un_consumo_de_esmalte(
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
@@ -251,7 +259,7 @@ class TestFinalizarConMaterialReal:
 
         assert primera.status_code == 200, primera.text
         assert segunda.status_code == 200, segunda.text
-        assert segunda.json()["completed_at"] == primera.json()["completed_at"]
+        assert segunda.json()["order"]["completed_at"] == primera.json()["order"]["completed_at"]
 
 
 # ---------------------------------------------------------------------------

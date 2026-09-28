@@ -35,7 +35,13 @@ from app.models.importing import (
     ImportRowStatus,
     ImportStatus,
 )
-from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
+from app.models.inventory import (
+    MovementType,
+    StockBalance,
+    StockLocation,
+    StockLotBalance,
+    StockMovement,
+)
 from app.models.kiln_batches import (
     InternalLoad,
     InternalLoadLine,
@@ -64,6 +70,7 @@ from app.models.masters import (
 from app.models.production import (
     ProductionOrder,
     ProductionOrderLine,
+    ProductionOrderResult,
     ProductionOrderStatus,
 )
 from app.models.profile import Profile, UserRole
@@ -78,6 +85,7 @@ from app.models.prototypes import (
     PrototypeApproval,
     PrototypeMaterialLine,
     PrototypeMaterialRole,
+    PrototypeProductionResult,
     PrototypeStatus,
 )
 from app.models.quotations import (
@@ -203,12 +211,14 @@ __all__ = [
     "ProductType",
     "ProductionOrder",
     "ProductionOrderLine",
+    "ProductionOrderResult",
     "ProductionOrderStatus",
     "Profile",
     "Prototype",
     "PrototypeApproval",
     "PrototypeMaterialLine",
     "PrototypeMaterialRole",
+    "PrototypeProductionResult",
     "PrototypeQuotation",
     "PrototypeQuotationMaterial",
     "PrototypeQuotationPaymentStatus",
@@ -234,6 +244,7 @@ __all__ = [
     "SequenceType",
     "StockBalance",
     "StockLocation",
+    "StockLotBalance",
     "StockMovement",
     "Technique",
     "TechniqueFormulaType",

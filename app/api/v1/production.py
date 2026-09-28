@@ -35,13 +35,26 @@ from app.schemas.production import (
     ProductionConsumptionPage,
     ProductionNoteCreateIn,
     ProductionNoteOut,
+    ProductionOrderCompleteIn,
+    ProductionOrderCompletionOut,
     ProductionOrderCreateIn,
     ProductionOrderOut,
     ProductionOrderPage,
+    ProductionOrderStartIn,
     ProductionTimelineOut,
+    ProductionWipOut,
 )
 
 router = APIRouter(prefix="/production-orders", tags=["produccion"])
+wip_router = APIRouter(prefix="/production", tags=["produccion"])
+
+
+@wip_router.get("/wip", response_model=list[ProductionWipOut])
+async def list_production_wip(
+    _: CurrentUserDep, service: ProductionOrderServiceDep
+) -> list[ProductionWipOut]:
+    return await service.wip()
+
 
 #: Filtros y paginacion del listado, declarados como el resto del proyecto.
 StatusFilterDep = Annotated[ProductionOrderStatus | None, Query(alias="status")]
@@ -189,6 +202,7 @@ async def start_production_order(
     service: ProductionOrderServiceDep,
     actor: WorkshopUserDep,
     session: DbSessionDep,
+    payload: ProductionOrderStartIn | None = None,
 ) -> ProductionOrderOut:
     """Arranca la orden. En una Legacy o de muestra, descuenta el material preparado.
 
@@ -200,30 +214,38 @@ async def start_production_order(
 
     Arrancar dos veces no consume dos veces.
     """
-    order, _consumed = await service.start(order_id, user=actor)
+    order, _consumed = await service.start(
+        order_id,
+        user=actor,
+        preparation_lots_by_product_id=(
+            payload.preparation_lots_by_product_id if payload is not None else None
+        ),
+    )
     result = await service.present(order)
     await session.commit()
     return result
 
 
-@router.post("/{order_id}/complete", response_model=ProductionOrderOut)
+@router.post("/{order_id}/complete", response_model=ProductionOrderCompletionOut)
 async def complete_production_order(
     order_id: int,
+    payload: ProductionOrderCompleteIn,
     service: ProductionOrderServiceDep,
     actor: WorkshopUserDep,
     session: DbSessionDep,
-) -> ProductionOrderOut:
-    """Cierra la orden. NO da de alta producto terminado ni crea una quema.
+) -> ProductionOrderCompletionOut:
+    """Cierra la orden con resultado físico y entrada de terminado del taller.
 
-    Fase 010I, decision D3: una orden V2 cuya cotizacion planifico material
+    Una orden V2 cuya cotizacion planifico material
     inventariable —pasta, esmalte— necesita al menos un consumo real de cada
     clase antes de cerrar (`PRODUCTION_ORDER_CONSUMPTION_MISSING`, con la clase
     que falta en el detalle). Si no planifico ninguno, cierra sin consumos.
     """
-    order, _changed = await service.complete(order_id, user=actor)
+    order, _changed = await service.complete(order_id, payload.results, user=actor)
     result = await service.present(order)
+    results = await service.results(order_id)
     await session.commit()
-    return result
+    return ProductionOrderCompletionOut(order=result, results=results)
 
 
 @router.post("/{order_id}/cancel", response_model=ProductionOrderOut)

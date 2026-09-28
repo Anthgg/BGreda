@@ -26,7 +26,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
 
-from app.api.deps import AdminUserDep, DbSessionDep, V2LaborServiceDep
+from app.api.deps import AdminUserDep, DbSessionDep, MastersQuickCreateDep, V2LaborServiceDep
 from app.core.quoter_v2_labor import units_per_hour
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
 from app.models.quoter_v2_labor import V2QuotationLabor, V2Technique, V2Worker
@@ -171,10 +171,10 @@ async def list_v2_workers(
 async def create_v2_worker(
     payload: V2WorkerCreateIn,
     service: V2LaborServiceDep,
-    admin: AdminUserDep,
+    user: MastersQuickCreateDep,
     session: DbSessionDep,
 ) -> V2WorkerOut:
-    worker = await service.create_worker(payload.model_dump(), user=admin)
+    worker = await service.create_worker(payload.model_dump(), user=user)
     jornada = await service.resolve_workday_hours(worker)
     capacidades = await service.capacities_of([worker.id])
     resultado = _worker_out(
@@ -229,10 +229,10 @@ async def list_v2_techniques(
 async def create_v2_technique(
     payload: V2TechniqueCreateIn,
     service: V2LaborServiceDep,
-    admin: AdminUserDep,
+    user: MastersQuickCreateDep,
     session: DbSessionDep,
 ) -> V2TechniqueOut:
-    tecnica = await service.create_technique(payload.model_dump(), user=admin)
+    tecnica = await service.create_technique(payload.model_dump(), user=user)
     resultado = _technique_out(tecnica, await service.global_workday_hours())
     await session.commit()
     return resultado

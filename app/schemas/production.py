@@ -63,6 +63,44 @@ class ProductionOrderCreateIn(BaseModel):
         return self
 
 
+class ProductionOrderStartIn(BaseModel):
+    """Selección manual de lotes preparados consumidos al arrancar."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preparation_lots_by_product_id: dict[int, int] = Field(default_factory=dict)
+
+
+class ProductionResultLineIn(BaseModel):
+    """Resultado físico completo de una línea, identificado por origen."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_ref: str = Field(min_length=3, max_length=40, pattern=r"^(POL|V2P|V2F):[1-9][0-9]*$")
+    good_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    scrap_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    scrap_reason: str | None = Field(default=None, max_length=240)
+
+
+class ProductionOrderCompleteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[ProductionResultLineIn] = Field(min_length=1, max_length=100)
+
+
+class ProductionOrderResultOut(BaseModel):
+    id: int
+    production_order_id: int
+    line_ref: str
+    product_id: int | None
+    started_quantity: Decimal
+    good_quantity: Decimal
+    scrap_quantity: Decimal
+    scrap_reason: str | None
+    recorded_by_name: str | None
+    recorded_at: datetime
+
+
 class ReadinessIssueOut(BaseModel):
     """Un bloqueo concreto, en codigo. El texto lo pone el frontend."""
 
@@ -96,6 +134,7 @@ class ProductionOrderOrigin(StrEnum):
     #: Fase 010I. Ese tercer origen: una cotizacion del Cotizador V2, que entra
     #: por su puente de 010H.
     V2_QUOTATION = "V2_QUOTATION"
+    SOLO_QUEMA = "SOLO_QUEMA"
 
 
 class ProductionOrderLineOut(BaseModel):
@@ -226,6 +265,30 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     v2_pieces: list[V2ProductionPieceOut] = Field(default_factory=list)
 
 
+class ProductionOrderCompletionOut(BaseModel):
+    order: ProductionOrderOut
+    results: list[ProductionOrderResultOut]
+
+
+class ProductionWipStage(StrEnum):
+    EN_PRODUCCION = "EN_PRODUCCION"
+    PROGRAMADA_HORNO = "PROGRAMADA_HORNO"
+    EN_HORNO = "EN_HORNO"
+    QUEMADA = "QUEMADA"
+
+
+class ProductionWipOut(BaseModel):
+    production_order_id: int
+    production_order_code: str
+    source: ProductionOrderOrigin
+    line_ref: str
+    product_name: str
+    started_quantity: Decimal
+    stage: ProductionWipStage
+    kiln_batch_id: int | None
+    kiln_batch_code: str | None
+
+
 class ProductionOrderPage(BaseModel):
     items: list[ProductionOrderSummaryOut]
     total: int
@@ -244,6 +307,8 @@ class ProductionConsumptionCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_id: int = Field(gt=0)
+    #: Obligatorio cuando `product_id` es PREPARED_MATERIAL; no se elige FIFO.
+    preparation_id: int | None = Field(default=None, gt=0)
     #: Opcional: por defecto el almacen de la orden. Cada consumo dice el suyo
     #: porque no se asume un almacen unico.
     stock_location_id: int | None = Field(default=None, gt=0)
@@ -270,6 +335,7 @@ class ProductionConsumptionOut(BaseModel):
     production_order_id: int
     v2_quotation_product_id: int | None
     product_id: int
+    preparation_id: int | None = None
     product_name: str
     product_internal_reference: str
     stock_location_id: int

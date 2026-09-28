@@ -35,9 +35,11 @@ from app.models.quotations import Quotation
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
     confirmar,
     crear_orden,
     escenario,
+    lotes_del_escenario,
     pagar,
 )
 from tests.db.test_quotation_builder_api import head
@@ -275,7 +277,12 @@ async def test_preparar_antes_de_cobrar_y_arrancar_despues(
     assert orden.status is ProductionOrderStatus.CREATED, "cobrar no mueve la orden"
 
     movimientos_antes, _saldos, salidas_antes, _eventos = await _foto(db_session)
-    arrancada = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arrancada.status_code == 200, arrancada.text
     assert arrancada.json()["status"] == "STARTED"
@@ -301,11 +308,21 @@ async def test_arrancar_dos_veces_tras_cobrar_sigue_consumiendo_una_vez(
     orden_id = datos["orden"]["id"]
     await pagar(api, admin_csrf, datos["confirmada"]["id"])
 
-    primera = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+    primera = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert primera.status_code == 200, primera.text
     foto = await _foto(db_session)
 
-    segunda = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+    segunda = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert segunda.status_code == 200, segunda.text
     assert segunda.json()["status"] == "STARTED"
@@ -348,8 +365,11 @@ async def test_el_operario_tampoco(
     antes = await _foto(db_session)
 
     operario_csrf = await _como_operario(api)
-    respuesta = await api.post(
-        f"{ORDERS}/{datos['orden']['id']}/start", headers=head(operario_csrf)
+    respuesta = await arrancar_orden(
+        api,
+        operario_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
     )
 
     assert respuesta.status_code == 409, respuesta.text
@@ -371,8 +391,11 @@ async def test_el_operario_arranca_en_cuanto_esta_cobrada(
     await pagar(api, admin_csrf, datos["confirmada"]["id"])
 
     operario_csrf = await _como_operario(api)
-    respuesta = await api.post(
-        f"{ORDERS}/{datos['orden']['id']}/start", headers=head(operario_csrf)
+    respuesta = await arrancar_orden(
+        api,
+        operario_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
     )
 
     assert respuesta.status_code == 200, respuesta.text

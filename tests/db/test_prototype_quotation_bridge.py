@@ -89,7 +89,11 @@ async def _aprobada(
     await _liga_producto(api, csrf, datos)
     assert (await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(csrf))).status_code == 200
     assert (
-        await api.post(f"{PROTOTYPES}/{proto_id}/complete", headers=head(csrf))
+        await api.post(
+            f"{PROTOTYPES}/{proto_id}/complete",
+            json={"started_quantity": 1, "good_quantity": 1, "scrap_quantity": 0},
+            headers=head(csrf),
+        )
     ).status_code == 200
     assert (
         await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(csrf))
@@ -139,7 +143,11 @@ async def test_una_muestra_completada_sin_decidir_no_autoriza_cotizar(
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_pending")
     proto_id = datos["prototipo"]["id"]
     await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{proto_id}/complete", headers=head(admin_csrf))
+    await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
     antes = await _cotizaciones(db_session)
 
     respuesta = await api.post(_final(proto_id), headers=head(admin_csrf))
@@ -155,7 +163,11 @@ async def test_una_muestra_rechazada_no_autoriza_cotizar(
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_rejected")
     proto_id = datos["prototipo"]["id"]
     await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{proto_id}/complete", headers=head(admin_csrf))
+    await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
     await api.post(f"{PROTOTYPES}/{proto_id}/reject", json={}, headers=head(admin_csrf))
     antes = await _cotizaciones(db_session)
 
@@ -335,8 +347,14 @@ async def test_las_medidas_salen_de_la_ficha_estructurada_y_no_de_las_notas(
     )
     assert editada.status_code == 200, editada.text
 
-    for accion in ("start", "complete"):
-        await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
+    iniciado = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+    completado = await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 1, "scrap_quantity": 0},
+        headers=head(admin_csrf),
+    )
+    assert completado.status_code == 200, completado.text
     await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
 
     creada = await api.post(_final(proto_id), headers=head(admin_csrf))
@@ -391,9 +409,17 @@ async def test_el_material_del_cuerpo_sale_del_consumo_real_dividido_entre_las_p
     )
     assert materiales.status_code == 200, materiales.text
 
-    for accion in ("start", "complete"):
-        await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    iniciado = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+    completado = await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 2, "good_quantity": 2, "scrap_quantity": 0},
+        headers=head(admin_csrf),
+    )
+    assert completado.status_code == 200, completado.text
+    assert (
+        await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    ).status_code == 200
 
     creada = await api.post(_final(proto_id), headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text
@@ -451,9 +477,17 @@ async def test_con_dos_cuerpos_declarados_el_puente_no_elige(
     )
     assert materiales.status_code == 200, materiales.text
 
-    for accion in ("start", "complete"):
-        await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    iniciado = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+    completado = await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 1, "scrap_quantity": 0},
+        headers=head(admin_csrf),
+    )
+    assert completado.status_code == 200, completado.text
+    assert (
+        await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    ).status_code == 200
 
     creada = await api.post(_final(proto_id), headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text
@@ -483,9 +517,17 @@ async def test_el_esmalte_de_la_muestra_no_se_convierte_en_plan_de_esmaltes(
     )
     assert materiales.status_code == 200, materiales.text
 
-    for accion in ("start", "complete"):
-        await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    iniciado = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+    completado = await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 1, "scrap_quantity": 0},
+        headers=head(admin_csrf),
+    )
+    assert completado.status_code == 200, completado.text
+    assert (
+        await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
+    ).status_code == 200
 
     creada = await api.post(_final(proto_id), headers=head(admin_csrf))
     assert creada.status_code == 201, creada.text
@@ -620,10 +662,14 @@ async def test_una_muestra_sin_producto_da_un_borrador_vacio_y_no_uno_inventado(
     """
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_br_sinprod")
     proto_id = datos["prototipo"]["id"]
-    for accion in ("start", "complete"):
-        assert (
-            await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
-        ).status_code == 200
+    iniciado = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+    completado = await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
+    assert completado.status_code == 200, completado.text
     assert (
         await api.post(f"{PROTOTYPES}/{proto_id}/approve", json={}, headers=head(admin_csrf))
     ).status_code == 200
@@ -752,9 +798,14 @@ async def test_la_muestra_sucesora_hereda_la_ficha_y_los_roles(
     )
     assert materiales.status_code == 200, materiales.text
 
-    for accion in ("start", "complete"):
-        respuesta = await api.post(f"{PROTOTYPES}/{proto_id}/{accion}", headers=head(admin_csrf))
-        assert respuesta.status_code == 200, respuesta.text
+    iniciado = await api.post(f"{PROTOTYPES}/{proto_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+    completado = await api.post(
+        f"{PROTOTYPES}/{proto_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
+    assert completado.status_code == 200, completado.text
     rechazo = await api.post(f"{PROTOTYPES}/{proto_id}/reject", json={}, headers=head(admin_csrf))
     assert rechazo.status_code == 200, rechazo.text
 

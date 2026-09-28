@@ -33,11 +33,11 @@ from app.models.production import ProductionOrder, ProductionOrderStatus
 from tests.db.conftest import TEST_EMAIL, TEST_PASSWORD, authenticate
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
     confirmada_y_pagada,
     crear_orden,
     escenario,
 )
-from tests.db.test_quotation_builder_api import head
 
 TRACKING = "/api/v1/tracking/production-orders"
 
@@ -66,7 +66,17 @@ async def _orden_arrancada(
         api, csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )
     assert creada.status_code == 201, creada.text
-    arrancada = await api.post(f"{ORDERS}/{creada.json()['id']}/start", headers=head(csrf))
+    lotes = (
+        {int(datos["prepared_product_id"]): int(datos["preparation_id"])}
+        if datos["preparation_id"] is not None
+        else {}
+    )
+    arrancada = await arrancar_orden(
+        api,
+        csrf,
+        int(creada.json()["id"]),
+        preparation_lots_by_product_id=lotes,
+    )
     assert arrancada.status_code == 200, arrancada.text
     return dict(arrancada.json())
 

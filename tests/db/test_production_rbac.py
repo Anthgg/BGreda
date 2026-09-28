@@ -32,9 +32,12 @@ from app.models.production import ProductionOrder, ProductionOrderStatus
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
+    completar_orden,
     confirmada_y_pagada,
     crear_orden,
     escenario,
+    lotes_del_escenario,
 )
 from tests.db.test_production_start import _preparada
 from tests.db.test_quotation_builder_api import head
@@ -98,13 +101,18 @@ async def test_el_operario_lleva_la_orden_de_principio_a_fin(
     assert creada.status_code == 201, creada.text
     orden_id = creada.json()["id"]
 
-    arrancada = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(operator_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        operator_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert arrancada.status_code == 200, arrancada.text
     assert arrancada.json()["status"] == "STARTED"
 
-    completada = await api.post(f"{ORDERS}/{orden_id}/complete", headers=head(operator_csrf))
+    completada = await completar_orden(api, operator_csrf, int(orden_id))
     assert completada.status_code == 200, completada.text
-    assert completada.json()["status"] == "COMPLETED"
+    assert completada.json()["order"]["status"] == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -292,9 +300,12 @@ async def test_el_administrador_conserva_las_cuatro_transiciones(
     assert anulada.json()["status"] == "CANCELLED"
 
     otros = await _preparada(api, admin_csrf, db_session, suffix="_rbac_admin2")
-    arrancada = await api.post(f"{ORDERS}/{otros['orden']['id']}/start", headers=head(admin_csrf))
-    assert arrancada.status_code == 200, arrancada.text
-    completada = await api.post(
-        f"{ORDERS}/{otros['orden']['id']}/complete", headers=head(admin_csrf)
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(otros["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(otros),
     )
+    assert arrancada.status_code == 200, arrancada.text
+    completada = await completar_orden(api, admin_csrf, int(otros["orden"]["id"]))
     assert completada.status_code == 200, completada.text

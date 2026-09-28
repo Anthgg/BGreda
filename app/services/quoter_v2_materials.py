@@ -35,7 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.core.errors import APIError
+from app.core.errors import APIError, AuthInsufficientRoleError
 from app.core.quoter_v2_materials import (
     GLAZE_WEIGHT_RATIO,
     MaterialMathError,
@@ -48,6 +48,7 @@ from app.core.quoter_v2_materials import (
 from app.models.audit import AuditAction
 from app.models.inventory import StockBalance
 from app.models.masters import Product, ProductType
+from app.models.profile import UserRole
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
 from app.models.quoter_v2_materials import V2MaterialCost, V2MaterialKind
 from app.models.recipes import PreparationStatus, RecipePreparation
@@ -230,6 +231,12 @@ class V2MaterialService:
                 .with_for_update(of=V2MaterialCost)
             )
         ).one_or_none()
+
+        # Quick-create operators may only establish the first valuation. An
+        # existing row is an immutable master for this role, even when the
+        # submitted payload happens to match its current values.
+        if user.role is UserRole.OPERATOR and fila is not None:
+            raise AuthInsufficientRoleError()
 
         accion = AuditAction.UPDATE
         if fila is None:

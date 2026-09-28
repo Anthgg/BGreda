@@ -14,6 +14,7 @@ transaccion que se deshizo.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -23,8 +24,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
-from app.models.inventory import StockBalance, StockMovement
-from app.models.prototypes import Prototype, PrototypeApproval, PrototypeStatus
+from app.models.inventory import MovementType, StockBalance, StockMovement
+from app.models.masters import Product, ProductCategory, ProductType
+from app.models.prototypes import (
+    Prototype,
+    PrototypeApproval,
+    PrototypeProductionResult,
+    PrototypeStatus,
+)
+from app.services.audit import AuditRecorder
 from tests.db.conftest import (
     OPERATOR_EMAIL,
     OPERATOR_PASSWORD,
@@ -417,7 +425,13 @@ async def test_07_un_preparado_se_consume_el_y_no_sus_componentes(
         name="E2E-009K preparado",
         quotation_id=confirmada["id"],
         stock_location_id=datos["location_id"],
-        materials=[{"product_id": preparado_id, "quantity": "40"}],
+        materials=[
+            {
+                "product_id": preparado_id,
+                "quantity": "40",
+                "preparation_id": datos["preparation_id"],
+            }
+        ],
     )
     assert creado.status_code == 201, creado.text
 
@@ -443,7 +457,11 @@ async def test_08_completar_no_vuelve_a_consumir(
     await api.post(f"{PROTOTYPES}/{prototipo_id}/start", headers=head(admin_csrf))
     foto = await _foto(db_session)
 
-    completado = await api.post(f"{PROTOTYPES}/{prototipo_id}/complete", headers=head(admin_csrf))
+    completado = await api.post(
+        f"{PROTOTYPES}/{prototipo_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
 
     assert completado.status_code == 200, completado.text
     assert completado.json()["status"] == "COMPLETED"
@@ -451,6 +469,211 @@ async def test_08_completar_no_vuelve_a_consumir(
     # La foto incluye eventos de auditoria, que SI crecen al completar.
     movimientos, salidas, saldos, _ = await _foto(db_session)
     assert (movimientos, salidas, saldos) == foto[:3]
+
+
+@pytest.mark.asyncio
+async def test_08a_cierre_registra_resultado_y_suma_solo_unidades_buenas(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_fisico")
+    prototype_id = datos["prototipo"]["id"]
+    iniciado = await api.post(f"{PROTOTYPES}/{prototype_id}/start", headers=head(admin_csrf))
+    assert iniciado.status_code == 200, iniciado.text
+
+    cerrado = await api.post(
+        f"{PROTOTYPES}/{prototype_id}/complete",
+        json={"started_quantity": 2, "good_quantity": 1, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
+
+    assert cerrado.status_code == 200, cerrado.text
+    body = cerrado.json()
+    assert body["status"] == "COMPLETED"
+    assert body["production_result"] is not None
+    assert Decimal(body["production_result"]["started_quantity"]) == Decimal(2)
+    assert Decimal(body["production_result"]["good_quantity"]) == Decimal(1)
+    assert Decimal(body["production_result"]["scrap_quantity"]) == Decimal(1)
+    assert body["production_result"]["scrap_reason"] is None
+
+    product = await db_session.get(Product, body["product_id"])
+    assert product is not None
+    assert product.product_type is ProductType.FINISHED_PRODUCT
+    category = await db_session.get(ProductCategory, product.product_category_id)
+    assert category is not None
+    assert category.name == "Piezas personalizadas"
+    assert category.display_path == "Piezas personalizadas"
+    result = await db_session.get(PrototypeProductionResult, prototype_id)
+    assert result is not None
+    assert result.product_id == product.id
+    movement = await db_session.scalar(
+        select(StockMovement).where(
+            StockMovement.prototype_id == prototype_id,
+            StockMovement.movement_type == MovementType.PRODUCTION_IN,
+        )
+    )
+    assert movement is not None
+    assert movement.product_id == product.id
+    assert movement.quantity == Decimal(1)
+    assert movement.production_order_id is None
+    assert await _saldo(db_session, product.id, datos["location_id"]) == Decimal(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"started_quantity": 2, "good_quantity": 1, "scrap_quantity": 0},
+        {"started_quantity": 2, "good_quantity": -1, "scrap_quantity": 3},
+    ],
+)
+async def test_08b_resultado_invalido_no_cierra_ni_mueve_stock(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    result: dict[str, int],
+) -> None:
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_resultado_invalido")
+    prototype_id = datos["prototipo"]["id"]
+    await api.post(f"{PROTOTYPES}/{prototype_id}/start", headers=head(admin_csrf))
+
+    respuesta = await api.post(
+        f"{PROTOTYPES}/{prototype_id}/complete", json=result, headers=head(admin_csrf)
+    )
+
+    assert respuesta.status_code == 422, respuesta.text
+    assert (await _prototipo(db_session, prototype_id)).status is PrototypeStatus.STARTED
+    assert await db_session.get(PrototypeProductionResult, prototype_id) is None
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(StockMovement)
+            .where(
+                StockMovement.prototype_id == prototype_id,
+                StockMovement.movement_type == MovementType.PRODUCTION_IN,
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_08c_reintentos_concurrentes_no_duplican_resultado_ni_stock(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_concurrente")
+    prototype_id = datos["prototipo"]["id"]
+    await api.post(f"{PROTOTYPES}/{prototype_id}/start", headers=head(admin_csrf))
+    payload = {"started_quantity": 2, "good_quantity": 2, "scrap_quantity": 0}
+
+    respuestas = await asyncio.gather(
+        *(
+            api.post(
+                f"{PROTOTYPES}/{prototype_id}/complete",
+                json=payload,
+                headers=head(admin_csrf),
+            )
+            for _ in range(2)
+        )
+    )
+
+    assert [respuesta.status_code for respuesta in respuestas] == [200, 200]
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(PrototypeProductionResult)
+            .where(PrototypeProductionResult.prototype_id == prototype_id)
+        )
+        == 1
+    )
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(StockMovement)
+            .where(
+                StockMovement.prototype_id == prototype_id,
+                StockMovement.movement_type == MovementType.PRODUCTION_IN,
+            )
+        )
+        == 1
+    )
+    saldo_final = await _saldo(db_session, respuestas[0].json()["product_id"], datos["location_id"])
+    assert saldo_final == Decimal(2)
+
+
+@pytest.mark.asyncio
+async def test_08d_prototipo_historico_completado_no_recibe_stock_retroactivo(
+    api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
+) -> None:
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_historico")
+    prototype_id = datos["prototipo"]["id"]
+    await api.post(f"{PROTOTYPES}/{prototype_id}/start", headers=head(admin_csrf))
+
+    prototype = await db_session.get(Prototype, prototype_id)
+    assert prototype is not None
+    prototype.status = PrototypeStatus.COMPLETED
+    prototype.completed_at = datetime.now(UTC)
+    prototype.updated_at = prototype.completed_at
+    await db_session.commit()
+
+    respuesta = await api.post(
+        f"{PROTOTYPES}/{prototype_id}/complete",
+        json={"started_quantity": 2, "good_quantity": 2, "scrap_quantity": 0},
+        headers=head(admin_csrf),
+    )
+
+    assert respuesta.status_code == 200, respuesta.text
+    assert respuesta.json()["production_result"] is None
+    assert await db_session.get(PrototypeProductionResult, prototype_id) is None
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(StockMovement)
+            .where(
+                StockMovement.prototype_id == prototype_id,
+                StockMovement.movement_type == MovementType.PRODUCTION_IN,
+            )
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_08e_error_tardio_revierte_producto_movimiento_resultado_y_cierre(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_rollback")
+    prototype_id = datos["prototipo"]["id"]
+    prototype_name = datos["prototipo"]["name"]
+    await api.post(f"{PROTOTYPES}/{prototype_id}/start", headers=head(admin_csrf))
+
+    def fail_after_write(self: AuditRecorder, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("fallo inyectado después de escribir el resultado")
+
+    monkeypatch.setattr(AuditRecorder, "record_changes", fail_after_write)
+    with pytest.raises(RuntimeError, match="fallo inyectado"):
+        await api.post(
+            f"{PROTOTYPES}/{prototype_id}/complete",
+            json={"started_quantity": 1, "good_quantity": 1, "scrap_quantity": 0},
+            headers=head(admin_csrf),
+        )
+
+    assert (await _prototipo(db_session, prototype_id)).status is PrototypeStatus.STARTED
+    assert await db_session.get(PrototypeProductionResult, prototype_id) is None
+    assert await db_session.scalar(select(Product.id).where(Product.name == prototype_name)) is None
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(StockMovement)
+            .where(
+                StockMovement.prototype_id == prototype_id,
+                StockMovement.movement_type == MovementType.PRODUCTION_IN,
+            )
+        )
+        == 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +711,11 @@ async def test_11_el_operario_no_aprueba(
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_operap")
     prototipo_id = datos["prototipo"]["id"]
     await api.post(f"{PROTOTYPES}/{prototipo_id}/start", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{prototipo_id}/complete", headers=head(admin_csrf))
+    await api.post(
+        f"{PROTOTYPES}/{prototipo_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
 
     operario_csrf = await _como_operario(api)
     respuesta = await api.post(
@@ -508,7 +735,11 @@ async def test_12_el_administrador_aprueba(
     datos = await _muestra_lista(api, admin_csrf, db_session, suffix="_adminap")
     prototipo_id = datos["prototipo"]["id"]
     await api.post(f"{PROTOTYPES}/{prototipo_id}/start", headers=head(admin_csrf))
-    await api.post(f"{PROTOTYPES}/{prototipo_id}/complete", headers=head(admin_csrf))
+    await api.post(
+        f"{PROTOTYPES}/{prototipo_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
 
     respuesta = await api.post(
         f"{PROTOTYPES}/{prototipo_id}/approve",

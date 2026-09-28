@@ -33,6 +33,7 @@ class AuthenticatedUser(BaseModel):
     email: EmailStr
     display_name: str
     role: UserRole
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):

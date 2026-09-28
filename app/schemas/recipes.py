@@ -254,6 +254,8 @@ class RecipePreparationIn(_In):
 
     recipe_version_id: int
     location_id: int
+    #: Elección explícita cuando una receta consume materiales preparados.
+    preparation_lots_by_component_id: dict[int, int] = Field(default_factory=dict)
     total_dry_weight_g: Annotated[Decimal, Field(gt=Decimal(0))]
     water_amount_ml: Annotated[Decimal, Field(ge=Decimal(0))] = Decimal(0)
     #: Rendimiento REAL medido. No se deriva de peso seco + agua: los solidos

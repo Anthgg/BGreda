@@ -35,7 +35,7 @@ from app.models.production import ProductionOrder, ProductionOrderStatus
 from app.models.prototype_quotations import PrototypeQuotation
 from app.models.prototypes import Prototype, PrototypeMaterialLine, PrototypeStatus
 from tests.db.test_masters_api import create_category, create_product
-from tests.db.test_production_orders_api import crear_ubicacion, dar_existencia
+from tests.db.test_production_orders_api import completar_orden, crear_ubicacion, dar_existencia
 from tests.db.test_prototype_production_order import ORDENES, _cpr_confirmada
 from tests.db.test_prototype_quotations import COTIZADOR, _payload, cobrar
 from tests.db.test_quotation_builder_api import head
@@ -297,7 +297,7 @@ async def test_la_sucesora_hereda_la_cotizacion_de_prototipo(
         cantidad="10000",
     )
     await api.post(f"{ORDENES}/{datos['orden_id']}/start", headers=head(admin_csrf))
-    await api.post(f"{ORDENES}/{datos['orden_id']}/complete", headers=head(admin_csrf))
+    await completar_orden(api, admin_csrf, int(datos["orden_id"]))
 
     # S02: se rechaza el intento.
     rechazada = await api.post(
@@ -363,7 +363,11 @@ async def test_una_sucesora_de_muestra_sin_cotizacion_sigue_sin_cotizacion(
     datos = await _muestra_por_el_camino_antiguo(api, admin_csrf, db_session, suffix="_add_sin_cpr")
     muestra_id = datos["prototipo"]["id"]
     await api.post(f"{PROTOTIPOS}/{muestra_id}/start", headers=head(admin_csrf))
-    await api.post(f"{PROTOTIPOS}/{muestra_id}/complete", headers=head(admin_csrf))
+    await api.post(
+        f"{PROTOTIPOS}/{muestra_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(admin_csrf),
+    )
     await api.post(
         f"{PROTOTIPOS}/{muestra_id}/reject", json={"note": "No sirve"}, headers=head(admin_csrf)
     )
@@ -401,7 +405,7 @@ async def test_cobrar_dos_veces_con_sucesora_sigue_devolviendo_la_raiz(
         cantidad="10000",
     )
     await api.post(f"{ORDENES}/{datos['orden_id']}/start", headers=head(admin_csrf))
-    await api.post(f"{ORDENES}/{datos['orden_id']}/complete", headers=head(admin_csrf))
+    await completar_orden(api, admin_csrf, int(datos["orden_id"]))
     await api.post(
         f"{PROTOTIPOS}/{datos['muestra_id']}/reject",
         json={"note": "No"},
@@ -454,7 +458,7 @@ async def test_la_sucesora_arranca_con_el_guardia_de_cobro_de_su_cotizacion(
         cantidad="10000",
     )
     await api.post(f"{ORDENES}/{datos['orden_id']}/start", headers=head(admin_csrf))
-    await api.post(f"{ORDENES}/{datos['orden_id']}/complete", headers=head(admin_csrf))
+    await completar_orden(api, admin_csrf, int(datos["orden_id"]))
     await api.post(
         f"{PROTOTIPOS}/{datos['muestra_id']}/reject",
         json={"note": "No"},

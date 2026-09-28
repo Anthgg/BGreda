@@ -42,7 +42,7 @@ from app.core.preparations import (
 )
 from app.core.recipes import normalize_component_unit_cost_to_grams
 from app.models.inventory import MovementType, StockBalance, StockLocation
-from app.models.masters import Product, ProductType
+from app.models.masters import Product, ProductType, UnitOfMeasure, UomDimension
 from app.models.recipes import (
     PreparationStatus,
     RecipeLine,
@@ -54,7 +54,11 @@ from app.models.sequence import SequenceType
 from app.models.settings import SINGLETON_ID, CommercialSettings
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
-from app.services.inventory import InventoryService
+from app.services.inventory import (
+    InvalidPreparationLotError,
+    InventoryService,
+    PreparationLotRequiredError,
+)
 from app.services.sequences import SequenceService
 
 #: Espacio de nombres propio para los advisory locks de idempotencia, distinto
@@ -412,6 +416,7 @@ class PreparationService:
         *,
         recipe_version_id: int,
         location_id: int,
+        preparation_lots_by_component_id: dict[int, int] | None = None,
         total_dry_weight_g: Decimal,
         water_amount_ml: Decimal,
         final_yield_ml: Decimal,
@@ -496,6 +501,9 @@ class PreparationService:
         # Orden estable de bloqueo: evita el abrazo mortal entre preparaciones
         # que comparten ingredientes.
         ordered = sorted(amounts, key=lambda a: a.product_id)
+        selected_lots = preparation_lots_by_component_id or {}
+        if set(selected_lots) - {amount.product_id for amount in ordered}:
+            raise InvalidPreparationLotError()
 
         components: dict[int, Product] = {}
         shortfalls: list[Shortfall] = []
@@ -506,6 +514,14 @@ class PreparationService:
                     f"El insumo {amount.product_id} de la receta no existe"
                 )
             components[amount.product_id] = component
+            preparation_id = selected_lots.get(component.id)
+            if component.product_type is ProductType.PREPARED_MATERIAL and preparation_id is None:
+                raise PreparationLotRequiredError()
+            if (
+                component.product_type is not ProductType.PREPARED_MATERIAL
+                and preparation_id is not None
+            ):
+                raise InvalidPreparationLotError()
             balance = await self._session.scalar(
                 select(StockBalance)
                 .where(
@@ -568,14 +584,31 @@ class PreparationService:
                 user_id=user.id,
                 user_name=user.display_name,
                 preparation_id=preparation.id,
+                source_preparation_id=selected_lots.get(amount.product_id),
             )
 
-        # El preparado entra en su propia unidad base: si el producto se lleva
-        # en ml, entran los mililitros rendidos; si se lleva en gramos, los
-        # gramos de solidos. Mezclarlo seria contar agua como materia.
-        prepared_quantity = (
-            final_yield_ml if prepared_product.base_uom_code == "ml" else total_dry_weight_g
-        )
+        # El preparado entra en la unidad base del producto. Los componentes
+        # se calculan en gramos y el rendimiento en mililitros; convertir a kg
+        # o L requiere el factor explícito del maestro, nunca asumir 1:1.
+        output_unit = await self._session.get(UnitOfMeasure, prepared_product.base_uom_code)
+        if output_unit is None:
+            raise PreparationValidationError("La unidad base del preparado no existe")
+        if output_unit.dimension is UomDimension.MASS:
+            gram_unit = await self._session.get(UnitOfMeasure, "g")
+            if gram_unit is None or gram_unit.dimension is not UomDimension.MASS:
+                raise PreparationValidationError("No existe la unidad base de masa g")
+            prepared_quantity = (
+                total_dry_weight_g * gram_unit.factor_to_base / output_unit.factor_to_base
+            )
+        elif output_unit.dimension is UomDimension.VOLUME:
+            millilitre_unit = await self._session.get(UnitOfMeasure, "ml")
+            if millilitre_unit is None or millilitre_unit.dimension is not UomDimension.VOLUME:
+                raise PreparationValidationError("No existe la unidad base de volumen ml")
+            prepared_quantity = (
+                final_yield_ml * millilitre_unit.factor_to_base / output_unit.factor_to_base
+            )
+        else:
+            raise PreparationValidationError("Un preparado debe usar una unidad de masa o volumen")
         await self._inventory.apply_movement(
             product=prepared_product,
             location=location,

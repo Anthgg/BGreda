@@ -25,9 +25,12 @@ from app.models.audit import AuditAction, AuditEvent
 from app.models.production import ProductionOrder
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
+    completar_orden,
     confirmar,
     crear_orden,
     escenario,
+    lotes_del_escenario,
 )
 from tests.db.test_production_start import _preparada
 from tests.db.test_quotation_builder_api import head
@@ -112,7 +115,12 @@ async def test_arrancar_queda_auditado_con_el_antes_y_el_despues(
     orden_id = datos["orden"]["id"]
     antes = len(await _eventos(db_session, orden_id))
 
-    arrancada = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert arrancada.status_code == 200, arrancada.text
 
     eventos = await _eventos(db_session, orden_id)
@@ -155,11 +163,21 @@ async def test_arrancar_dos_veces_no_duplica_la_auditoria(
     datos = await _preparada(api, admin_csrf, db_session, suffix="_audit_doble")
     orden_id = datos["orden"]["id"]
 
-    primera = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+    primera = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert primera.status_code == 200, primera.text
     tras_la_primera = len(await _eventos(db_session, orden_id))
 
-    segunda = await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+    segunda = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_id),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert segunda.status_code == 200, segunda.text
 
     assert len(await _eventos(db_session, orden_id)) == tras_la_primera
@@ -173,10 +191,15 @@ async def test_completar_queda_auditado(
     datos = await _preparada(api, admin_csrf, db_session, suffix="_audit_fin")
     orden_id = datos["orden"]["id"]
     assert (
-        await api.post(f"{ORDERS}/{orden_id}/start", headers=head(admin_csrf))
+        await arrancar_orden(
+            api,
+            admin_csrf,
+            int(orden_id),
+            preparation_lots_by_product_id=lotes_del_escenario(datos),
+        )
     ).status_code == 200
 
-    completada = await api.post(f"{ORDERS}/{orden_id}/complete", headers=head(admin_csrf))
+    completada = await completar_orden(api, admin_csrf, int(orden_id))
     assert completada.status_code == 200, completada.text
 
     campos = _campos(await _eventos(db_session, orden_id))

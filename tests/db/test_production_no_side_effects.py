@@ -20,10 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.inventory import StockBalance, StockMovement
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
     confirmada_y_pagada,
     confirmar,
     crear_orden,
     escenario,
+    lotes_del_escenario,
 )
 from tests.db.test_quotation_builder_api import head
 
@@ -112,7 +114,12 @@ async def test_solo_arrancar_mueve_inventario_en_todo_el_flujo(
     assert await _foto(db_session) == referencia, "leer la orden movio inventario"
 
     # ---- 7. Y ahora si ----------------------------------------------------
-    arrancada = await api.post(f"{ORDERS}/{orden.json()['id']}/start", headers=head(admin_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert arrancada.status_code == 200, arrancada.text
     assert await _foto(db_session) != referencia, (
         "arrancar es el unico paso que DEBE mover inventario, y no lo movio"

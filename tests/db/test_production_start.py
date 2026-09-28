@@ -26,10 +26,13 @@ from app.models.recipes import Recipe
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
+    completar_orden,
     confirmada_y_pagada,
     crear_orden,
-    dar_existencia,
     escenario,
+    lotes_del_escenario,
+    preparar_lote,
 )
 from tests.db.test_quotation_builder_api import head
 
@@ -91,7 +94,12 @@ async def test_arrancar_descuenta_el_material_y_deja_el_movimiento(
     preparado, ubicacion = datos["prepared_product_id"], datos["location_id"]
     assert await _saldo(db_session, preparado, ubicacion) == Decimal("5000")
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 200, respuesta.text
     assert respuesta.json()["status"] == "STARTED"
@@ -121,7 +129,12 @@ async def test_producir_no_vuelve_a_consumir_los_componentes_de_la_receta(
     usarlo. Produccion solo toca el preparado.
     """
     datos = await _preparada(api, admin_csrf, db_session, suffix="_comp")
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert respuesta.status_code == 200, respuesta.text
 
     db_session.expire_all()
@@ -164,7 +177,12 @@ async def test_sin_receta_no_arranca_y_no_mueve_nada(
     )
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert respuesta.json()["error"]["code"] == "PRODUCTION_ORDER_NOT_READY"
@@ -208,7 +226,12 @@ async def test_sin_gramos_por_pieza_no_arranca_y_no_mueve_nada(
     await db_session.commit()
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert respuesta.json()["error"]["code"] == "PRODUCTION_ORDER_NOT_READY"
@@ -254,7 +277,12 @@ async def test_una_receta_que_no_produce_preparado_no_arranca(
     assert creada.json()["lines"][0]["prepared_product_id"] is None
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{creada.json()['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(creada.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert "PREPARED_PRODUCT_NOT_RESOLVABLE" in _codigos(respuesta)
@@ -280,7 +308,12 @@ async def test_sin_existencia_del_preparado_no_arranca(
     )
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert "PREPARED_STOCK_MISSING" in _codigos(respuesta)
@@ -303,7 +336,12 @@ async def test_con_existencia_insuficiente_no_arranca_ni_a_medias(
     preparado, ubicacion = datos["prepared_product_id"], datos["location_id"]
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert "INSUFFICIENT_STOCK" in _codigos(respuesta)
@@ -342,7 +380,12 @@ async def test_un_preparado_en_mililitros_bloquea_el_arranque(
     assert creada.status_code == 201, creada.text
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{creada.json()['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(creada.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert "UNSUPPORTED_UOM_CONVERSION" in _codigos(respuesta)
@@ -364,13 +407,16 @@ async def test_un_preparado_en_kilos_si_convierte_con_el_maestro_de_unidades(
         update(Product).where(Product.id == datos["prepared_product_id"]).values(base_uom_code="kg")
     )
     await db_session.commit()
-    await dar_existencia(
+    preparation_id = await preparar_lote(
         api,
         admin_csrf,
+        db_session,
         product_id=datos["prepared_product_id"],
+        recipe_version_id=datos["receta"]["current_version"]["id"],
         location_id=datos["location_id"],
         cantidad="5",
     )
+    datos["preparation_id"] = preparation_id
 
     confirmada = await confirmada_y_pagada(api, admin_csrf, datos["quotation"])
     creada = await crear_orden(
@@ -378,7 +424,12 @@ async def test_un_preparado_en_kilos_si_convierte_con_el_maestro_de_unidades(
     )
     assert creada.status_code == 201, creada.text
 
-    respuesta = await api.post(f"{ORDERS}/{creada.json()['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(creada.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 200, respuesta.text
     assert await _saldo(db_session, datos["prepared_product_id"], datos["location_id"]) == Decimal(
@@ -404,12 +455,22 @@ async def test_arrancar_dos_veces_consume_una_sola_vez(
     datos = await _preparada(api, admin_csrf, db_session, suffix="_dos")
     preparado, ubicacion = datos["prepared_product_id"], datos["location_id"]
 
-    primera = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    primera = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert primera.status_code == 200, primera.text
     movimientos_tras_la_primera = await _movimientos(db_session)
     saldo_tras_la_primera = await _saldo(db_session, preparado, ubicacion)
 
-    segunda = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    segunda = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert segunda.status_code == 200, segunda.text
     assert segunda.json()["status"] == "STARTED"
@@ -422,36 +483,36 @@ async def test_arrancar_dos_veces_consume_una_sola_vez(
 # Completar y anular
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_completar_no_da_de_alta_producto_terminado(
+async def test_completar_registra_producto_terminado_bueno_en_stock(
     api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
 ) -> None:
-    """COMPLETE_NO_FINISHED_GOODS_STOCK / COMPLETE_NO_EXTRA_MATERIAL_CONSUMPTION.
-
-    Cerrar la orden no crea existencia de la pieza acabada. No hay reglas
-    acordadas sobre en que almacen entraria, con que merma ni con que
-    valoracion, y una entrada inventada seria peor que ninguna.
-    """
+    """Cada unidad buena completada deja su PRODUCTION_IN y saldo trazable."""
     datos = await _preparada(api, admin_csrf, db_session, suffix="_fin")
-    arrancada = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert arrancada.status_code == 200, arrancada.text
     movimientos = await _movimientos(db_session)
 
-    respuesta = await api.post(
-        f"{ORDERS}/{datos['orden']['id']}/complete", headers=head(admin_csrf)
-    )
+    respuesta = await completar_orden(api, admin_csrf, int(datos["orden"]["id"]))
 
     assert respuesta.status_code == 200, respuesta.text
-    assert respuesta.json()["status"] == "COMPLETED"
-    assert respuesta.json()["completed_at"] is not None
-    assert await _movimientos(db_session) == movimientos
-    # Ni un saldo del producto terminado.
+    assert respuesta.json()["order"]["status"] == "COMPLETED"
+    assert respuesta.json()["order"]["completed_at"] is not None
+    assert await _movimientos(db_session) == movimientos + 1
+    resultado = respuesta.json()["results"][0]
+    assert Decimal(resultado["good_quantity"]) > 0
     db_session.expire_all()
     saldo_terminado = await db_session.scalar(
-        select(func.count())
-        .select_from(StockBalance)
-        .where(StockBalance.product_id == datos["producto"]["id"])
+        select(StockBalance.quantity).where(
+            StockBalance.product_id == datos["producto"]["id"],
+            StockBalance.location_id == datos["location_id"],
+        )
     )
-    assert saldo_terminado == 0
+    assert saldo_terminado == Decimal(resultado["good_quantity"])
 
 
 @pytest.mark.asyncio
@@ -483,7 +544,12 @@ async def test_una_orden_arrancada_no_se_puede_anular(
     responsable.
     """
     datos = await _preparada(api, admin_csrf, db_session, suffix="_anularr")
-    arrancada = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert arrancada.status_code == 200, arrancada.text
 
     respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/cancel", headers=head(admin_csrf))
@@ -499,11 +565,14 @@ async def test_una_orden_completada_no_se_puede_anular(
     """CANCEL_COMPLETED_REJECTED."""
     datos = await _preparada(api, admin_csrf, db_session, suffix="_anulcomp")
     assert (
-        await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+        await arrancar_orden(
+            api,
+            admin_csrf,
+            int(datos["orden"]["id"]),
+            preparation_lots_by_product_id=lotes_del_escenario(datos),
+        )
     ).status_code == 200
-    assert (
-        await api.post(f"{ORDERS}/{datos['orden']['id']}/complete", headers=head(admin_csrf))
-    ).status_code == 200
+    assert (await completar_orden(api, admin_csrf, int(datos["orden"]["id"]))).status_code == 200
 
     respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/cancel", headers=head(admin_csrf))
 
@@ -521,7 +590,12 @@ async def test_una_orden_anulada_no_puede_arrancar(
     ).status_code == 200
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert respuesta.json()["error"]["code"] == "PRODUCTION_ORDER_NOT_STARTABLE"

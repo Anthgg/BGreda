@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -20,8 +21,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.inventory import StockBalance, StockMovement
+from app.models.masters import Product, ProductType, UnitOfMeasure, UomDimension
 from app.models.production import ProductionOrder
 from app.models.quotations import Quotation
+from app.models.recipes import RecipeLine
 from tests.db.test_firings_api import FACTORES_CHICO, crear_horno
 from tests.db.test_quotation_builder_api import head
 from tests.db.test_quotations_api import _finished_product_and_recipe
@@ -32,12 +35,63 @@ PARTNERS = "/api/v1/partners"
 LOCATIONS = "/api/v1/inventory/locations"
 ADJUSTMENTS = "/api/v1/inventory/adjustments"
 RECIPES = "/api/v1/recipes"
+PREPARATIONS = "/api/v1/recipe-preparations"
 
 
 async def crear_ubicacion(api: httpx.AsyncClient, csrf: str, nombre: str) -> int:
     respuesta = await api.post(LOCATIONS, json={"name": nombre}, headers=head(csrf))
     assert respuesta.status_code == 201, respuesta.text
     return int(respuesta.json()["id"])
+
+
+async def arrancar_orden(
+    api: httpx.AsyncClient,
+    csrf: str,
+    order_id: int,
+    *,
+    preparation_lots_by_product_id: dict[int, int] | None = None,
+) -> httpx.Response:
+    """Envía la selección explícita de lotes que haría el operario."""
+    return await api.post(
+        f"{ORDERS}/{order_id}/start",
+        json={"preparation_lots_by_product_id": preparation_lots_by_product_id or {}},
+        headers=head(csrf),
+    )
+
+
+async def completar_orden(api: httpx.AsyncClient, csrf: str, order_id: int) -> httpx.Response:
+    """Cierra una orden declarando buenas todas las unidades planificadas."""
+    order_response = await api.get(f"{ORDERS}/{order_id}", headers=head(csrf))
+    assert order_response.status_code == 200, order_response.text
+    order = order_response.json()
+    if order["v2_pieces"]:
+        sources = order["v2_pieces"]
+        line_prefix = "V2P"
+    else:
+        sources = order["lines"]
+        line_prefix = "POL"
+    assert sources, f"La orden {order_id} no tiene líneas de resultado visibles"
+    results = [
+        {
+            "line_ref": f"{line_prefix}:{line['id']}",
+            "good_quantity": line["quantity"],
+            "scrap_quantity": 0,
+        }
+        for line in sources
+    ]
+    return await api.post(
+        f"{ORDERS}/{order_id}/complete",
+        json={"results": results},
+        headers=head(csrf),
+    )
+
+
+def lotes_del_escenario(datos: dict[str, Any]) -> dict[int, int]:
+    product_id = datos.get("prepared_product_id")
+    preparation_id = datos.get("preparation_id")
+    if product_id is None or preparation_id is None:
+        return {}
+    return {int(product_id): int(preparation_id)}
 
 
 async def dar_existencia(
@@ -54,6 +108,81 @@ async def dar_existencia(
         headers=head(csrf),
     )
     assert respuesta.status_code == 201, respuesta.text
+
+
+async def preparar_lote(
+    api: httpx.AsyncClient,
+    csrf: str,
+    db_session: AsyncSession,
+    *,
+    product_id: int,
+    recipe_version_id: int,
+    location_id: int,
+    cantidad: str,
+) -> int:
+    """Crea stock preparado mediante una receta y un lote real de PostgreSQL."""
+    product = await db_session.get(Product, product_id)
+    assert product is not None and product.product_type is ProductType.PREPARED_MATERIAL
+    output_unit = await db_session.get(UnitOfMeasure, product.base_uom_code)
+    assert output_unit is not None
+    requested = Decimal(cantidad)
+    if output_unit.dimension is UomDimension.MASS:
+        gram_unit = await db_session.get(UnitOfMeasure, "g")
+        assert gram_unit is not None and gram_unit.dimension is UomDimension.MASS
+        dry_weight_g = requested * output_unit.factor_to_base / gram_unit.factor_to_base
+        final_yield_ml = dry_weight_g
+    elif output_unit.dimension is UomDimension.VOLUME:
+        millilitre_unit = await db_session.get(UnitOfMeasure, "ml")
+        assert millilitre_unit is not None and millilitre_unit.dimension is UomDimension.VOLUME
+        final_yield_ml = requested * output_unit.factor_to_base / millilitre_unit.factor_to_base
+        dry_weight_g = final_yield_ml
+    else:
+        raise AssertionError("Un preparado de prueba debe usar masa o volumen")
+
+    component_ids = list(
+        (
+            await db_session.scalars(
+                select(RecipeLine.component_product_id).where(
+                    RecipeLine.recipe_version_id == recipe_version_id
+                )
+            )
+        ).all()
+    )
+    assert component_ids
+    gram_unit = await db_session.get(UnitOfMeasure, "g")
+    assert gram_unit is not None
+    for component_id in component_ids:
+        component = await db_session.get(Product, component_id)
+        assert component is not None
+        assert component.product_type is not ProductType.PREPARED_MATERIAL, (
+            "el escenario debe preparar cada lote fuente antes de usarlo"
+        )
+        component_unit = await db_session.get(UnitOfMeasure, component.base_uom_code)
+        assert component_unit is not None and component_unit.dimension is UomDimension.MASS
+        component_quantity = dry_weight_g * gram_unit.factor_to_base / component_unit.factor_to_base
+        await dar_existencia(
+            api,
+            csrf,
+            product_id=component_id,
+            location_id=location_id,
+            cantidad=format(component_quantity, "f"),
+        )
+
+    response = await api.post(
+        PREPARATIONS,
+        json={
+            "recipe_version_id": recipe_version_id,
+            "location_id": location_id,
+            "total_dry_weight_g": format(dry_weight_g, "f"),
+            "water_amount_ml": "0",
+            "final_yield_ml": format(final_yield_ml, "f"),
+            "idempotency_key": f"db-fixture-{uuid4().hex}",
+        },
+        headers=head(csrf),
+    )
+    assert response.status_code == 201, response.text
+    db_session.expire_all()
+    return int(response.json()["id"])
 
 
 async def escenario(
@@ -148,11 +277,14 @@ async def escenario(
     borrador = creada.json()
 
     location_id = await crear_ubicacion(api, csrf, f"Almacen Produccion{suffix}")
+    preparation_id: int | None = None
     if existencia_preparado is not None:
-        await dar_existencia(
+        preparation_id = await preparar_lote(
             api,
             csrf,
+            db_session,
             product_id=receta["product_id"],
+            recipe_version_id=receta["current_version"]["id"],
             location_id=location_id,
             cantidad=existencia_preparado,
         )
@@ -162,6 +294,7 @@ async def escenario(
         "producto": producto,
         "receta": receta,
         "prepared_product_id": receta["product_id"],
+        "preparation_id": preparation_id,
         "location_id": location_id,
     }
 

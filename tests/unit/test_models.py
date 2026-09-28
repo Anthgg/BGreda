@@ -21,6 +21,7 @@ def test_las_columnas_son_las_esperadas() -> None:
         "id",
         "display_name",
         "role",
+        "capabilities",
         "active",
         "created_at",
         "updated_at",

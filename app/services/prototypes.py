@@ -16,9 +16,9 @@ Lo que este modulo NO hace, tambien a proposito:
 - **No reescribe lo rechazado.** Si hace falta otra muestra se crea la
   siguiente y se dice de cual viene.
 
-El unico punto que mueve inventario es `start`. Crear, editar, anadir material,
-enlazar la cotizacion, cobrarla, completar, aprobar o rechazar no descuentan un
-gramo.
+`start` descuenta los materiales y un cierre físico nuevo ingresa solo las
+unidades buenas del producto terminado. Crear, editar, enlazar la cotizacion,
+cobrarla, aprobar o rechazar no mueven inventario.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
+from app.core.production_results import result_matches_started_quantity
 from app.models.audit import AuditAction
 from app.models.inventory import MovementType, StockBalance, StockLocation
 from app.models.masters import Product, ProductType
@@ -50,13 +51,19 @@ from app.models.prototypes import (
     PrototypeMaterialLine,
     PrototypeMaterialRole,
     PrototypeMaterialStage,
+    PrototypeProductionResult,
     PrototypeStatus,
 )
 from app.models.quotations import Quotation, QuotationItem, QuotationPaymentStatus
 from app.models.sequence import SequenceType
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
-from app.services.inventory import InventoryService
+from app.services.inventory import (
+    InvalidPreparationLotError,
+    InventoryService,
+    PreparationLotRequiredError,
+)
+from app.services.masters import MasterDataService
 from app.services.sequences import SequenceService
 
 PROTOTYPE_ENTITY = "prototype"
@@ -123,6 +130,18 @@ class PrototypeNotCompletableError(APIError):
     status_code = 409
     code = "PROTOTYPE_NOT_COMPLETABLE"
     message = "Solo un prototipo arrancado puede completarse"
+
+
+class PrototypeProductionResultInvalidError(APIError):
+    status_code = 422
+    code = "PROTOTYPE_RESULT_INVALID"
+    message = "El resultado debe cuadrar con las unidades iniciadas y un producto terminado"
+
+
+class PrototypeProductionOrderCompletionRequiredError(APIError):
+    status_code = 409
+    code = "PROTOTYPE_PRODUCTION_ORDER_COMPLETION_REQUIRED"
+    message = "El resultado debe registrarse al completar su orden de producción"
 
 
 class PrototypeNotDecidableError(APIError):
@@ -220,6 +239,7 @@ class MaterialInput:
 
     product_id: int
     quantity: Decimal
+    preparation_id: int | None = None
     material_role: PrototypeMaterialRole | None = None
     stage: PrototypeMaterialStage | None = None
 
@@ -481,12 +501,23 @@ class PrototypeService:
                 raise PrototypeLineageInvalidError("El material no existe")
             if product.product_type not in CONSUMABLE_TYPES:
                 raise PrototypeMaterialNotConsumableError()
+            if (
+                product.product_type is ProductType.PREPARED_MATERIAL
+                and entrada.preparation_id is None
+            ):
+                raise PreparationLotRequiredError()
+            if (
+                product.product_type is not ProductType.PREPARED_MATERIAL
+                and entrada.preparation_id is not None
+            ):
+                raise InvalidPreparationLotError()
             if not product.base_uom_code:
                 raise PrototypeMaterialWithoutUomError()
 
             prototype.lines.append(
                 PrototypeMaterialLine(
                     product_id=product.id,
+                    preparation_id=entrada.preparation_id,
                     sort_order=orden,
                     quantity_planned=entrada.quantity,
                     material_role=entrada.material_role,
@@ -673,6 +704,7 @@ class PrototypeService:
                 user_id=user.id,
                 user_name=user.display_name,
                 prototype_id=prototype.id,
+                preparation_id=linea.preparation_id,
             )
             # Lo REAL se escribe aqui, dentro de la transaccion que lo
             # descuenta. Si algo falla despues, la transaccion se deshace
@@ -703,28 +735,124 @@ class PrototypeService:
         return prototype, True
 
     async def complete(
-        self, prototype_id: int, *, user: AuthenticatedUser
+        self,
+        prototype_id: int,
+        *,
+        started_quantity: Decimal,
+        good_quantity: Decimal,
+        scrap_quantity: Decimal,
+        scrap_reason: str | None,
+        user: AuthenticatedUser,
     ) -> tuple[Prototype, bool]:
-        """Cierra la fabricacion. NO vuelve a consumir ni decide nada."""
+        """Registra el resultado físico explícito y cierra la fabricación."""
         prototype = await self.get(prototype_id, for_update=True)
         if prototype.status is PrototypeStatus.COMPLETED:
+            # Compatibilidad histórica: no se completa hacia atrás ni se crea
+            # inventario para una muestra que ya estaba cerrada.
             return prototype, False
         if prototype.status is not PrototypeStatus.STARTED:
             raise PrototypeNotCompletableError()
 
-        momento = datetime.now(UTC)
+        if not result_matches_started_quantity(
+            started_quantity=started_quantity,
+            good_quantity=good_quantity,
+            scrap_quantity=scrap_quantity,
+            scrap_reason=scrap_reason,
+            require_scrap_reason=False,
+        ):
+            raise PrototypeProductionResultInvalidError()
+
+        # Una orden ya tiene su propio registro por línea. El endpoint directo
+        # no debe duplicar resultados o movimientos de esa misma fabricación.
+        production_order_id = await self._session.scalar(
+            select(ProductionOrder.id).where(ProductionOrder.prototype_id == prototype.id)
+        )
+        if production_order_id is not None:
+            raise PrototypeProductionOrderCompletionRequiredError()
+
+        product = (
+            await self._session.get(Product, prototype.product_id)
+            if prototype.product_id is not None
+            else None
+        )
+        original_product_id = prototype.product_id
+        if product is None and good_quantity > 0:
+            category_id = None
+            if prototype.prototype_quotation_id is not None:
+                quotation = await self._session.get(
+                    PrototypeQuotation, prototype.prototype_quotation_id
+                )
+                if quotation is not None:
+                    category_id = quotation.product_category_id
+            product = await MasterDataService(
+                self._session, self._audit, self._sequences
+            ).create_custom_finished_product(
+                name=prototype.name,
+                user=user,
+                product_category_id=category_id,
+            )
+            prototype.product_id = product.id
+        if product is not None and product.product_type is not ProductType.FINISHED_PRODUCT:
+            raise PrototypeProductionResultInvalidError()
+
+        if good_quantity > 0:
+            location = (
+                await self._session.get(StockLocation, prototype.stock_location_id)
+                if prototype.stock_location_id is not None
+                else None
+            )
+            if product is None or location is None:
+                raise PrototypeProductionResultInvalidError()
+            await self._inventory.apply_movement(
+                product=product,
+                location=location,
+                quantity=good_quantity,
+                movement_type=MovementType.PRODUCTION_IN,
+                reason=f"Prototipo terminado {prototype.code}",
+                user_id=user.id,
+                user_name=user.display_name,
+                prototype_id=prototype.id,
+            )
+
+        moment = datetime.now(UTC)
+        self._session.add(
+            PrototypeProductionResult(
+                prototype_id=prototype.id,
+                product_id=product.id if product is not None else None,
+                started_quantity=started_quantity,
+                good_quantity=good_quantity,
+                scrap_quantity=scrap_quantity,
+                scrap_reason=scrap_reason or None,
+                recorded_by=user.id,
+                recorded_by_name=user.display_name,
+                recorded_at=moment,
+            )
+        )
+
         prototype.status = PrototypeStatus.COMPLETED
-        prototype.completed_at = momento
-        prototype.updated_at = momento
+        prototype.completed_at = moment
+        prototype.updated_at = moment
         await self._session.flush()
 
+        changes: dict[str, tuple[object, object]] = {
+            "status": (PrototypeStatus.STARTED.value, prototype.status.value),
+            "completed_at": (None, moment.isoformat()),
+            "production_result": (
+                None,
+                {
+                    "started_quantity": str(started_quantity),
+                    "good_quantity": str(good_quantity),
+                    "scrap_quantity": str(scrap_quantity),
+                    "scrap_reason": scrap_reason,
+                },
+            ),
+        }
+        if original_product_id is None and prototype.product_id is not None:
+            changes["product_id"] = (None, prototype.product_id)
         self._audit.record_changes(
             entity_type=PROTOTYPE_ENTITY,
             entity_id=str(prototype.id),
-            changes={
-                "status": (PrototypeStatus.STARTED.value, prototype.status.value),
-                "completed_at": (None, momento.isoformat()),
-            },
+            changes=changes,
             user_id=user.id,
             user_display_name=user.display_name,
         )
@@ -957,6 +1085,7 @@ class PrototypeService:
             PrototypeMaterialOut,
             PrototypeOriginQuotationOut,
             PrototypeOut,
+            PrototypeProductionResultOut,
             PrototypeReadinessOut,
         )
 
@@ -987,6 +1116,7 @@ class PrototypeService:
                 .order_by(Quotation.id)
             )
         ).all()
+        physical_result = await self._session.get(PrototypeProductionResult, prototype.id)
 
         return PrototypeOut(
             id=prototype.id,
@@ -1021,10 +1151,16 @@ class PrototypeService:
             ],
             production_order_id=orden.id if orden is not None else None,
             production_order_code=orden.code if orden is not None else None,
+            production_result=(
+                PrototypeProductionResultOut.model_validate(physical_result, from_attributes=True)
+                if physical_result is not None
+                else None
+            ),
             materials=[
                 PrototypeMaterialOut(
                     id=linea.id,
                     product_id=linea.product_id,
+                    preparation_id=linea.preparation_id,
                     sort_order=linea.sort_order,
                     product_name=linea.product_name_snapshot,
                     product_internal_reference=linea.product_internal_reference_snapshot,
