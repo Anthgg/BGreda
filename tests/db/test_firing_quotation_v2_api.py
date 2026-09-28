@@ -22,15 +22,19 @@ from typing import Any
 import httpx
 import pytest
 from pypdf import PdfReader
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.inventory import StockMovement
+from app.models.production import ProductionOrder, ProductionOrderStatus
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
 
 FQ = "/api/v1/firing-quotations-v2"
 KILNS = "/api/v1/kilns"
 V2_SETTINGS = "/api/v1/quoter-v2/settings"
 COMMERCIAL = "/api/v1/settings/commercial"
+ORDERS = "/api/v1/production-orders"
+LOCATIONS = "/api/v1/inventory/locations"
 
 
 def h(csrf: str) -> dict[str, str]:
@@ -886,3 +890,83 @@ class TestListado:
         item = next(i for i in datos["items"] if i["id"] == ctz["id"])
         assert item["effective_status"] == "DRAFT"
         assert not hasattr(item["effective_status"], "__await__")
+
+
+@pytest.mark.asyncio
+async def test_solo_quema_get_result_lines_roundtrip_does_not_add_stock(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+    db_session: AsyncSession,
+) -> None:
+    ids = await preparar(api, admin_csrf)
+    ctz = await cotizacion_del_excel(api, admin_csrf, ids, piezas=10)
+    preview = (await api.get(f"{FQ}/{ctz['id']}/preview")).json()
+    await _post(
+        api,
+        admin_csrf,
+        f"{FQ}/{ctz['id']}/confirm",
+        {"expected_fingerprint": preview["fingerprint"]},
+    )
+    sent = await api.post(f"{FQ}/{ctz['id']}/send-to-production", headers=h(admin_csrf))
+    assert sent.status_code == 201, sent.text
+
+    # W2 contiene start/complete para el puente V2F, pero no ofrece una ruta
+    # publica para crear esa orden. La fila aislada sólo prepara el origen; la
+    # lectura y el cierre se recorren por los endpoints públicos.
+    location = await _post(
+        api,
+        admin_csrf,
+        LOCATIONS,
+        {"name": f"Taller Solo Quema W3 {ctz['id']}"},
+    )
+    order = ProductionOrder(
+        code=f"PO-W3-SQ-{ctz['id']}",
+        v2_firing_handoff_id=sent.json()["handoff"]["id"],
+        stock_location_id=location["id"],
+        status=ProductionOrderStatus.CREATED,
+        qr_token=f"w3-solo-quema-read-contract-{ctz['id']}-opaque-qr-token",
+    )
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    detail = await api.get(f"{ORDERS}/{order.id}", headers=h(admin_csrf))
+    assert detail.status_code == 200, detail.text
+    order_out = detail.json()
+    assert order_out["origin_type"] == "SOLO_QUEMA"
+    assert len(order_out["result_lines"]) == 1
+    source = order_out["result_lines"][0]
+    assert source["source_kind"] == "V2F"
+    assert source["line_ref"] == f"V2F:{ctz['lines'][0]['id']}"
+    assert Decimal(source["started_quantity"]) == Decimal(10)
+
+    started = await api.post(f"{ORDERS}/{order.id}/start", headers=h(admin_csrf))
+    assert started.status_code == 200, started.text
+    complete = await api.post(
+        f"{ORDERS}/{order.id}/complete",
+        headers=h(admin_csrf),
+        json={
+            "results": [
+                {
+                    "line_ref": source["line_ref"],
+                    "good_quantity": "8",
+                    "scrap_quantity": "2",
+                    "scrap_reason": "Pieza dañada en prueba",
+                }
+            ]
+        },
+    )
+    assert complete.status_code == 200, complete.text
+    result = complete.json()["results"][0]
+    assert Decimal(result["started_quantity"]) == Decimal(10)
+    assert Decimal(result["good_quantity"]) == Decimal(8)
+    assert Decimal(result["scrap_quantity"]) == Decimal(2)
+    assert complete.json()["order"]["status"] == "COMPLETED"
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(StockMovement)
+            .where(StockMovement.production_order_id == order.id)
+        )
+        == 0
+    )

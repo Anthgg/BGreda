@@ -229,3 +229,42 @@ async def test_complete_custom_error_despues_de_flush_revierte_todo(
         )
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_get_result_lines_v2p_roundtrip_uses_public_contract_only(
+    api: httpx.AsyncClient,
+    admin_csrf: str,
+) -> None:
+    datos = await _orden_lista(api, admin_csrf, suffix="read-contract")
+    order_id = int(datos["order_id"])
+
+    detail = await api.get(f"{ORDERS}/{order_id}", headers=h(admin_csrf))
+    assert detail.status_code == 200, detail.text
+    order = detail.json()
+    assert len(order["result_lines"]) == 1
+    source = order["result_lines"][0]
+    assert source["line_ref"] == f"V2P:{datos['line_id']}"
+    assert Decimal(source["started_quantity"]) == Decimal(100)
+    assert source["source_kind"] == "V2P"
+
+    # El payload se deriva sólo de la lectura pública; no se vuelve a consultar
+    # la línea de cotización ni a reconstruir su identificador.
+    completed = await api.post(
+        f"{ORDERS}/{order_id}/complete",
+        json={
+            "results": [
+                {
+                    "line_ref": source["line_ref"],
+                    "good_quantity": "30",
+                    "scrap_quantity": "70",
+                    "scrap_reason": "Merma de prueba",
+                }
+            ]
+        },
+        headers=h(admin_csrf),
+    )
+    assert completed.status_code == 200, completed.text
+    result = completed.json()["results"][0]
+    assert result["line_ref"] == source["line_ref"]
+    assert Decimal(result["started_quantity"]) == Decimal(source["started_quantity"])

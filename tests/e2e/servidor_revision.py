@@ -600,6 +600,7 @@ async def sembrar_cotizacion_vencida(
                 "height_cm": "5",
                 "body_material_id": pasta_id,
                 "body_unit_weight": "400",
+                "production_time_per_unit_minutes": "6",
             },
             headers=cabeceras,
         ),

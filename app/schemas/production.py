@@ -82,6 +82,20 @@ class ProductionResultLineIn(BaseModel):
     scrap_reason: str | None = Field(default=None, max_length=240)
 
 
+class ProductionResultLineSourceOut(BaseModel):
+    """Origen autoritativo de una linea que puede completarse en una orden."""
+
+    line_ref: str = Field(pattern=r"^(POL|V2P|V2F):[1-9][0-9]*$")
+    started_quantity: Decimal
+    source_kind: str
+    product_id: int | None
+    product_name: str
+    production_order_line_id: int | None = None
+    v2_quotation_product_id: int | None = None
+    v2_firing_quotation_line_id: int | None = None
+    prototype_id: int | None = None
+
+
 class ProductionOrderCompleteIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,6 +237,9 @@ class ProductionOrderSummaryOut(BaseModel):
     #: enlace llevara a la cotizacion equivocada.
     v2_quotation_id: int | None = None
     v2_quotation_code: str | None = None
+    #: Fase 010P. El origen Solo Quema, separado del espacio de ids de V2Q.
+    v2_firing_quotation_id: int | None = None
+    v2_firing_quotation_code: str | None = None
     #: Fase 010I. El cliente CONGELADO en la cotizacion de origen (Legacy o V2).
     #: Nulo en las ordenes de muestra, que no lo tenian.
     customer_name: str | None = None
@@ -253,6 +270,9 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     #: arrancar hace falta PAID; el nulo tambien bloquea.
     quotation_payment_status: QuotationPaymentStatus | None
     lines: list[ProductionOrderLineOut]
+    #: Origenes exactos que acepta `POST /complete`; el backend los vuelve a
+    #: validar al cerrar y calcula `started_quantity` desde su fuente real.
+    result_lines: list[ProductionResultLineSourceOut] = Field(default_factory=list)
     readiness: ProductionReadinessOut
     #: Fase 010I, decision D3. Las clases de material que la cotizacion V2 de
     #: esta orden planifico como inventariables y que aun no tienen ningun
