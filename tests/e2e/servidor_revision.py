@@ -70,6 +70,7 @@ from tests.fakes import FakeProfileRepository, FakeSupabaseAuthClient
 #: contrasena, que es aleatoria por corrida, no sirve para nada.
 ADMIN_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000010")
 OPERATOR_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000011")
+QUICK_CREATE_OPERATOR_ID = uuid.UUID("0e2e0e2e-0000-4000-8000-000000000012")
 
 HOSTS_LOCALES = {"localhost", "127.0.0.1", "::1"}
 
@@ -162,7 +163,25 @@ def construir_app(email: str, clave: str, operator_email: str, operator_clave: s
     operador.display_name = "Operador E2E"
     operador.role = UserRole.OPERATOR
     operador.active = True
-    perfiles = FakeProfileRepository({ADMIN_ID: perfil, OPERATOR_ID: operador})
+    perfiles_por_id = {ADMIN_ID: perfil, OPERATOR_ID: operador}
+    quick_create_email = os.environ.get("E2E_QUICK_CREATE_OPERATOR_EMAIL", "")
+    quick_create_password = os.environ.get("E2E_QUICK_CREATE_OPERATOR_PASSWORD", "")
+    if bool(quick_create_email) != bool(quick_create_password):
+        _abortar("E2E_QUICK_CREATE_OPERATOR_EMAIL y PASSWORD deben configurarse juntos.")
+    if quick_create_email and quick_create_password:
+        supabase.register(
+            email=quick_create_email,
+            password=quick_create_password,
+            user_id=QUICK_CREATE_OPERATOR_ID,
+        )
+        operador_con_alta_rapida = Profile()
+        operador_con_alta_rapida.id = QUICK_CREATE_OPERATOR_ID
+        operador_con_alta_rapida.display_name = "Operador E2E con alta rápida"
+        operador_con_alta_rapida.role = UserRole.OPERATOR
+        operador_con_alta_rapida.active = True
+        operador_con_alta_rapida.capabilities = ["MASTERS_QUICK_CREATE"]
+        perfiles_por_id[QUICK_CREATE_OPERATOR_ID] = operador_con_alta_rapida
+    perfiles = FakeProfileRepository(perfiles_por_id)
     almacen = FakeObjectStorage()
 
     aplicacion.dependency_overrides[get_supabase_auth_client] = lambda: supabase

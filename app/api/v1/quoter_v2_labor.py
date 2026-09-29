@@ -14,9 +14,9 @@ Tres grupos de rutas, separados porque son tres cosas distintas:
 Porque el jornal de una persona es informacion de su remuneracion. El resto del
 Cotizador V2 ya era solo de administracion desde 010A, y abrir estos maestros a
 todo el taller para «poder seleccionar» expondria cuanto cobra cada companero.
-Quien cotiza en V2 es administrador, asi que la separacion que pide la fase
-—cotizar no autoriza a cambiar maestros— se cumple sin necesidad de ensanchar
-quien ve los sueldos.
+Quien cotiza en V2 es administrador. OPERATOR con `MASTERS_QUICK_CREATE` puede
+consultar tecnicas para preparar altas, pero la lista de trabajadores y sus
+jornales sigue reservada a administradores.
 """
 
 from __future__ import annotations
@@ -215,7 +215,7 @@ async def update_v2_worker(
 @router.get("/quoter-v2/techniques", response_model=V2TechniquePage)
 async def list_v2_techniques(
     service: V2LaborServiceDep,
-    _: AdminUserDep,
+    _: MastersQuickCreateDep,
     active_only: Annotated[bool, Query()] = False,
 ) -> V2TechniquePage:
     jornada = await service.global_workday_hours()
