@@ -1,0 +1,18 @@
+{
+  "database": "bgreda_test_010p_w4_realistic",
+  "alembic_head": "0045",
+  "movement_rows": 3,
+  "generated_at_utc": "2026-09-29T03:46:31Z",
+  "lot_balance_rows": 1,
+  "stock_balance_rows": 1,
+  "negative_lot_balances": 0,
+  "negative_stock_balances": 0,
+  "delivery_out_invalid_rows": 0,
+  "lot_groups_without_aggregate": 0,
+  "invalid_production_result_totals": 0,
+  "last_movement_balance_mismatches": 0,
+  "movements_missing_required_origin": 0,
+  "prepared_aggregate_lot_mismatches": 0,
+  "completed_v2_orders_without_results": 0,
+  "production_in_result_quantity_mismatches": 0
+}

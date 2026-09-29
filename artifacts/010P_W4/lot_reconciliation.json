@@ -1,0 +1,32 @@
+{
+  "report": "010P W4 lot reconciliation",
+  "generated_at": "2026-09-29T02:17:33.5549121Z",
+  "source_database": "bgreda_test_010p_w4_realistic",
+  "alembic_revision": "0045",
+  "unreconciled_rows": 0,
+  "reconciliation": {
+    "lot_balances": [
+      {
+        "location_id": 2,
+        "preparation_id": 2,
+        "product_id": 5,
+        "quantity": "25.000000000000"
+      }
+    ],
+    "rows": [
+      {
+        "affected_movements": [
+          2,
+          3,
+          4
+        ],
+        "aggregate_balance": "25.000000000000",
+        "difference": "0E-12",
+        "location_id": 2,
+        "product_id": 5,
+        "reconstructed_lot_balance": "25.000000000000",
+        "status": "RECONCILED"
+      }
+    ]
+  }
+}
