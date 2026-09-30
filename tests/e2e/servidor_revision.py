@@ -58,7 +58,12 @@ from sqlalchemy.dialects.postgresql.asyncpg import dialect as AsyncpgDialect
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.api.deps import get_object_storage, get_profile_repository, get_supabase_auth_client
+from app.api.deps import (
+    get_object_storage,
+    get_profile_repository,
+    get_supabase_auth_client,
+    require_legacy_quotation_creation,
+)
 from app.core.config import get_settings
 from app.db.session import normalize_database_url
 from app.main import create_app
@@ -486,6 +491,26 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             "configuracion del Cotizador V2",
         )
 
+        v1_history_id = await sembrar_cotizacion_v1_historica(
+            aplicacion,
+            api,
+            cabeceras,
+            int(pasta.json()["id"]),
+            catalogo["Tasa Buho"],
+            hornos["Horno chico E2E"],
+        )
+        aplicacion.state.e2e_v1_history_id = v1_history_id
+
+        async def fixture_v1_history() -> dict[str, int]:
+            return {"id": v1_history_id}
+
+        aplicacion.add_api_route(
+            "/api/v1/e2e/fixtures/v1-history",
+            fixture_v1_history,
+            methods=["GET"],
+            include_in_schema=False,
+        )
+
         await sembrar_cotizacion_vencida(
             api,
             cabeceras,
@@ -494,6 +519,121 @@ async def sembrar(aplicacion: FastAPI, email: str, clave: str) -> None:
             trabajadores["E2E-Trabajador taller"],
         )
     print("[servidor_revision] siembra completa", flush=True)
+
+
+async def sembrar_cotizacion_v1_historica(
+    aplicacion: FastAPI,
+    api: httpx.AsyncClient,
+    cabeceras: dict[str, str],
+    pasta_id: int,
+    pieza_id: int,
+    horno_id: int,
+) -> int:
+    """Crea una V1 histórica de prueba sin volver a habilitar su endpoint.
+
+    El bypass de la dependencia vive solo alrededor de esta llamada ASGI en
+    memoria. El servidor queda con LEGACY_QUOTATION_CREATION_DISABLED para las
+    pruebas E2E y para cualquier solicitud posterior.
+    """
+    clientes = (await api.get("/api/v1/partners?limit=100")).json()["items"]
+    cliente = next((item for item in clientes if item["name"] == "Cliente E2E"), None)
+    if cliente is None:
+        _abortar("sembrando histórico V1: falta el cliente E2E")
+
+    productos = (await api.get("/api/v1/products?limit=200&active=true")).json()["items"]
+    pasta = next((item for item in productos if int(item["id"]) == pasta_id), None)
+    if pasta is None:
+        _abortar("sembrando histórico V1: falta la pasta valorizada E2E")
+
+    cuerpo = await _ok(
+        await api.post(
+            "/api/v1/products",
+            json={
+                "name": "E2E materia prima histórica V1",
+                "product_type": "RAW_MATERIAL",
+                "product_category_id": int(pasta["product_category_id"]),
+                "base_uom_code": "g",
+                "cost": "12.50",
+                "purchasable": True,
+                "active": True,
+            },
+            headers=cabeceras,
+        ),
+        "material histórico V1",
+    )
+
+    tarifas = (await api.get(f"/api/v1/kilns/{horno_id}/rates")).json()
+    for tipo in ("LOW", "HIGH"):
+        if not any(rate["firing_type"] == tipo for rate in tarifas):
+            await _ok(
+                await api.post(
+                    f"/api/v1/kilns/{horno_id}/rates",
+                    json={"firing_type": tipo, "rate": "2.00"},
+                    headers=cabeceras,
+                ),
+                f"tarifa histórica V1 {tipo}",
+            )
+    await _ok(
+        await api.put(
+            f"/api/v1/kilns/{horno_id}/occupancy-factors",
+            json=[{"min_percentage": 1, "max_percentage": 100, "factor": "1"}],
+            headers=cabeceras,
+        ),
+        "ocupación histórica V1",
+    )
+
+    payload = {
+        "name": "E2E-SEMILLA-HISTORICA-V1",
+        "customer_id": int(cliente["id"]),
+        "kiln_id": horno_id,
+        "items": [
+            {
+                "product_id": pieza_id,
+                "quantity": 2,
+                "dimensions": {"width": "15", "length": "1", "height": "3"},
+                "body_material": {
+                    "product_id": int(cuerpo.json()["id"]),
+                    "quantity_per_piece": "300",
+                },
+                "other_costs": [],
+                "markup_percent": "100",
+                "commercial_sale_unit_price": "8.50",
+                "sort_order": 0,
+            }
+        ],
+    }
+
+    # Crear una sola fila histórica a través del servicio real. La dependencia
+    # se reemplaza únicamente en este request de siembra, nunca en el servidor
+    # que atiende Playwright.
+    aplicacion.dependency_overrides[require_legacy_quotation_creation] = lambda: None
+    try:
+        creada = await _ok(
+            await api.post("/api/v1/quotation-builder", json=payload, headers=cabeceras),
+            "fixture histórico V1",
+        )
+    finally:
+        aplicacion.dependency_overrides.pop(require_legacy_quotation_creation, None)
+
+    bloqueada = await api.post("/api/v1/quotation-builder", json=payload, headers=cabeceras)
+    if (
+        bloqueada.status_code != 409
+        or bloqueada.json().get("error", {}).get("code") != "LEGACY_QUOTATION_CREATION_DISABLED"
+    ):
+        _abortar("la creación Legacy debe seguir deshabilitada después de sembrar el fixture V1")
+
+    borrador = creada.json()
+    confirmada = await _ok(
+        await api.post(
+            f"/api/v1/quotation-builder/{int(borrador['id'])}/confirm",
+            json={"expected_updated_at": borrador["updated_at"]},
+            headers=cabeceras,
+        ),
+        "confirmación del fixture histórico V1",
+    )
+    if confirmada.json().get("status") != "CONFIRMED":
+        _abortar("el fixture histórico V1 no quedó confirmado")
+    return int(borrador["id"])
 
 
 #: Tecnicas del Excel: codigo, nombre, piezas por jornada, si exige esmalte y si
