@@ -22,7 +22,7 @@ Los commits de preparación solo pueden cambiar configuración de release, scrip
 
 ## Puertas manuales de PR y CI
 
-No hay PR abierto para estos cambios. La secuencia futura es backend primero y frontend después: publicar la rama, abrir PR contra `main`, revisar y exigir que todos los checks indicados estén verdes en el SHA exacto del PR, y hacer squash merge. No repetir manualmente las suites W4; dejar que corra CI normal salvo conflicto, cambio funcional o regresión detectada.
+No hay PR abierto para estos cambios porque el push está prohibido en esta fase. Esto no es un PREP_BLOCKER: publicación, PRs y CI verde son EXECUTION_GATE_1. Al iniciar la ejecución autorizada, publicar primero las ramas backend y frontend, abrir ambos PRs contra `main`, verificar en el SHA exacto que estén verdes todos los checks indicados y detenerse sin merge ni cambios productivos si alguno falla. Después, squash merge siguiendo la convención vigente. No repetir manualmente las suites W4 salvo conflicto, cambio funcional o regresión detectada.
 
 **Checks backend obligatorios:**
 
@@ -57,7 +57,8 @@ La app frontend es Nginx estático con configuración pública `API_BASE_URL`/`B
 | `roles/run.invoker` | Nginx proxy no envía token de identidad al backend | No conceder a frontend runtime |
 | `roles/iam.serviceAccountUser` | El principal que despliega necesita adjuntar la SA runtime | Binding sobre la SA dedicada solamente |
 
-Runtime frontend requerido: **roles NONE; secrets NONE**. La futura cuenta `fgreda-web-runtime@cotizador-greda.iam.gserviceaccount.com` debe crearse antes de desplegar; no crearla durante prep. Identificar el principal exacto de despliegue en la configuración real de Cloud Build antes de conceder el binding.
+Runtime frontend requerido: **roles NONE; secrets NONE**. La futura cuenta `fgreda-web-runtime@cotizador-greda.iam.gserviceaccount.com` debe crearse antes de desplegar; no crearla durante prep. Identidad deployer verificada el 2026-09-30: `gcloud builds get-default-service-account --project=cotizador-greda` devuelve `303244958634-compute@developer.gserviceaccount.com`. El Cloud Build frontend no fija un `serviceAccount` propio y el script usa `gcloud builds submit` sin `--service-account`; el build frontend exitoso `9a6ea44f-532f-4eb9-aa42-6e713e312938` también registra esa Compute SA. La cuenta humana activa `anthgg17@gmail.com` inicia el build, pero el comando `gcloud run deploy` dentro del build se ejecuta como `serviceAccount:303244958634-compute@developer.gserviceaccount.com`. Tipo: CLOUD_BUILD_SA. Confirmar otra vez el principal real al comenzar ejecución; si cambió, detenerse y recalcular el binding. La configuración frontend fija `fgreda-web-runtime@cotizador-greda.iam.gserviceaccount.com` y verifica esa identidad en la revisión. NEW_FRONTEND_WILL_USE_DEFAULT_COMPUTE_SA=NO. La remediación global de los roles antiguos de Compute queda como hardening posterior; no retirar esos roles en esta fase.
+
 
 Comandos futuros, aún no aplicados:
 
@@ -71,7 +72,7 @@ gcloud iam service-accounts create fgreda-web-runtime \
 gcloud iam service-accounts add-iam-policy-binding \
   fgreda-web-runtime@cotizador-greda.iam.gserviceaccount.com \
   --project=cotizador-greda \
-  --member='serviceAccount:<CLOUD_BUILD_DEPLOYER_SA>' \
+  --member='serviceAccount:303244958634-compute@developer.gserviceaccount.com' \
   --role=roles/iam.serviceAccountUser
 ```
 
@@ -142,9 +143,35 @@ El nombre antiguo `before-0028` no cuenta como respaldo 010P. Este job aún no s
 | Cloud Build triggers | Podrían iniciar pipelines | No observado | `0` triggers en el proyecto; builds/pipelines del release son manuales |
 | GitHub Actions frontend E2E | Sí antes de este cambio, vía API E2E | PR/crontab antes de este cambio | En la rama local queda manual con confirmación; necesita PR/merge para regir en GitHub |
 | GitHub Actions E2E de revisión | Solo PostgreSQL efímero | PR/push | No producción; permanece como gate |
-| Cloud Scheduler / Cloud Tasks | Podrían activar jobs si estuviesen configurados | Desconocido | API Cloud Scheduler y Cloud Tasks no aparecen habilitadas. No habilitarlas durante prep. No se pudo listar Scheduler jobs con API apagada |
+| Cloud Scheduler | Podría invocar jobs si estuviera activo | No mientras API disabled | API deshabilitada; no se listan jobs ni se necesita afirmar que no existen |
+| Cloud Tasks | No se observó path de migración | No observado | API deshabilitada |
 
-Se buscaron invocaciones de `bgreda-db-migrate`, `gcloud run jobs execute`, Cloud Scheduler/Tasks y cron en configuración, scripts, docs y workflows locales; no hay path automático visible. Por la imposibilidad de consultar Scheduler sin habilitar su API, **AUTOMATIC_MIGRATION_PATH queda UNKNOWN**, no `NO`. Gate 2 debe resolver esta incógnita mediante inventario autorizado de Cloud Scheduler (o confirmación autoritativa de que el proyecto no tiene jobs) antes de migrar.
+Verificado el 2026-09-30 con `gcloud services list --project=cotizador-greda --enabled --filter='config.name:cloudscheduler.googleapis.com' --format='value(config.name)'`: no devuelve el servicio. Cloud Build triggers: 0. Cloud Tasks API: disabled. No se encontró migración de startup. `bgreda-db-migrate` es manual. Por tanto `AUTOMATIC_MIGRATION_PATH=NO_WHILE_SCHEDULER_API_DISABLED`; esta conclusión depende de que Scheduler permanezca deshabilitado durante toda la ventana.
+
+Audit logs Admin Activity consultados con el filtro documentado por Google para `cloudscheduler.googleapis.com` y `operation.producer="serviceusage.googleapis.com"` desde 2025-08-26 hasta 2026-09-30: no se encontraron eventos de transición. `SCHEDULER_LAST_DISABLE=UNKNOWN` (el evento exacto no aparece en la ventana consultada; no inventar fecha) y `SCHEDULER_ENABLE_AFTER_DISABLE=NO (no se observó evento en la ventana consultada)`. El estado actual sí está verificado como disabled. Google documenta que jobs dejan de ejecutarse mientras Scheduler API está disabled, y que al reactivarla pueden ejecutarse inmediatamente jobs omitidos ([programación de jobs](https://docs.cloud.google.com/scheduler/docs/configuring/cron-job-schedules), [troubleshooting](https://docs.cloud.google.com/scheduler/docs/troubleshooting?hl=en)).
+
+## Guard de Scheduler API para 010P
+
+Política: `CLOUD_SCHEDULER_API_MUST_REMAIN_DISABLED=YES` desde preflight hasta completar los 30 minutos de observabilidad. No habilitar la API durante esta fase ni el release. Si una comprobación devuelve ENABLED, `ABORT_RELEASE` antes de nuevas escrituras/migración cuando sea posible; no intentar corregir el estado modificando Service Usage desde esta ventana.
+
+Ejecutar el guard en preflight, inmediatamente antes de migration, después de deploy y después de 30 minutos de observabilidad:
+
+~~~bash
+assert_scheduler_disabled() {
+  local enabled
+  if ! enabled="$(gcloud services list --project=cotizador-greda --enabled --filter='config.name:cloudscheduler.googleapis.com' --format='value(config.name)')"; then
+    printf 'ABORT_RELEASE: unable to verify Cloud Scheduler API state\n' >&2
+    return 1
+  fi
+  if [[ -n "$enabled" ]]; then
+    printf 'ABORT_RELEASE: Cloud Scheduler API is ENABLED: %s\n' "$enabled" >&2
+    return 1
+  fi
+  printf 'CLOUD_SCHEDULER_API=DISABLED\n'
+}
+~~~
+
+Cada punto de control debe guardar timestamp UTC y salida de la comprobación como evidencia local. No habilitar Scheduler al terminar esta fase.
 
 ## Maintenance lock y drenaje
 
@@ -201,7 +228,65 @@ Después de migrar, exigir `alembic_head=0045`, `all_invariants_zero=true` y tod
 
 ## Orden controlado y comandos de tráfico
 
-Orden recomendado para que el respaldo sea el último estado estable: (1) revisar PRs/CI, capturar revisiones, tráfico, policies, digest y plan; (2) probar principal release y aplicar API lock; (3) drenar; (4) actualizar el job de backup a digest y ejecutarlo una sola vez desde 0041; (5) revisar manifest/dump; (6) actualizar `bgreda-db-migrate` a digest backend 010P y ejecutar manualmente 0041→0045; (7) verificar Alembic 0045 e invariantes; (8) ejecutar el script de candidato backend, verificar por tag y hacer smoke autenticado read-only; (9) cambio manual backend; (10) validar frontend candidate con su SA y smoke estático; (11) cambio manual frontend; (12) restaurar acceso invoker público según snapshot; (13) login y smoke de lectura; (14) observar errores, latencia, auth y DB por 30 minutos. Si cualquier gate falla, detenerse en la ventana y preservar el lock.
+Orden certificado para la futura ejecución; ningún paso se ejecutó en este cierre:
+
+A. PUBLICATION
+1. Publicar las ramas backend y frontend.
+2. Abrir ambos PRs contra `main`.
+3. Revisar los required checks del SHA de cada PR; todos deben estar verdes.
+4. Si hay fallo, detenerse sin merge ni cambios productivos.
+5. Squash merge según convención vigente y capturar los dos merge SHAs. Evaluar conflictos y comprobar que `origin/main` no introdujo cambios incompatibles.
+
+B. BUILD
+6. Construir imágenes desde cada merge SHA con etiqueta `p010p-<SHA completo>`.
+7. Capturar los digests inmutables backend y frontend.
+8. Verificar en la imagen backend un único Alembic head `0045`. Desde este punto, deploy y migration job usan digest.
+
+C. SECURITY PREP
+9. Crear `fgreda-web-runtime`.
+10. Conceder `roles/iam.serviceAccountUser` sobre esa SA solamente al deployer confirmado: `serviceAccount:303244958634-compute@developer.gserviceaccount.com`, si sigue siendo la identidad real. No otorgar roles runtime a la SA frontend.
+
+D. PREFLIGHT
+11. Ejecutar `assert_scheduler_disabled`; detenerse si falla.
+12. Confirmar que no apareció un path automático de migración y capturar configuración, tráfico, revisiones e IAM productivos.
+
+E. MAINTENANCE
+13. Aplicar el lock IAM público de API después de guardar snapshots.
+14. Verificar denegación anónima y acceso de la identidad autorizada de smoke.
+15. Drenar y demostrar ausencia de solicitudes/actividad de escritura.
+
+F. BACKUP
+16. Confirmar DB en `0041`.
+17. Actualizar el job de backup al artefacto preparado por digest y crear un backup fresco.
+18. Validar manifest, tamaño, SHA256, pg_restore list y TOC. Si falta cualquier evidencia, abortar antes de migration.
+
+G. MIGRATION
+19. Ejecutar de nuevo `assert_scheduler_disabled`.
+20. Fijar `bgreda-db-migrate` al digest backend 010P y verificar head de imagen `0045`.
+21. Ejecutar manualmente `0041→0045`.
+22. Confirmar Alembic `0045` y todas las invariantes en cero.
+
+H. BACKEND
+23. Desplegar backend por digest sin tráfico.
+24. Hacer smoke autenticado read-only.
+25. Cambiar tráfico backend manualmente y verificar la revisión.
+
+I. FRONTEND
+26. Desplegar frontend por digest sin tráfico y con la runtime SA dedicada.
+27. Bajo lock, probar carga y `/runtime-config.js`; verificar identidad de revisión. El smoke autenticado y la conectividad UI→API se completan después del unlock porque Nginx no presenta identidad Cloud Run.
+28. Cambiar tráfico frontend manualmente y verificar la revisión.
+
+J. OPEN
+29. Mantener API locked hasta frontend listo, routeado y verificado.
+30. Restaurar invocación pública según snapshot y comprobar el servicio.
+
+K. VALIDATION
+31. Ejecutar smoke de producción solo de lectura.
+32. Observar errores, latencia, auth y DB por 30 minutos.
+33. Ejecutar `assert_scheduler_disabled` nuevamente y guardar salida/UTC.
+34. Cerrar manifest, digests, revisiones, evidencia y registrar las etiquetas de imagen `p010p-<SHA>` creadas en BUILD. La creación/publicación de un Git tag no forma parte de este cierre.
+
+Si cualquier gate falla, parar y mantener el lock cuando ya se haya aplicado. No desplegar backend 010P antes de DB 0045: `NEW_BACKEND + OLD_DB = UNSAFE`. El backup se toma después del lock y drain para que represente el último estado write-free consistente.
 
 Los scripts solo preparan candidatos. Cuando el release gate autorice cutover, operador ejecuta, usando nombres de revisión exactos devueltos por VERIFY:
 
@@ -219,6 +304,10 @@ Rollback antes de DB: abortar y restaurar policy/traffic capturados. Si la migra
 
 Una vez disponible todo el paquete candidato, probar la revisión frontend/backend con no-traffic, sin cambiar asignaciones de tráfico. El smoke bajo lock se limita a la API autenticada y frontend estático por la limitación de identidad Nginx descrita arriba. La ruta frontend→API se verifica con cuenta aprobada inmediatamente después del unlock.
 
-## Bloqueo pendiente para Gate 2
+## Clasificación de readiness
 
-La API de Cloud Scheduler está deshabilitada y no se habilitó para esta auditoría. Cero triggers Cloud Build, ausencia de referencia a ejecutar `bgreda-db-migrate` en código/config local, y Cloud Tasks no habilitado son evidencias favorables, pero no permiten afirmar ausencia de Scheduler jobs. Resolverlo por canal autorizado antes de autorizar la ventana; mientras siga sin inventario, `AUTOMATIC_MIGRATION_PATH=UNKNOWN` y `READY_FOR_RELEASE_GATE_2=NO`.
+PREP_BLOCKERS=NONE. El riesgo de Scheduler queda controlado por una condición observable: API actualmente deshabilitada, guard repetido en preflight, antes de migration, después de deploy y después de 30 minutos de observación. El timestamp histórico exacto de deshabilitación no está disponible en los audit logs consultados; no se inventa.
+
+PR_CI_CLASSIFICATION=EXECUTION_PRECONDITION: no hay PR/CI porque publicar las ramas está prohibido durante prep. EXECUTION_GATE_1 exige push backend/frontend, ambos PRs, todos los checks requeridos verdes y detenerse si falla cualquiera.
+
+READY_FOR_RELEASE_EXECUTION=YES: se puede autorizar el inicio de Gate 1. Esto no autoriza saltar PR/CI, el preflight, la ventana de mantenimiento ni ninguno de los gates productivos anteriores. La ejecución no puede avanzar a cambios productivos hasta que todos los requisitos de su etapa estén verificados.
