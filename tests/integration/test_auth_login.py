@@ -32,6 +32,7 @@ async def test_login_valido_devuelve_usuario_y_abre_sesion(client: httpx.AsyncCl
         "email": TEST_EMAIL,
         "display_name": "Administrador",
         "role": "ADMIN",
+        "capabilities": [],
     }
 
 

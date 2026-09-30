@@ -26,17 +26,17 @@ jobs:
         env:
           POSTGRES_USER: greda
           POSTGRES_PASSWORD: greda
-          POSTGRES_DB: greda_ci
+          POSTGRES_DB: greda_ci_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U greda"
+          --health-cmd "pg_isready -U greda -d greda_ci_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
 
     env:
-      TEST_DATABASE_URL: postgresql://greda:greda@localhost:5432/greda_ci
+      TEST_DATABASE_URL: postgresql://greda:greda@localhost:5432/greda_ci_test
 
     steps:
       - uses: actions/checkout@v4
@@ -153,6 +153,7 @@ jobs:
           configs = {
               "cloudbuild.yaml": ["steps", "images", "options", "timeout"],
               "cloudbuild.migrate.yaml": ["steps", "options", "timeout"],
+              "cloudbuild.backup.yaml": ["steps", "images", "options", "timeout"],
           }
 
           errors = []
@@ -172,12 +173,25 @@ jobs:
                       errors.append(f"{filename}: falta campo requerido '{key}'")
 
               steps = data.get("steps", [])
+              serialized = yaml.dump(data).lower()
+              for forbidden in ("main-latest", "p007", "update-traffic"):
+                  if forbidden in serialized:
+                      errors.append(f"{filename}: contiene referencia prohibida '{forbidden}'")
               for i, step in enumerate(steps):
                   if "name" not in step:
                       errors.append(f"{filename}: step[{i}] sin 'name'")
                   if "args" not in step and "entrypoint" not in step:
                       errors.append(f"{filename}: step[{i}] sin 'args' ni 'entrypoint'")
 
+              if filename == "cloudbuild.yaml":
+                  if "--no-traffic" not in serialized or "--image=" not in serialized or "sha256:" not in serialized:
+                      errors.append("cloudbuild.yaml: backend debe desplegar por digest con --no-traffic")
+              if filename == "cloudbuild.migrate.yaml":
+                  if "_image_digest" not in serialized or "0045" not in serialized:
+                      errors.append("cloudbuild.migrate.yaml: migration image debe fijarse por digest y exigir head 0045")
+              if filename == "cloudbuild.backup.yaml":
+                  if "gcloud run jobs execute" in serialized or "database_url" in serialized:
+                      errors.append("cloudbuild.backup.yaml: build-only pipeline no debe ejecutar job ni recibir DB URL")
               print(f"  {filename}: OK ({len(steps)} steps)")
 
           if errors:
@@ -189,7 +203,7 @@ jobs:
 
       - name: Verificar scripts de deploy — sintaxis bash
         run: |
-          for script in scripts/deploy-backend.sh scripts/smoke-production.sh; do
+          for script in scripts/deploy-backend.sh scripts/backup-010p.sh scripts/smoke-production.sh; do
             if [ ! -f "$script" ]; then
               echo "ERROR: $script no encontrado"
               exit 1

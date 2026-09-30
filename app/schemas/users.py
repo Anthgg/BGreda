@@ -11,7 +11,7 @@ Estos esquemas juntan las dos mitades para la pantalla y no exponen nada mas.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -20,6 +20,7 @@ from app.models.profile import UserRole
 #: El limite de la columna. Se repite aqui para rechazar en el borde y no en la
 #: base: un 422 explica que pasa, un error de integridad no.
 NOMBRE_MAXIMO = 120
+QuickCreateCapability = Literal["MASTERS_QUICK_CREATE"]
 
 
 def _nombre_limpio(valor: str) -> str:
@@ -48,6 +49,7 @@ class UserOut(BaseModel):
     email: str | None = None
     role: UserRole
     active: bool
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class UserPage(BaseModel):
@@ -72,12 +74,13 @@ class UserCreateIn(BaseModel):
 
 
 class UserUpdateIn(BaseModel):
-    """Edicion de identidad y rol. El correo no se toca en esta fase."""
+    """Edicion admin de identidad, rol y capacidad. El correo no se toca."""
 
     model_config = ConfigDict(extra="forbid")
 
     display_name: Annotated[str | None, Field(default=None, max_length=NOMBRE_MAXIMO)] = None
     role: UserRole | None = None
+    capabilities: list[QuickCreateCapability] | None = None
 
     @field_validator("display_name")
     @classmethod

@@ -31,11 +31,12 @@ from app.models.prototypes import Prototype
 from app.services.inventory import InventoryService, OrphanPrototypeMovementError
 from tests.db.conftest import TEST_EMAIL, TEST_PASSWORD, authenticate
 from tests.db.test_production_orders_api import (
-    ORDERS,
+    arrancar_orden,
     confirmar,
     crear_orden,
     dar_existencia,
     escenario,
+    lotes_del_escenario,
     pagar,
 )
 from tests.db.test_prototypes import (
@@ -93,7 +94,11 @@ async def _fabricar_muestra(api: httpx.AsyncClient, csrf: str, prototipo_id: int
     """Deja la muestra en COMPLETED, que es cuando se puede decidir sobre ella."""
     arrancada = await api.post(f"{PROTOTYPES}/{prototipo_id}/start", headers=head(csrf))
     assert arrancada.status_code == 200, arrancada.text
-    completada = await api.post(f"{PROTOTYPES}/{prototipo_id}/complete", headers=head(csrf))
+    completada = await api.post(
+        f"{PROTOTYPES}/{prototipo_id}/complete",
+        json={"started_quantity": 1, "good_quantity": 0, "scrap_quantity": 1},
+        headers=head(csrf),
+    )
     assert completada.status_code == 200, completada.text
 
 
@@ -109,7 +114,12 @@ async def test_16_una_muestra_sin_decidir_para_la_produccion(
     await _fabricar_muestra(api, admin_csrf, datos["prototipo"]["id"])
     foto = await _foto(db_session)
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 409, arranque.text
     assert arranque.json()["error"]["code"] == "PRODUCTION_ORDER_PROTOTYPE_NOT_APPROVED"
@@ -134,7 +144,12 @@ async def test_17_una_muestra_rechazada_para_la_produccion(
     )
     assert rechazo.status_code == 200, rechazo.text
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 409, arranque.text
     assert arranque.json()["error"]["code"] == "PRODUCTION_ORDER_PROTOTYPE_NOT_APPROVED"
@@ -157,7 +172,12 @@ async def test_18_aprobada_deja_pasar_el_guardia(
     )
     assert aprobacion.status_code == 200, aprobacion.text
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 200, arranque.text
     assert arranque.json()["status"] == "STARTED"
@@ -196,7 +216,12 @@ async def test_19_una_rechazada_con_sucesora_aprobada_deja_de_bloquear(
     await _fabricar_muestra(api, admin_csrf, segunda)
     await api.post(f"{PROTOTYPES}/{segunda}/approve", json={}, headers=head(admin_csrf))
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 200, arranque.text
     # Y la rechazada sigue rechazada: un rechazo es un hecho, no se reescribe.
@@ -219,7 +244,12 @@ async def test_20_una_rechazada_con_sucesora_sin_decidir_sigue_bloqueando(
     )
     assert sucesora.status_code == 201, sucesora.text
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 409, arranque.text
     assert arranque.json()["error"]["code"] == "PRODUCTION_ORDER_PROTOTYPE_NOT_APPROVED"
@@ -237,7 +267,12 @@ async def test_21_una_muestra_anulada_no_condena_al_pedido(
     """
     datos = await _pedido_con_muestra(api, admin_csrf, db_session, suffix="_canc")
 
-    bloqueado = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    bloqueado = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert bloqueado.status_code == 409, bloqueado.text
 
     anulada = await api.post(
@@ -245,7 +280,12 @@ async def test_21_una_muestra_anulada_no_condena_al_pedido(
     )
     assert anulada.status_code == 200, anulada.text
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(datos["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 200, arranque.text
     assert arranque.json()["status"] == "STARTED"
@@ -270,13 +310,21 @@ async def test_22_la_muestra_de_un_pedido_no_bloquea_otro(
     assert orden_b.status_code == 201, orden_b.text
 
     # La muestra de A esta sin decidir y bloquea A...
-    bloqueado = await api.post(
-        f"{ORDERS}/{con_muestra['orden']['id']}/start", headers=head(admin_csrf)
+    bloqueado = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(con_muestra["orden"]["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(con_muestra),
     )
     assert bloqueado.status_code == 409, bloqueado.text
 
     # ...y no tiene nada que decir sobre B.
-    arranque = await api.post(f"{ORDERS}/{orden_b.json()['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden_b.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(otros),
+    )
     assert arranque.status_code == 200, arranque.text
 
 
@@ -583,7 +631,12 @@ async def test_regresion_una_cotizacion_sin_muestra_produce_como_siempre(
     )
     assert orden.status_code == 201, orden.text
 
-    arranque = await api.post(f"{ORDERS}/{orden.json()['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 200, arranque.text
     assert arranque.json()["status"] == "STARTED"
@@ -606,7 +659,12 @@ async def test_regresion_el_guardia_de_pago_sigue_mandando_primero(
     )
     assert orden.status_code == 201, orden.text
 
-    arranque = await api.post(f"{ORDERS}/{orden.json()['id']}/start", headers=head(admin_csrf))
+    arranque = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(orden.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
 
     assert arranque.status_code == 409, arranque.text
     assert arranque.json()["error"]["code"] == "PRODUCTION_ORDER_QUOTATION_NOT_PAID"

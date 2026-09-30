@@ -403,9 +403,14 @@ class TestBarreraDelBackend:
             headers=h(admin_csrf),
         )
         despues = (await api.get(f"{V2}/{qid}/labor")).json()["items"]
-        assert [(t["technique_id"], t["labor_cost"], t["hourly_rate"]) for t in despues] == [
-            (t["technique_id"], t["labor_cost"], t["hourly_rate"]) for t in antes
-        ]
+
+        def _huella(tareas: list[dict[str, Any]]) -> list[tuple[Any, Decimal, Decimal]]:
+            return [
+                (t["technique_id"], Decimal(t["labor_cost"]), Decimal(t["hourly_rate"]))
+                for t in tareas
+            ]
+
+        assert _huella(despues) == _huella(antes)
         r = await cargar(api, admin_csrf, qid, worker["id"])
         assert r.status_code == 409
 

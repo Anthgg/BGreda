@@ -104,6 +104,13 @@ class V2SettingsUpdateIn(BaseModel):
     default_customer_kind: V2CustomerKind | None = None
     retail_kiln_id: int | None = Field(default=None, ge=1)
     wholesale_kiln_id: int | None = Field(default=None, ge=1)
+    #: Fase 010P. Unidades del pedido ENTERO por encima de las cuales se
+    #: sugiere por mayor. Nulo lo retira: sin umbral no hay sugerencia.
+    wholesale_quantity_threshold: int | None = Field(default=None, ge=1, le=10_000_000)
+    #: Trabajador por defecto de por menor (INTERNO) y de por mayor (EXTERNO).
+    #: Nulo lo retira.
+    retail_default_worker_id: int | None = Field(default=None, ge=1)
+    wholesale_default_worker_id: int | None = Field(default=None, ge=1)
 
     low_fire_enabled_default: bool | None = None
     high_fire_enabled_default: bool | None = None
@@ -142,6 +149,10 @@ class V2SettingsOut(BaseModel):
     default_customer_kind: V2CustomerKind
     retail_kiln_id: int | None
     wholesale_kiln_id: int | None
+    #: Fase 010P.
+    wholesale_quantity_threshold: int | None = None
+    retail_default_worker_id: int | None = None
+    wholesale_default_worker_id: int | None = None
     low_fire_enabled_default: bool
     high_fire_enabled_default: bool
     illustration_daily_rate: Decimal

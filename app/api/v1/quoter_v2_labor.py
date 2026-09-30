@@ -14,9 +14,9 @@ Tres grupos de rutas, separados porque son tres cosas distintas:
 Porque el jornal de una persona es informacion de su remuneracion. El resto del
 Cotizador V2 ya era solo de administracion desde 010A, y abrir estos maestros a
 todo el taller para «poder seleccionar» expondria cuanto cobra cada companero.
-Quien cotiza en V2 es administrador, asi que la separacion que pide la fase
-—cotizar no autoriza a cambiar maestros— se cumple sin necesidad de ensanchar
-quien ve los sueldos.
+Quien cotiza en V2 es administrador. OPERATOR con `MASTERS_QUICK_CREATE` puede
+consultar tecnicas para preparar altas, pero la lista de trabajadores y sus
+jornales sigue reservada a administradores.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
 
-from app.api.deps import AdminUserDep, DbSessionDep, V2LaborServiceDep
+from app.api.deps import AdminUserDep, DbSessionDep, MastersQuickCreateDep, V2LaborServiceDep
 from app.core.quoter_v2_labor import units_per_hour
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct
 from app.models.quoter_v2_labor import V2QuotationLabor, V2Technique, V2Worker
@@ -110,6 +110,7 @@ def _labor_out(fila: V2QuotationLabor, warnings: list[str]) -> V2LaborOut:
         hours_overridden=fila.hours_overridden,
         is_additional_personnel=fila.is_additional_personnel,
         labor_cost=fila.labor_cost,
+        assignment_origin=str(fila.assignment_origin),
         warnings=warnings,
     )
 
@@ -170,10 +171,10 @@ async def list_v2_workers(
 async def create_v2_worker(
     payload: V2WorkerCreateIn,
     service: V2LaborServiceDep,
-    admin: AdminUserDep,
+    user: MastersQuickCreateDep,
     session: DbSessionDep,
 ) -> V2WorkerOut:
-    worker = await service.create_worker(payload.model_dump(), user=admin)
+    worker = await service.create_worker(payload.model_dump(), user=user)
     jornada = await service.resolve_workday_hours(worker)
     capacidades = await service.capacities_of([worker.id])
     resultado = _worker_out(
@@ -214,7 +215,7 @@ async def update_v2_worker(
 @router.get("/quoter-v2/techniques", response_model=V2TechniquePage)
 async def list_v2_techniques(
     service: V2LaborServiceDep,
-    _: AdminUserDep,
+    _: MastersQuickCreateDep,
     active_only: Annotated[bool, Query()] = False,
 ) -> V2TechniquePage:
     jornada = await service.global_workday_hours()
@@ -228,10 +229,10 @@ async def list_v2_techniques(
 async def create_v2_technique(
     payload: V2TechniqueCreateIn,
     service: V2LaborServiceDep,
-    admin: AdminUserDep,
+    user: MastersQuickCreateDep,
     session: DbSessionDep,
 ) -> V2TechniqueOut:
-    tecnica = await service.create_technique(payload.model_dump(), user=admin)
+    tecnica = await service.create_technique(payload.model_dump(), user=user)
     resultado = _technique_out(tecnica, await service.global_workday_hours())
     await session.commit()
     return resultado

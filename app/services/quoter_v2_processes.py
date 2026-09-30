@@ -40,7 +40,11 @@ from app.core.errors import APIError
 from app.core.quoter_v2_labor import hours_required, quantize_hours
 from app.models.audit import AuditAction
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
-from app.models.quoter_v2_labor import V2QuotationLabor, V2Technique
+from app.models.quoter_v2_labor import (
+    V2LaborAssignmentOrigin,
+    V2QuotationLabor,
+    V2Technique,
+)
 from app.models.quoter_v2_processes import (
     V2ProcessOrigin,
     V2ProductTechnique,
@@ -53,6 +57,8 @@ from app.services.quoter_v2_labor import (
     V2LaborQuotationNotEditableError,
     V2LaborService,
 )
+from app.services.quoter_v2_pricing import refresh_pricing
+from app.services.quoter_v2_settings import V2SettingsService
 
 ZERO = Decimal(0)
 
@@ -242,7 +248,9 @@ class V2ProcessService:
             hours_required(proceso.quantity, tecnica.default_capacity_per_workday, jornada)
         )
 
-    async def generate_for_line(self, linea: V2QuotationProduct) -> list[str]:
+    async def generate_for_line(
+        self, linea: V2QuotationProduct, *, user: AuthenticatedUser | None = None
+    ) -> list[str]:
         """Crea los procesos que la pieza de catalogo pide para esta linea.
 
         Se llama al anadir la linea y al cambiarle el producto. No resucita lo
@@ -282,6 +290,7 @@ class V2ProcessService:
         )
 
         avisos: list[str] = []
+        nuevos: list[V2QuotationProcess] = []
         for fila in requeridas:
             if fila.technique_id in existentes:
                 # Ya esta, o alguien la quito a proposito. Ninguna de las dos
@@ -292,18 +301,20 @@ class V2ProcessService:
                 # quitarla a mano en cada cotizacion nueva.
                 avisos.append(WARN_TECHNIQUE_INACTIVE)
                 continue
-            self._session.add(
-                V2QuotationProcess(
-                    v2_quotation_id=linea.v2_quotation_id,
-                    v2_quotation_product_id=linea.id,
-                    technique_id=fila.technique_id,
-                    sort_order=fila.sort_order,
-                    origin=V2ProcessOrigin.PRODUCT,
-                    quantity=Decimal(linea.quantity),
-                    quantity_overridden=False,
-                )
+            nuevo = V2QuotationProcess(
+                v2_quotation_id=linea.v2_quotation_id,
+                v2_quotation_product_id=linea.id,
+                technique_id=fila.technique_id,
+                sort_order=fila.sort_order,
+                origin=V2ProcessOrigin.PRODUCT,
+                quantity=Decimal(linea.quantity),
+                quantity_overridden=False,
             )
+            self._session.add(nuevo)
+            nuevos.append(nuevo)
         await self._session.flush()
+        if user is not None:
+            avisos += await self.assign_default_worker(linea.v2_quotation_id, nuevos, user=user)
         return avisos
 
     async def sync_quantity(self, linea: V2QuotationProduct, *, user: AuthenticatedUser) -> None:
@@ -466,7 +477,70 @@ class V2ProcessService:
             metadata={"quotation_id": str(quotation_id), "technique": tecnica.name},
         )
         await self._session.flush()
-        return proceso, []
+        avisos = await self.assign_default_worker(quotation_id, [proceso], user=user)
+        return proceso, avisos
+
+    async def assign_default_worker(
+        self,
+        quotation_id: int,
+        procesos: list[V2QuotationProcess],
+        *,
+        user: AuthenticatedUser,
+    ) -> list[str]:
+        """Pone al trabajador por defecto del tipo de pedido en procesos sin nadie.
+
+        Fase 010P, decision 4. La asignacion nace DEFAULT: aceptar «Por mayor»
+        podra cambiarla despues, y cualquier eleccion de una persona la vuelve
+        MANUAL. Solo si la persona sabe la tecnica: nunca a ciegas. Sin
+        trabajador por defecto configurado (o dado de baja) no pasa nada.
+        """
+        if not procesos:
+            return []
+        quotation = await self._draft(quotation_id)
+        trabajador = await V2SettingsService(self._session, self._audit).default_worker_for(
+            quotation.production_type
+        )
+        if trabajador is None:
+            return []
+        process_ids = [proceso.id for proceso in procesos if proceso.removed_at is None]
+        if not process_ids:
+            return []
+        asignados = set(
+            (
+                await self._session.scalars(
+                    select(V2QuotationLabor.v2_quotation_process_id).where(
+                        V2QuotationLabor.v2_quotation_process_id.in_(process_ids)
+                    )
+                )
+            ).all()
+        )
+        capacidades = await self._labor.capacities_of([trabajador.id])
+        tecnicas_habilitadas = set(capacidades.get(trabajador.id, []))
+        avisos: list[str] = []
+        hubo_asignaciones = False
+        for proceso in procesos:
+            if proceso.removed_at is not None or proceso.id in asignados:
+                continue
+            if proceso.technique_id not in tecnicas_habilitadas:
+                continue
+            _, avisos_tarea = await self._labor.add_labor(
+                quotation_id,
+                {
+                    "v2_quotation_process_id": proceso.id,
+                    "v2_quotation_product_id": proceso.v2_quotation_product_id,
+                    "worker_id": trabajador.id,
+                    "technique_id": proceso.technique_id,
+                    "quantity": proceso.quantity,
+                    "assignment_origin": V2LaborAssignmentOrigin.DEFAULT,
+                },
+                user=user,
+                recalcular=False,
+            )
+            avisos += avisos_tarea
+            hubo_asignaciones = True
+        if hubo_asignaciones:
+            avisos += await refresh_pricing(self._session, quotation)
+        return avisos
 
     async def set_quantity(
         self, quotation_id: int, process_id: int, quantity: Decimal, *, user: Any

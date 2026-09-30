@@ -89,6 +89,8 @@ class PrototypeMaterialIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_id: int = Field(gt=0)
+    #: Lote explícito cuando el material consumible es PREPARED_MATERIAL.
+    preparation_id: int | None = Field(default=None, gt=0)
     #: En la unidad base del material. La conversion no se inventa aqui: si el
     #: producto se lleva en gramos, la cantidad son gramos.
     quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
@@ -172,6 +174,7 @@ class PrototypeMaterialOut(BaseModel):
 
     id: int
     product_id: int
+    preparation_id: int | None = None
     sort_order: int
     product_name: str
     product_internal_reference: str
@@ -239,6 +242,28 @@ class PrototypeSummaryOut(BaseModel):
     material_count: int
 
 
+class PrototypeCompleteIn(BaseModel):
+    """Resultado físico obligatorio al cerrar una muestra nueva."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    started_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    good_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    scrap_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    scrap_reason: str | None = Field(default=None, max_length=240)
+
+
+class PrototypeProductionResultOut(BaseModel):
+    prototype_id: int
+    product_id: int | None
+    started_quantity: Decimal
+    good_quantity: Decimal
+    scrap_quantity: Decimal
+    scrap_reason: str | None
+    recorded_by_name: str | None
+    recorded_at: datetime
+
+
 class PrototypeOriginQuotationOut(BaseModel):
     """Una cotizacion nacida de esta muestra."""
 
@@ -279,6 +304,7 @@ class PrototypeOut(PrototypeSummaryOut):
     #: un dato que el listado no pinta.
     production_order_id: int | None = None
     production_order_code: str | None = None
+    production_result: PrototypeProductionResultOut | None = None
 
 
 class PrototypePage(BaseModel):

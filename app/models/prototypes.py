@@ -42,6 +42,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -330,6 +331,9 @@ class PrototypeMaterialLine(Base, TimestampMixin):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    preparation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipe_preparations.id", ondelete="RESTRICT"), index=True
+    )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     #: Lo que se AUTORIZO gastar. Es lo que el arranque intenta descontar.
@@ -384,3 +388,32 @@ class PrototypeMaterialLine(Base, TimestampMixin):
     )
 
     prototype: Mapped[Prototype] = relationship("Prototype", back_populates="lines")
+
+
+class PrototypeProductionResult(Base):
+    """Resultado físico de un cierre directo de prototipo 010P."""
+
+    __tablename__ = "prototype_results"
+
+    prototype_id: Mapped[int] = mapped_column(
+        ForeignKey("prototypes.id", ondelete="RESTRICT"), primary_key=True
+    )
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"))
+    started_quantity: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
+    good_quantity: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
+    scrap_quantity: Mapped[Decimal] = mapped_column(stock_quantity_numeric(), nullable=False)
+    scrap_reason: Mapped[str | None] = mapped_column(String(240))
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    recorded_by_name: Mapped[str | None] = mapped_column(String(120))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("started_quantity >= 0", name="started_non_negative"),
+        CheckConstraint("good_quantity >= 0", name="good_non_negative"),
+        CheckConstraint("scrap_quantity >= 0", name="scrap_non_negative"),
+        CheckConstraint(
+            "good_quantity + scrap_quantity = started_quantity", name="result_matches_started"
+        ),
+    )

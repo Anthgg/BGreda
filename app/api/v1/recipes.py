@@ -304,6 +304,7 @@ async def create_recipe_preparation(
     preparation, created = await service.prepare(
         recipe_version_id=payload.recipe_version_id,
         location_id=payload.location_id,
+        preparation_lots_by_component_id=payload.preparation_lots_by_component_id,
         total_dry_weight_g=payload.total_dry_weight_g,
         water_amount_ml=payload.water_amount_ml,
         final_yield_ml=payload.final_yield_ml,

@@ -1,0 +1,47 @@
+{
+  "alembic_head": "0045",
+  "dataset": "synthetic local pre-010P migration fixture",
+  "lots": [
+    {
+      "location_id": 1,
+      "preparation_id": 1,
+      "product_id": 2,
+      "quantity": "165.000000000000"
+    },
+    {
+      "location_id": 1,
+      "preparation_id": 2,
+      "product_id": 3,
+      "quantity": "200.000000000000"
+    }
+  ],
+  "migration_path": "0041 -> 0042 -> 0043 -> 0044 -> 0045",
+  "rows": [
+    {
+      "affected_movements": [
+        1,
+        2,
+        4
+      ],
+      "aggregate_balance": "165.000000000000",
+      "difference": "0E-12",
+      "location_id": 1,
+      "product_id": 2,
+      "reconstructed_lot_balance": "165.000000000000",
+      "status": "RECONCILED"
+    },
+    {
+      "affected_movements": [
+        3
+      ],
+      "aggregate_balance": "200.000000000000",
+      "difference": "0E-12",
+      "location_id": 1,
+      "product_id": 3,
+      "reconstructed_lot_balance": "200.000000000000",
+      "status": "RECONCILED"
+    }
+  ],
+  "status": "PASS",
+  "unreconciled_rows": 0
+}

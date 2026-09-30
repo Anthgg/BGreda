@@ -32,6 +32,10 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+#: Fase 010P. Topes de entrada: sin ellos un error de tecleo llegaria al CHECK.
+MAX_HOURLY_COST = Decimal("1000000")
+MAX_PASSIVE_HOURS = Decimal("100000")
+
 
 class V2PricingIn(BaseModel):
     """La unica decision de esta superficie: el factor comercial.
@@ -52,6 +56,24 @@ class V2PricingIn(BaseModel):
     #: subirlo desde Configuracion—. Poner aqui un 10 habria capado en silencio
     #: un maximo que el propio taller acabara de habilitar.
     commercial_factor: Decimal | None = Field(default=None, gt=0, le=1000)
+    #: Fase 010P. Costo de espacio por HORA acordado para ESTA cotizacion. Nulo
+    #: retira el acuerdo y vuelve el congelado al crear.
+    space_cost_per_hour_override: Decimal | None = Field(default=None, ge=0, le=MAX_HOURLY_COST)
+    #: Secado, espera... Solo se SUGIERE en precio; nunca suma a un costo.
+    passive_time_hours: Decimal | None = Field(default=None, ge=0, le=MAX_PASSIVE_HOURS)
+
+
+class V2ExternalWorkerOut(BaseModel):
+    """Un externo del pedido: su tarifa congelada, sus jornales y sus dos costos."""
+
+    worker_id: int
+    name: str | None = None
+    daily_rate: Decimal
+    workday_hours: Decimal
+    hourly_equivalent: Decimal
+    days_paid: int
+    commercial_cost: Decimal
+    real_cost: Decimal
 
 
 class V2PricingLineOut(BaseModel):
@@ -73,6 +95,11 @@ class V2PricingLineOut(BaseModel):
     #: Las dos bases de la linea. Una lleva la tarifa de quema; la otra, el gas.
     production_cost: Decimal
     real_cost: Decimal
+    #: Fase 010P. Su parte del personal externo del PEDIDO, repartida por peso
+    #: de minutos activos, y sus minutos activos.
+    external_commercial_cost: Decimal = Decimal(0)
+    external_real_cost: Decimal = Decimal(0)
+    line_active_minutes: Decimal | None = None
 
     #: `costo de produccion asignado x factor`, en moneda base.
     line_price: Decimal
@@ -144,6 +171,31 @@ class V2PricingOut(BaseModel):
     estimated_profit: Decimal
     #: Sobre el precio, no sobre el costo.
     effective_margin_percent: Decimal
+
+    # ---- Fase 010P: tiempo, personal externo, espacio y umbral -----------
+    #: 1 = reglas anteriores a 010P (lo emitido conserva su historia); 2 = 010P.
+    pricing_rules_version: int = 2
+    #: El MAXIMO de los minutos activos de las lineas (productos en paralelo).
+    active_production_minutes: Decimal = Decimal(0)
+    active_production_hours: Decimal = Decimal(0)
+    #: Lo que se imputa al cliente, lo que paga el taller y la diferencia. El
+    #: margen y la ganancia se miden contra el costo REAL.
+    commercial_external_labor_cost: Decimal = Decimal(0)
+    real_external_labor_cost: Decimal = Decimal(0)
+    labor_cost_gap: Decimal = Decimal(0)
+    external_workers: list[V2ExternalWorkerOut] = []
+    space_cost_per_hour_snapshot: Decimal | None = None
+    space_cost_per_hour_override: Decimal | None = None
+    effective_space_cost_per_hour: Decimal = Decimal(0)
+    #: Tiempo pasivo informado y lo que costaria considerarlo. NO esta en
+    #: ningun total: es una palanca para decidir el precio.
+    passive_time_hours: Decimal = Decimal(0)
+    passive_space_suggestion: Decimal = Decimal(0)
+    #: Umbral por mayor congelado, unidades del pedido y si se sugiere.
+    wholesale_threshold: int | None = None
+    total_units: int = 0
+    wholesale_suggested: bool = False
+    wholesale_suggestion_declined: bool = False
 
     lines: list[V2PricingLineOut]
     #: Lo que conviene mirar. Avisos, nunca bloqueos: un borrador a medias

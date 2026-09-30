@@ -32,6 +32,12 @@ MAX_UNIT_COST = Decimal("1000000")
 MAX_DIMENSION = Decimal("10000")
 
 
+#: Fase 010P. Tope del tiempo por pieza: la columna es NUMERIC(10, 2).
+MAX_PRODUCTION_MINUTES = Decimal("99999999.99")
+#: Tope de moldes simultaneos: sin el, un error de tecleo daria cero ciclos.
+MAX_MOLDS = 100_000
+
+
 class V2MaterialUpsertIn(BaseModel):
     """Los hechos de la adquisicion. El costo por unidad NO se manda: se deriva."""
 
@@ -131,6 +137,14 @@ class V2QuotationProductIn(BaseModel):
     glaze_cost_per_unit_override: Decimal | None = Field(default=None, ge=0, le=MAX_UNIT_COST)
     #: Fase 010H. Texto para el cliente: sale en la columna «Observacion» del PDF.
     client_observation: str | None = Field(default=None, max_length=500)
+    #: Fase 010P. Cuanto tarda UNA pieza, en MINUTOS (unidad canonica: la
+    #: pantalla muestra «1 h 30 min» o «7,5 h», la base guarda minutos). Nulo =
+    #: aun sin decidir, y la linea no se puede emitir.
+    production_time_per_unit_minutes: Decimal | None = Field(
+        default=None, gt=0, le=MAX_PRODUCTION_MINUTES
+    )
+    #: Cuantos moldes trabajan a la vez. ciclos = ceil(cantidad / moldes).
+    mold_count: int = Field(default=1, ge=1, le=MAX_MOLDS)
 
 
 class V2QuotationProductOut(BaseModel):
@@ -181,6 +195,13 @@ class V2QuotationProductOut(BaseModel):
     glaze_volume_ml: Decimal
     glaze_cost: Decimal
     client_observation: str | None = None
+
+    #: Fase 010P. Tiempo por pieza (minutos), moldes, ciclos y minutos activos
+    #: de la linea. El pedido dura el MAXIMO de las lineas, no la suma.
+    production_time_per_unit_minutes: Decimal | None = None
+    mold_count: int = 1
+    cycles: int = 0
+    line_active_minutes: Decimal | None = None
 
     #: Pasta mas esmalte de ESTA linea. Lo suma el backend y no la pantalla:
     #: sumar dos importes en coma flotante en el navegador produce colas de

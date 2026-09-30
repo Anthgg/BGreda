@@ -34,13 +34,14 @@ from tests.db.test_firings_api import FACTORES_CHICO, crear_horno
 from tests.db.test_glaze_estimate_api import _lote
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
-    ORDERS,
     PARTNERS,
+    arrancar_orden,
     confirmada_y_pagada,
     confirmar,
     crear_orden,
     crear_ubicacion,
     dar_existencia,
+    preparar_lote,
 )
 from tests.db.test_quotation_builder_api import BUILDER, head
 from tests.db.test_quotations_api import _finished_product_and_recipe
@@ -400,6 +401,7 @@ async def _orden_lista(
     suffix: str,
     product_id_key: str = "prepared_id",
     material_id: int | None = None,
+    preparation_recipe_version_id: int | None = None,
     quantity_per_piece: str = "300",
     quantity: int = 10,
     existencia: str = "5000",
@@ -419,18 +421,46 @@ async def _orden_lista(
     )
     confirmada = await confirmada_y_pagada(api, csrf, creada)
     location_id = await crear_ubicacion(api, csrf, f"Almacen material base{suffix}")
-    await dar_existencia(
-        api, csrf, product_id=material_id, location_id=location_id, cantidad=existencia
-    )
+    preparation_id: int | None = None
+    if material_id == escena["prepared_id"] or preparation_recipe_version_id is not None:
+        preparation_id = await preparar_lote(
+            api,
+            csrf,
+            db_session,
+            product_id=material_id,
+            recipe_version_id=(
+                preparation_recipe_version_id or escena["receta"]["current_version"]["id"]
+            ),
+            location_id=location_id,
+            cantidad=existencia,
+        )
+    else:
+        await dar_existencia(
+            api, csrf, product_id=material_id, location_id=location_id, cantidad=existencia
+        )
     orden = await crear_orden(api, csrf, quotation_id=confirmada["id"], location_id=location_id)
     assert orden.status_code == 201, orden.text
     return {
         **escena,
         "material_id": material_id,
+        "preparation_id": preparation_id,
         "confirmada": confirmada,
         "location_id": location_id,
         "orden": orden.json(),
     }
+
+
+async def _arrancar_orden_lista(
+    api: httpx.AsyncClient, csrf: str, datos: dict[str, Any]
+) -> httpx.Response:
+    preparation_id = datos["preparation_id"]
+    lotes = {int(datos["material_id"]): int(preparation_id)} if preparation_id is not None else {}
+    return await arrancar_orden(
+        api,
+        csrf,
+        datos["orden"]["id"],
+        preparation_lots_by_product_id=lotes,
+    )
 
 
 @pytest.mark.asyncio
@@ -470,7 +500,7 @@ async def test_arrancar_descuenta_el_material_base_y_solo_ese(
     movimientos_antes = await _movimientos(db_session)
     pasta_antes = await _saldo(db_session, datos["raw_id"], datos["location_id"])
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await _arrancar_orden_lista(api, admin_csrf, datos)
     assert arranque.status_code == 200, arranque.text
 
     assert await _saldo(db_session, datos["material_id"], datos["location_id"]) == Decimal(2000)
@@ -492,7 +522,7 @@ async def test_una_pieza_de_materia_prima_consume_esa_materia_prima(
         quantity_per_piece="500",
         quantity=2,
     )
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await _arrancar_orden_lista(api, admin_csrf, datos)
     assert arranque.status_code == 200, arranque.text
     assert await _saldo(db_session, datos["raw_id"], datos["location_id"]) == Decimal(4000)
 
@@ -547,10 +577,23 @@ async def test_una_cotizacion_sin_material_base_se_lee_por_el_camino_de_siempre(
     await dar_existencia(
         api,
         admin_csrf,
-        product_id=escena["prepared_id"],
+        product_id=escena["raw_id"],
         location_id=location_id,
         cantidad="5000",
     )
+    preparada = await api.post(
+        "/api/v1/recipe-preparations",
+        json={
+            "recipe_version_id": escena["receta"]["current_version"]["id"],
+            "location_id": location_id,
+            "total_dry_weight_g": "5000",
+            "water_amount_ml": "0",
+            "final_yield_ml": "5000",
+            "idempotency_key": "historical-body-material-lot",
+        },
+        headers=head(admin_csrf),
+    )
+    assert preparada.status_code == 201, preparada.text
     orden = await crear_orden(
         api, admin_csrf, quotation_id=confirmada["id"], location_id=location_id
     )
@@ -717,7 +760,7 @@ async def test_una_cantidad_decimal_llega_intacta_hasta_el_almacen(
     ).scalar_one()
     assert linea.required_material_quantity == Decimal("86.415")
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await _arrancar_orden_lista(api, admin_csrf, datos)
     assert arranque.status_code == 200, arranque.text
     # 5000 - 86,415. Ni 4913,584999... ni 4913,59.
     assert await _saldo(db_session, datos["material_id"], datos["location_id"]) == Decimal(
@@ -770,6 +813,26 @@ async def test_un_material_en_mililitros_con_costo_propio_se_cotiza_en_mililitro
     assert "BODY_MATERIAL_UNSUPPORTED_UOM_COSTING" not in linea["warnings"]
     assert linea["complete"] is True
 
+    receta_liquida = await api.post(
+        "/api/v1/recipes",
+        json={
+            "product_id": material_id,
+            "name": "Formula barbotina liquida con costo",
+            "lines": [
+                {
+                    "component_product_id": escena["raw_id"],
+                    "component_type": "BASE",
+                    "percentage": "100",
+                    "sort_order": 0,
+                }
+            ],
+            "active": True,
+            "activate_immediately": True,
+        },
+        headers=head(admin_csrf),
+    )
+    assert receta_liquida.status_code == 201, receta_liquida.text
+
     # Y llega hasta el almacén sin pasar por gramos en ningún punto.
     datos = await _orden_lista(
         api,
@@ -778,6 +841,7 @@ async def test_un_material_en_mililitros_con_costo_propio_se_cotiza_en_mililitro
         suffix="_mlok",
         escena=escena,
         material_id=material_id,
+        preparation_recipe_version_id=receta_liquida.json()["current_version"]["id"],
         quantity_per_piece="250",
         quantity=10,
         existencia="8000",
@@ -794,6 +858,6 @@ async def test_un_material_en_mililitros_con_costo_propio_se_cotiza_en_mililitro
     # La columna legacy queda en NULL: no tiene dónde decir que no son gramos.
     assert linea_op.material_grams_per_piece is None
 
-    arranque = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    arranque = await _arrancar_orden_lista(api, admin_csrf, datos)
     assert arranque.status_code == 200, arranque.text
     assert await _saldo(db_session, material_id, datos["location_id"]) == Decimal(5500)

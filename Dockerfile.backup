@@ -1,0 +1,12 @@
+FROM postgres:17
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/backup-010p.sh /usr/local/bin/backup-010p.sh
+RUN chmod 0755 /usr/local/bin/backup-010p.sh
+
+USER postgres
+ENTRYPOINT ["/usr/local/bin/backup-010p.sh"]

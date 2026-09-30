@@ -26,10 +26,11 @@ from tests.db.test_firings_api import FACTORES_CHICO, crear_horno
 from tests.db.test_masters_api import create_category, create_product
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
     confirmada_y_pagada,
     crear_orden,
     crear_ubicacion,
-    dar_existencia,
+    preparar_lote,
 )
 from tests.db.test_quotation_builder_api import head
 
@@ -124,6 +125,7 @@ async def escenario_multilinea(
 
     items: list[dict[str, Any]] = []
     preparados: list[dict[str, Any]] = []
+    recetas: list[dict[str, Any]] = []
     for indice, (nombre, cantidad, gramos) in enumerate(lineas):
         terminado = await create_product(
             api,
@@ -138,6 +140,7 @@ async def escenario_multilinea(
         assert terminado.status_code == 201, terminado.text
         preparado, receta = await _preparado_con_receta(api, csrf, categoria["id"], nombre)
         preparados.append(preparado)
+        recetas.append(receta)
         items.append(
             {
                 "product_id": terminado.json()["id"],
@@ -153,15 +156,19 @@ async def escenario_multilinea(
             }
         )
 
-    for preparado, existencia in zip(preparados, existencias, strict=True):
+    preparations_by_product_id: dict[int, int] = {}
+    for preparado, receta, existencia in zip(preparados, recetas, existencias, strict=True):
         if existencia is not None:
-            await dar_existencia(
+            preparation_id = await preparar_lote(
                 api,
                 csrf,
+                db_session,
                 product_id=preparado["id"],
+                recipe_version_id=receta["current_version"]["id"],
                 location_id=location_id,
                 cantidad=existencia,
             )
+            preparations_by_product_id[int(preparado["id"])] = preparation_id
 
     creada = await api.post(
         BUILDER,
@@ -182,6 +189,7 @@ async def escenario_multilinea(
     assert orden.status_code == 201, orden.text
     return {
         "preparados": preparados,
+        "preparation_lots_by_product_id": preparations_by_product_id,
         "location_id": location_id,
         "orden": orden.json(),
         "confirmada": confirmada,
@@ -235,7 +243,12 @@ async def test_si_falta_el_tercer_material_no_se_descuentan_los_dos_primeros(
         for preparado in datos["preparados"]
     ]
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        datos["orden"]["id"],
+        preparation_lots_by_product_id=datos["preparation_lots_by_product_id"],
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     assert respuesta.json()["error"]["code"] == "PRODUCTION_ORDER_NOT_READY"
@@ -290,8 +303,14 @@ async def test_dos_lineas_del_mismo_preparado_se_suman_antes_de_mirar_el_saldo(
         factores=FACTORES_CHICO,
     )
     location_id = await crear_ubicacion(api, admin_csrf, "Almacen compartido 009I")
-    await dar_existencia(
-        api, admin_csrf, product_id=preparado["id"], location_id=location_id, cantidad="250"
+    preparation_id = await preparar_lote(
+        api,
+        admin_csrf,
+        db_session,
+        product_id=preparado["id"],
+        recipe_version_id=receta["current_version"]["id"],
+        location_id=location_id,
+        cantidad="250",
     )
 
     items = []
@@ -340,7 +359,12 @@ async def test_dos_lineas_del_mismo_preparado_se_suman_antes_de_mirar_el_saldo(
     assert orden.status_code == 201, orden.text
     antes = await _movimientos(db_session)
 
-    respuesta = await api.post(f"{ORDERS}/{orden.json()['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        orden.json()["id"],
+        preparation_lots_by_product_id={int(preparado["id"]): preparation_id},
+    )
 
     assert respuesta.status_code == 409, respuesta.text
     detalles = respuesta.json()["error"]["details"]
@@ -370,7 +394,12 @@ async def test_dos_lineas_del_mismo_preparado_que_si_caben_consumen_una_sola_sal
         existencias=["1000", "1000"],
     )
 
-    respuesta = await api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf))
+    respuesta = await arrancar_orden(
+        api,
+        admin_csrf,
+        datos["orden"]["id"],
+        preparation_lots_by_product_id=datos["preparation_lots_by_product_id"],
+    )
 
     assert respuesta.status_code == 200, respuesta.text
     assert await _saldo(db_session, datos["preparados"][0]["id"], datos["location_id"]) == (
@@ -415,8 +444,18 @@ async def test_dos_arranques_simultaneos_de_la_misma_orden_consumen_una_vez(
     preparado = datos["preparados"][0]
 
     primera, segunda = await asyncio.gather(
-        api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf)),
-        api.post(f"{ORDERS}/{datos['orden']['id']}/start", headers=head(admin_csrf)),
+        arrancar_orden(
+            api,
+            admin_csrf,
+            datos["orden"]["id"],
+            preparation_lots_by_product_id=datos["preparation_lots_by_product_id"],
+        ),
+        arrancar_orden(
+            api,
+            admin_csrf,
+            datos["orden"]["id"],
+            preparation_lots_by_product_id=datos["preparation_lots_by_product_id"],
+        ),
     )
 
     assert [primera.status_code, segunda.status_code] == [200, 200], (
@@ -460,8 +499,14 @@ async def test_dos_ordenes_que_se_pelean_el_mismo_saldo_no_lo_dejan_negativo(
         factores=FACTORES_CHICO,
     )
     location_id = await crear_ubicacion(api, admin_csrf, "Almacen pelea 009I")
-    await dar_existencia(
-        api, admin_csrf, product_id=preparado["id"], location_id=location_id, cantidad="1000"
+    preparation_id = await preparar_lote(
+        api,
+        admin_csrf,
+        db_session,
+        product_id=preparado["id"],
+        recipe_version_id=receta["current_version"]["id"],
+        location_id=location_id,
+        cantidad="1000",
     )
 
     ordenes = []
@@ -520,8 +565,18 @@ async def test_dos_ordenes_que_se_pelean_el_mismo_saldo_no_lo_dejan_negativo(
         ordenes.append(orden.json())
 
     primera, segunda = await asyncio.gather(
-        api.post(f"{ORDERS}/{ordenes[0]['id']}/start", headers=head(admin_csrf)),
-        api.post(f"{ORDERS}/{ordenes[1]['id']}/start", headers=head(admin_csrf)),
+        arrancar_orden(
+            api,
+            admin_csrf,
+            ordenes[0]["id"],
+            preparation_lots_by_product_id={int(preparado["id"]): preparation_id},
+        ),
+        arrancar_orden(
+            api,
+            admin_csrf,
+            ordenes[1]["id"],
+            preparation_lots_by_product_id={int(preparado["id"]): preparation_id},
+        ),
     )
 
     codigos = sorted([primera.status_code, segunda.status_code])

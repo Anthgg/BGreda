@@ -63,6 +63,58 @@ class ProductionOrderCreateIn(BaseModel):
         return self
 
 
+class ProductionOrderStartIn(BaseModel):
+    """Selección manual de lotes preparados consumidos al arrancar."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preparation_lots_by_product_id: dict[int, int] = Field(default_factory=dict)
+
+
+class ProductionResultLineIn(BaseModel):
+    """Resultado físico completo de una línea, identificado por origen."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_ref: str = Field(min_length=3, max_length=40, pattern=r"^(POL|V2P|V2F):[1-9][0-9]*$")
+    good_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    scrap_quantity: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    scrap_reason: str | None = Field(default=None, max_length=240)
+
+
+class ProductionResultLineSourceOut(BaseModel):
+    """Origen autoritativo de una linea que puede completarse en una orden."""
+
+    line_ref: str = Field(pattern=r"^(POL|V2P|V2F):[1-9][0-9]*$")
+    started_quantity: Decimal
+    source_kind: str
+    product_id: int | None
+    product_name: str
+    production_order_line_id: int | None = None
+    v2_quotation_product_id: int | None = None
+    v2_firing_quotation_line_id: int | None = None
+    prototype_id: int | None = None
+
+
+class ProductionOrderCompleteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[ProductionResultLineIn] = Field(min_length=1, max_length=100)
+
+
+class ProductionOrderResultOut(BaseModel):
+    id: int
+    production_order_id: int
+    line_ref: str
+    product_id: int | None
+    started_quantity: Decimal
+    good_quantity: Decimal
+    scrap_quantity: Decimal
+    scrap_reason: str | None
+    recorded_by_name: str | None
+    recorded_at: datetime
+
+
 class ReadinessIssueOut(BaseModel):
     """Un bloqueo concreto, en codigo. El texto lo pone el frontend."""
 
@@ -96,6 +148,7 @@ class ProductionOrderOrigin(StrEnum):
     #: Fase 010I. Ese tercer origen: una cotizacion del Cotizador V2, que entra
     #: por su puente de 010H.
     V2_QUOTATION = "V2_QUOTATION"
+    SOLO_QUEMA = "SOLO_QUEMA"
 
 
 class ProductionOrderLineOut(BaseModel):
@@ -184,6 +237,9 @@ class ProductionOrderSummaryOut(BaseModel):
     #: enlace llevara a la cotizacion equivocada.
     v2_quotation_id: int | None = None
     v2_quotation_code: str | None = None
+    #: Fase 010P. El origen Solo Quema, separado del espacio de ids de V2Q.
+    v2_firing_quotation_id: int | None = None
+    v2_firing_quotation_code: str | None = None
     #: Fase 010I. El cliente CONGELADO en la cotizacion de origen (Legacy o V2).
     #: Nulo en las ordenes de muestra, que no lo tenian.
     customer_name: str | None = None
@@ -214,6 +270,9 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     #: arrancar hace falta PAID; el nulo tambien bloquea.
     quotation_payment_status: QuotationPaymentStatus | None
     lines: list[ProductionOrderLineOut]
+    #: Origenes exactos que acepta `POST /complete`; el backend los vuelve a
+    #: validar al cerrar y calcula `started_quantity` desde su fuente real.
+    result_lines: list[ProductionResultLineSourceOut] = Field(default_factory=list)
     readiness: ProductionReadinessOut
     #: Fase 010I, decision D3. Las clases de material que la cotizacion V2 de
     #: esta orden planifico como inventariables y que aun no tienen ningun
@@ -224,6 +283,30 @@ class ProductionOrderOut(ProductionOrderSummaryOut):
     #: Fase 010I. Las piezas de la cotizacion V2 congelada, sin importes. Vacia
     #: en las ordenes Legacy y de muestra, que tienen sus propias `lines`.
     v2_pieces: list[V2ProductionPieceOut] = Field(default_factory=list)
+
+
+class ProductionOrderCompletionOut(BaseModel):
+    order: ProductionOrderOut
+    results: list[ProductionOrderResultOut]
+
+
+class ProductionWipStage(StrEnum):
+    EN_PRODUCCION = "EN_PRODUCCION"
+    PROGRAMADA_HORNO = "PROGRAMADA_HORNO"
+    EN_HORNO = "EN_HORNO"
+    QUEMADA = "QUEMADA"
+
+
+class ProductionWipOut(BaseModel):
+    production_order_id: int
+    production_order_code: str
+    source: ProductionOrderOrigin
+    line_ref: str
+    product_name: str
+    started_quantity: Decimal
+    stage: ProductionWipStage
+    kiln_batch_id: int | None
+    kiln_batch_code: str | None
 
 
 class ProductionOrderPage(BaseModel):
@@ -244,6 +327,8 @@ class ProductionConsumptionCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_id: int = Field(gt=0)
+    #: Obligatorio cuando `product_id` es PREPARED_MATERIAL; no se elige FIFO.
+    preparation_id: int | None = Field(default=None, gt=0)
     #: Opcional: por defecto el almacen de la orden. Cada consumo dice el suyo
     #: porque no se asume un almacen unico.
     stock_location_id: int | None = Field(default=None, gt=0)
@@ -270,6 +355,7 @@ class ProductionConsumptionOut(BaseModel):
     production_order_id: int
     v2_quotation_product_id: int | None
     product_id: int
+    preparation_id: int | None = None
     product_name: str
     product_internal_reference: str
     stock_location_id: int

@@ -62,6 +62,7 @@ from app.services.quoter_v2_pricing import V2PricingService
 from app.services.quoter_v2_processes import V2ProcessService
 from app.services.quoter_v2_reductions import V2ReductionsService
 from app.services.quoter_v2_settings import V2SettingsService
+from app.services.quoter_v2_wholesale import V2WholesaleService
 from app.services.recipes import RecipeService
 from app.services.sequences import SequenceService
 from app.services.settings import SettingsService
@@ -137,6 +138,7 @@ async def resolve_profile(
         email=email,
         display_name=profile.display_name,
         role=UserRole(profile.role),
+        capabilities=list(getattr(profile, "capabilities", []) or []),
     )
 
 
@@ -202,6 +204,19 @@ def require_roles(
     return _dependency
 
 
+def require_masters_quick_create() -> Callable[
+    [AuthenticatedUser], Coroutine[Any, Any, AuthenticatedUser]
+]:
+    """ADMIN siempre; OPERATOR solo con la capacidad de altas rapidas."""
+
+    async def _dependency(user: CurrentUserDep) -> AuthenticatedUser:
+        if user.role is UserRole.ADMIN or "MASTERS_QUICK_CREATE" in user.capabilities:
+            return user
+        raise AuthInsufficientRoleError()
+
+    return _dependency
+
+
 # ---------------------------------------------------------------------------
 # Fase 2: configuracion, secuencias, auditoria y almacenamiento
 # ---------------------------------------------------------------------------
@@ -210,6 +225,7 @@ DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 #: Solo ADMIN modifica la configuracion. La restriccion la impone el backend:
 #: ocultar el boton en React no es una medida de seguridad.
 AdminUserDep = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
+MastersQuickCreateDep = Annotated[AuthenticatedUser, Depends(require_masters_quick_create())]
 
 #: Fase 009J. Quien ejecuta el taller: preparar receta, ajustar existencia y
 #: llevar una orden de produccion de principio a fin.
@@ -503,6 +519,17 @@ async def get_v2_reductions_service(
 
 
 V2ReductionsServiceDep = Annotated[V2ReductionsService, Depends(get_v2_reductions_service)]
+
+
+async def get_v2_wholesale_service(
+    session: DbSessionDep,
+    audit: AuditRecorderDep,
+) -> V2WholesaleService:
+    """Fase 010P. Aceptar o rechazar la sugerencia de pasar a por mayor."""
+    return V2WholesaleService(session, audit)
+
+
+V2WholesaleServiceDep = Annotated[V2WholesaleService, Depends(get_v2_wholesale_service)]
 
 
 async def get_v2_quotation_service(

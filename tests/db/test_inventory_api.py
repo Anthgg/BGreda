@@ -121,6 +121,75 @@ class TestAjustes:
         assert Decimal(stock["items"][0]["quantity"]) == Decimal(60)
         assert (await api.get(MOVEMENTS)).json()["total"] == 2
 
+
+class TestEntregasConcurrentes:
+    async def test_dos_entregas_de_siete_sobre_diez_solo_aprueba_una(
+        self, api: httpx.AsyncClient, admin_csrf: str
+    ) -> None:
+        category = await api.post(
+            CATEGORIES,
+            json={"name": "Productos terminados 010P"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert category.status_code == 201, category.text
+        product = await api.post(
+            PRODUCTS,
+            json={
+                "name": "Pieza terminada 010P",
+                "product_type": "FINISHED_PRODUCT",
+                "product_category_id": category.json()["id"],
+                "base_uom_code": "unit",
+                "sellable": True,
+            },
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert product.status_code == 201, product.text
+        location = await api.post(
+            LOCATIONS,
+            json={"name": "Despacho terminado 010P"},
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert location.status_code == 201, location.text
+        product_id = product.json()["id"]
+        location_id = location.json()["id"]
+        entrada = await _adjust(api, admin_csrf, product_id, location_id, "10")
+        assert entrada.status_code == 201, entrada.text
+
+        async def entregar(key: str) -> httpx.Response:
+            return await api.post(
+                f"{INVENTORY}/deliveries",
+                json={
+                    "product_id": product_id,
+                    "location_id": location_id,
+                    "quantity": "7",
+                    "reason": key,
+                },
+                headers={"X-CSRF-Token": admin_csrf},
+            )
+
+        first, second = await asyncio.gather(entregar("entrega-010p-a"), entregar("entrega-010p-b"))
+        assert sorted((first.status_code, second.status_code)) == [201, 422], (
+            first.text,
+            second.text,
+        )
+        rejected = first if first.status_code == 422 else second
+        assert rejected.json()["error"]["code"] == "NEGATIVE_STOCK_NOT_ALLOWED"
+
+        stock = (
+            await api.get(INVENTORY, params={"product_id": product_id, "location_id": location_id})
+        ).json()
+        assert stock["total"] == 1
+        assert Decimal(stock["items"][0]["quantity"]) == Decimal(3)
+        movements = (
+            await api.get(MOVEMENTS, params={"product_id": product_id, "location_id": location_id})
+        ).json()
+        deliveries = [
+            item for item in movements["items"] if item["movement_type"] == "DELIVERY_OUT"
+        ]
+        assert len(deliveries) == 1
+        assert Decimal(deliveries[0]["quantity"]) == Decimal(-7)
+        assert Decimal(deliveries[0]["balance_after"]) == Decimal(3)
+
     async def test_no_se_admite_dejar_existencia_negativa(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:

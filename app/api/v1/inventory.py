@@ -22,8 +22,10 @@ from app.schemas.inventory import (
     StockAdjustmentCreate,
     StockBalanceOut,
     StockBalancePage,
+    StockDeliveryCreate,
     StockLocationCreate,
     StockLocationOut,
+    StockLotOut,
     StockMovementOut,
     StockMovementPage,
 )
@@ -39,6 +41,30 @@ _ERRORS: dict[int | str, dict[str, object]] = {
 
 LimitDep = Annotated[int, Query(ge=1, le=200)]
 OffsetDep = Annotated[int, Query(ge=0)]
+
+
+@router.get("/lots", response_model=list[StockLotOut], responses=_ERRORS)
+async def list_lots(
+    _: CurrentUserDep,
+    service: InventoryServiceDep,
+    product_id: Annotated[int | None, Query(ge=1)] = None,
+    location_id: Annotated[int | None, Query(ge=1)] = None,
+) -> list[StockLotOut]:
+    return [
+        StockLotOut(
+            preparation_id=lot.preparation_id,
+            preparation_code=preparation.code,
+            product_id=lot.product_id,
+            location_id=lot.location_id,
+            quantity=lot.quantity,
+            uom_code=lot.uom_code,
+            prepared_at=preparation.prepared_at,
+            solids_g_per_ml=preparation.solids_g_per_ml,
+        )
+        for lot, preparation in await service.list_lots(
+            product_id=product_id, location_id=location_id
+        )
+    ]
 
 
 @router.get("/locations", response_model=list[StockLocationOut], responses=_ERRORS)
@@ -127,6 +153,11 @@ async def list_movements(
                 uom_code=movement.uom_code,
                 reason=movement.reason,
                 import_batch_id=movement.import_batch_id,
+                preparation_id=movement.preparation_id,
+                source_preparation_id=movement.source_preparation_id,
+                production_order_id=movement.production_order_id,
+                prototype_id=movement.prototype_id,
+                v2_quotation_id=movement.v2_quotation_id,
                 created_by=movement.created_by,
                 created_by_name=movement.created_by_name,
                 created_at=movement.created_at,
@@ -171,7 +202,50 @@ async def create_adjustment(
         uom_code=stored.uom_code,
         reason=stored.reason,
         import_batch_id=stored.import_batch_id,
+        preparation_id=stored.preparation_id,
+        source_preparation_id=stored.source_preparation_id,
+        production_order_id=stored.production_order_id,
+        prototype_id=stored.prototype_id,
+        v2_quotation_id=stored.v2_quotation_id,
         created_by=stored.created_by,
         created_by_name=stored.created_by_name,
         created_at=stored.created_at,
+    )
+
+
+@router.post(
+    "/deliveries",
+    response_model=StockMovementOut,
+    status_code=status.HTTP_201_CREATED,
+    responses=_ERRORS,
+)
+async def create_delivery(
+    payload: StockDeliveryCreate,
+    user: WorkshopUserDep,
+    service: InventoryServiceDep,
+    session: DbSessionDep,
+) -> StockMovementOut:
+    movement, product, location = await service.deliver(payload, user)
+    await session.commit()
+    return StockMovementOut(
+        id=movement.id,
+        product_id=product.id,
+        internal_reference=product.internal_reference,
+        product_name=product.name,
+        location_id=location.id,
+        location_name=location.name,
+        movement_type=movement.movement_type,
+        quantity=movement.quantity,
+        balance_after=movement.balance_after,
+        uom_code=movement.uom_code,
+        reason=movement.reason,
+        import_batch_id=movement.import_batch_id,
+        preparation_id=movement.preparation_id,
+        source_preparation_id=movement.source_preparation_id,
+        production_order_id=movement.production_order_id,
+        prototype_id=movement.prototype_id,
+        v2_quotation_id=movement.v2_quotation_id,
+        created_by=movement.created_by,
+        created_by_name=movement.created_by_name,
+        created_at=movement.created_at,
     )

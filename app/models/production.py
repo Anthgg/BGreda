@@ -41,6 +41,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -350,6 +351,65 @@ class ProductionOrderLine(Base, TimestampMixin):
     order: Mapped[ProductionOrder] = relationship("ProductionOrder", back_populates="lines")
 
 
+class ProductionOrderResult(Base):
+    """Resultado fisico inmutable de una linea fabricada o quemada."""
+
+    __tablename__ = "production_order_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    production_order_id: Mapped[int] = mapped_column(
+        ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    production_order_line_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_order_lines.id", ondelete="RESTRICT")
+    )
+    v2_quotation_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_quotation_products.id", ondelete="RESTRICT")
+    )
+    v2_firing_quotation_line_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_firing_quotation_lines.id", ondelete="RESTRICT")
+    )
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"))
+    started_quantity: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    good_quantity: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    scrap_quantity: Mapped[Decimal] = mapped_column(quantity_numeric(), nullable=False)
+    scrap_reason: Mapped[str | None] = mapped_column(String(240))
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    recorded_by_name: Mapped[str | None] = mapped_column(String(120))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "num_nonnulls(production_order_line_id, v2_quotation_product_id, "
+            "v2_firing_quotation_line_id) = 1",
+            name="exactly_one_origin_line",
+        ),
+        CheckConstraint("started_quantity >= 0", name="started_non_negative"),
+        CheckConstraint("good_quantity >= 0", name="good_non_negative"),
+        CheckConstraint("scrap_quantity >= 0", name="scrap_non_negative"),
+        CheckConstraint(
+            "good_quantity + scrap_quantity = started_quantity", name="result_matches_started"
+        ),
+        UniqueConstraint(
+            "production_order_id",
+            "production_order_line_id",
+            name="uq_production_results_order_legacy_line",
+        ),
+        UniqueConstraint(
+            "production_order_id",
+            "v2_quotation_product_id",
+            name="uq_production_results_order_v2_line",
+        ),
+        UniqueConstraint(
+            "production_order_id",
+            "v2_firing_quotation_line_id",
+            name="uq_production_results_order_firing_line",
+        ),
+    )
+
+
 class ProductionConsumptionKind(StrEnum):
     """Que clase de material se consumio. Fase 010I.
 
@@ -404,6 +464,9 @@ class ProductionConsumption(Base, TimestampMixin):
     #: dice el suyo: no se asume un almacen unico.
     stock_location_id: Mapped[int] = mapped_column(
         ForeignKey("stock_locations.id", ondelete="RESTRICT"), nullable=False
+    )
+    preparation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipe_preparations.id", ondelete="RESTRICT"), index=True
     )
     kind: Mapped[ProductionConsumptionKind] = mapped_column(
         StrEnumType(ProductionConsumptionKind, 16), nullable=False

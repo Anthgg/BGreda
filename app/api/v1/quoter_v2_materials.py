@@ -19,7 +19,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
 
-from app.api.deps import AdminUserDep, DbSessionDep, V2MaterialServiceDep
+from app.api.deps import AdminUserDep, DbSessionDep, MastersQuickCreateDep, V2MaterialServiceDep
+from app.core.quoter_v2_rules_010p import production_cycles
 from app.models.quoter_v2 import V2QuotationProduct
 from app.models.quoter_v2_materials import V2MaterialCost, V2MaterialKind
 from app.schemas.quoter_v2_materials import (
@@ -96,6 +97,10 @@ def _line_out(fila: V2QuotationProduct, warnings: list[str]) -> V2QuotationProdu
         glaze_cost=fila.glaze_cost,
         materials_cost=fila.body_cost + fila.glaze_cost,
         client_observation=fila.client_observation,
+        production_time_per_unit_minutes=fila.production_time_per_unit_minutes,
+        mold_count=fila.mold_count,
+        cycles=production_cycles(fila.quantity, fila.mold_count or 1),
+        line_active_minutes=fila.line_active_minutes,
         warnings=warnings,
     )
 
@@ -125,13 +130,13 @@ async def upsert_v2_material(
     product_id: Annotated[int, Path(ge=1)],
     payload: V2MaterialUpsertIn,
     service: V2MaterialServiceDep,
-    admin: AdminUserDep,
+    user: MastersQuickCreateDep,
     session: DbSessionDep,
 ) -> V2MaterialOut:
     """Valoriza un material. Cambia lo que se cotice DESPUES, nunca lo ya emitido."""
     datos = payload.model_dump(exclude={"expected_version"})
     fila = await service.upsert_material(
-        product_id, datos, expected_version=payload.expected_version, user=admin
+        product_id, datos, expected_version=payload.expected_version, user=user
     )
     stock = await service.stock_for(product_id)
     resultado = _material_out(fila, stock)

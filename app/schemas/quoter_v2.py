@@ -181,6 +181,24 @@ class V2QuotationOut(BaseModel):
     open_duplicate_id: int | None = None
     production_handoff: V2ProductionHandoffOut | None = None
 
+    # ---- Fase 010P: reglas comerciales v2 ------------------------------
+    #: 1 = reglas anteriores a 010P (lo emitido conserva su historia); 2 = 010P.
+    pricing_rules_version: int = 2
+    #: Costo de espacio por hora congelado al crear (costo/dia / jornada).
+    space_cost_per_hour: Decimal | None = None
+    #: Umbral por mayor congelado al crear y si ya se rechazo la sugerencia.
+    wholesale_threshold: int | None = None
+    wholesale_suggestion_declined_at: datetime | None = None
+
+
+class V2WholesaleDefaultsOut(BaseModel):
+    """Fase 010P. La cotizacion tras aceptar por mayor, y lo que conviene saber."""
+
+    quotation: V2QuotationOut
+    #: V2_WHOLESALE_MANUAL_WORKERS_KEPT, V2_WHOLESALE_EXTERNAL_WORKER_MISSING,
+    #: V2_WHOLESALE_DEFAULT_WORKER_LACKS_TECHNIQUE...
+    warnings: list[str] = []
+
 
 class V2QuotationListItemOut(BaseModel):
     """Fila del listado. Sin desglose: nadie necesita el detalle para elegir."""

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +40,9 @@ from app.services.audit import AuditRecorder
 from app.services.sequences import SequenceService
 
 MAX_PAGE_SIZE = 200
+CUSTOM_PRODUCT_CATEGORY_NAME = "Piezas personalizadas"
+CUSTOM_PRODUCT_CATEGORY_PATH = "Piezas personalizadas"
+COUNT_UNIT_CODE = "unit"
 
 
 def sequence_type_for_product_type(product_type: ProductType) -> SequenceType:
@@ -240,6 +244,88 @@ class MasterDataService:
         self._session.add(product)
         await self._flush(MasterConflictError("Ya existe un producto con esa referencia interna"))
         self._record(product.id, "product", AuditAction.CREATE, user, product.internal_reference)
+        return product
+
+    async def get_or_create_custom_product_category(self) -> ProductCategory:
+        """Resuelve la categoría de piezas personalizadas por su clave estable.
+
+        Este maestro no tiene columna `code`: su clave persistente es
+        `display_path`. Si ya existe una categoría con ese nombre, se conserva
+        su ubicación jerárquica; solo se crea la raíz cuando no hay equivalente.
+        """
+        categories = list(
+            (
+                await self._session.scalars(
+                    select(ProductCategory)
+                    .where(ProductCategory.name == CUSTOM_PRODUCT_CATEGORY_NAME)
+                    .order_by(ProductCategory.id)
+                )
+            ).all()
+        )
+        canonical = next(
+            (row for row in categories if row.display_path == CUSTOM_PRODUCT_CATEGORY_PATH), None
+        )
+        if canonical is not None:
+            return canonical
+        if len(categories) == 1:
+            return categories[0]
+        if len(categories) > 1:
+            raise MasterConflictError(
+                "Hay más de una categoría equivalente para piezas personalizadas"
+            )
+
+        await self._session.execute(
+            pg_insert(ProductCategory)
+            .values(
+                name=CUSTOM_PRODUCT_CATEGORY_NAME,
+                parent_id=None,
+                display_path=CUSTOM_PRODUCT_CATEGORY_PATH,
+                active=True,
+            )
+            .on_conflict_do_nothing()
+        )
+        await self._session.flush()
+        category = await self._session.scalar(
+            select(ProductCategory).where(
+                ProductCategory.display_path == CUSTOM_PRODUCT_CATEGORY_PATH
+            )
+        )
+        if category is None:
+            raise MasterConflictError("No se pudo resolver la categoría de piezas personalizadas")
+        return category
+
+    async def create_custom_finished_product(
+        self,
+        *,
+        name: str,
+        user: AuthenticatedUser,
+        product_category_id: int | None = None,
+        source_v2_quotation_product_id: int | None = None,
+        width: Any = None,
+        height: Any = None,
+        length: Any = None,
+        depth: Any = None,
+    ) -> Product:
+        """Crea un terminado automático por la secuencia y auditoría canónicas."""
+        category_id = product_category_id
+        if category_id is None:
+            category_id = (await self.get_or_create_custom_product_category()).id
+        product = await self.create_product(
+            ProductCreate(
+                name=name,
+                product_type=ProductType.FINISHED_PRODUCT,
+                product_category_id=category_id,
+                base_uom_code=COUNT_UNIT_CODE,
+                width=width,
+                height=height,
+                length=length,
+                depth=depth,
+            ),
+            user,
+        )
+        if source_v2_quotation_product_id is not None:
+            product.source_v2_quotation_product_id = source_v2_quotation_product_id
+            await self._session.flush()
         return product
 
     async def update_product(

@@ -29,9 +29,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import APIError
+from app.core.production_results import result_matches_started_quantity
 from app.models.audit import AuditAction, AuditEvent
+from app.models.firing_quotation_v2 import (
+    V2FiringProductionHandoff,
+    V2FiringQuotation,
+    V2FiringQuotationLine,
+)
 from app.models.firings import Kiln
 from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
+from app.models.kiln_batches import (
+    KilnBatch,
+    KilnBatchAssignment,
+    KilnBatchAssignmentStatus,
+    KilnBatchStatus,
+)
 from app.models.masters import Product, ProductType, UnitOfMeasure, UomDimension
 from app.models.production import (
     ProductionConsumption,
@@ -41,6 +53,7 @@ from app.models.production import (
     ProductionOrderCommunication,
     ProductionOrderLine,
     ProductionOrderNote,
+    ProductionOrderResult,
     ProductionOrderStatus,
     ProductionReadinessCode,
 )
@@ -76,17 +89,27 @@ from app.schemas.production import (
     ProductionOrderOrigin,
     ProductionOrderOut,
     ProductionOrderPage,
+    ProductionOrderResultOut,
     ProductionOrderSummaryOut,
     ProductionReadinessOut,
+    ProductionResultLineIn,
+    ProductionResultLineSourceOut,
     ProductionTimelineEventOut,
     ProductionTimelineEventType,
     ProductionTimelineOut,
+    ProductionWipOut,
+    ProductionWipStage,
     ReadinessIssueOut,
     V2ProductionPieceOut,
 )
 from app.services import body_material as body_material_mod
 from app.services.audit import AuditRecorder
-from app.services.inventory import InventoryService
+from app.services.inventory import (
+    InvalidPreparationLotError,
+    InventoryService,
+    PreparationLotRequiredError,
+)
+from app.services.masters import MasterDataService
 from app.services.prototypes import (
     PROTOTYPE_ENTITY,
     PrototypeService,
@@ -447,6 +470,18 @@ class ProductionOrderNotCompletableError(APIError):
     status_code = 409
     code = "PRODUCTION_ORDER_NOT_COMPLETABLE"
     message = "Solo una orden arrancada puede completarse"
+
+
+class ProductionResultsInvalidError(APIError):
+    status_code = 422
+    code = "PRODUCTION_RESULTS_INVALID"
+    message = "Los resultados deben cubrir cada línea y coincidir con la cantidad iniciada"
+
+
+class ProductionResultFinishedProductRequiredError(APIError):
+    status_code = 409
+    code = "010P_W2_PLAN_CONFLICT"
+    message = "La línea V2 a medida requiere definir categoría y unidad del producto terminado"
 
 
 class ProductionOrderNotCancellableError(APIError):
@@ -1399,7 +1434,11 @@ class ProductionOrderService:
         await assert_prototypes_approved(self._session, self._prototypes, order)
 
     async def start(
-        self, order_id: int, *, user: AuthenticatedUser
+        self,
+        order_id: int,
+        *,
+        user: AuthenticatedUser,
+        preparation_lots_by_product_id: dict[int, int] | None = None,
     ) -> tuple[ProductionOrder, bool]:
         """Consume el material y deja la orden en STARTED. `(orden, consumio_ahora)`.
 
@@ -1425,6 +1464,12 @@ class ProductionOrderService:
             return order, False
         if order.status is not ProductionOrderStatus.CREATED:
             raise ProductionOrderNotStartableError()
+        selected_lots = preparation_lots_by_product_id or {}
+
+        if order.v2_firing_handoff_id is not None:
+            if selected_lots:
+                raise InvalidPreparationLotError()
+            return await self._start_v2_firing(order, user=user)
 
         # Fase 010I. Una orden V2 arranca SIN descontar nada: su material se
         # registra consumo a consumo, con lo que el taller gasto de verdad, y no
@@ -1434,6 +1479,8 @@ class ProductionOrderService:
         # si cayera en la rama Legacy, preguntaria por el cobro de una cotizacion
         # que no existe y rechazaria siempre con «no pagada».
         if order.v2_handoff_id is not None:
+            if selected_lots:
+                raise InvalidPreparationLotError()
             return await self._start_v2(order, user=user)
 
         # Fase 009K.4. Los dos guardias son de la rama de COTIZACION.
@@ -1460,9 +1507,35 @@ class ProductionOrderService:
             if order.prototype_id is not None
             else None
         )
+        prototype_lots = (
+            {
+                line.product_id: line.preparation_id
+                for line in await self._prototype_lines(prototype.id)
+                if line.preparation_id is not None
+            }
+            if prototype is not None
+            else {}
+        )
+        required_product_ids = {requirement.prepared_product_id for requirement in requirements}
+        if prototype is None and set(selected_lots) - required_product_ids:
+            raise InvalidPreparationLotError()
+        if prototype is not None and selected_lots:
+            raise InvalidPreparationLotError()
         for requirement in requirements:
             prepared = await self._session.get(Product, requirement.prepared_product_id)
             assert prepared is not None
+            preparation_id = (
+                prototype_lots.get(prepared.id)
+                if prototype is not None
+                else selected_lots.get(prepared.id)
+            )
+            if prepared.product_type is ProductType.PREPARED_MATERIAL and preparation_id is None:
+                raise PreparationLotRequiredError()
+            if (
+                prepared.product_type is not ProductType.PREPARED_MATERIAL
+                and preparation_id is not None
+            ):
+                raise InvalidPreparationLotError()
             if prototype is not None:
                 # Fase 009K.4. Una muestra sigue saliendo del almacen como
                 # `PROTOTYPE_OUT`. Cambiarlo a `PRODUCTION_OUT` porque ahora se
@@ -1478,6 +1551,7 @@ class ProductionOrderService:
                     user_id=user.id,
                     user_name=user.display_name,
                     prototype_id=prototype.id,
+                    preparation_id=preparation_id,
                 )
             else:
                 await self._inventory.apply_movement(
@@ -1489,6 +1563,7 @@ class ProductionOrderService:
                     user_id=user.id,
                     user_name=user.display_name,
                     production_order_id=order.id,
+                    preparation_id=preparation_id,
                 )
 
         if prototype is not None:
@@ -1594,6 +1669,44 @@ class ProductionOrderService:
         )
         return order, True
 
+    async def _start_v2_firing(
+        self, order: ProductionOrder, *, user: AuthenticatedUser
+    ) -> tuple[ProductionOrder, bool]:
+        """Arranca Solo Quema; las piezas y su stock pertenecen al cliente."""
+        handoff = await self._session.get(V2FiringProductionHandoff, order.v2_firing_handoff_id)
+        if handoff is None:
+            raise ProductionOrderNotStartableError()
+        await self._required_order_location(order)
+        moment = datetime.now(UTC)
+        order.status = ProductionOrderStatus.STARTED
+        order.started_at = moment
+        order.updated_at = moment
+        await self._session.flush()
+        self._audit.record_changes(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            changes={
+                "status": (ProductionOrderStatus.CREATED.value, order.status.value),
+                "started_at": (None, moment.isoformat()),
+            },
+            user_id=user.id,
+            user_display_name=user.display_name,
+        )
+        self._audit.record_action(
+            entity_type=PRODUCTION_ENTITY,
+            entity_id=str(order.id),
+            action=AuditAction.UPDATE,
+            user_id=user.id,
+            user_display_name=user.display_name,
+            metadata={
+                "code": order.code,
+                "transition": "START_SOLO_QUEMA",
+                "inventory_moved": False,
+                "handoff_id": handoff.id,
+            },
+        )
+        return order, True
+
     # -- consumo real (Fase 010I) -------------------------------------------
     async def _consumption_by_key(self, key: str) -> ProductionConsumption | None:
         return await self._session.scalar(
@@ -1621,6 +1734,7 @@ class ProductionOrderService:
             and existing.quantity == data.quantity
             and existing.kind == data.kind
             and existing.v2_quotation_product_id == data.v2_quotation_product_id
+            and existing.preparation_id == data.preparation_id
         )
 
     async def _effective_location_id(
@@ -1685,6 +1799,13 @@ class ProductionOrderService:
         product = await self._session.get(Product, data.product_id)
         if product is None or not product.active:
             raise ProductionConsumptionMaterialInvalidError()
+        if product.product_type is ProductType.PREPARED_MATERIAL and data.preparation_id is None:
+            raise PreparationLotRequiredError()
+        if (
+            product.product_type is not ProductType.PREPARED_MATERIAL
+            and data.preparation_id is not None
+        ):
+            raise InvalidPreparationLotError()
 
         location = await self._session.get(StockLocation, location_id)
         if location is None or not location.active:
@@ -1705,9 +1826,11 @@ class ProductionOrderService:
                     user_id=user.id,
                     user_name=user.display_name,
                     production_order_id=order.id,
+                    preparation_id=data.preparation_id,
                 )
                 consumption = ProductionConsumption(
                     production_order_id=order.id,
+                    preparation_id=data.preparation_id,
                     v2_quotation_product_id=data.v2_quotation_product_id,
                     product_id=product.id,
                     stock_location_id=location.id,
@@ -1830,6 +1953,7 @@ class ProductionOrderService:
                 production_order_id=c.production_order_id,
                 v2_quotation_product_id=c.v2_quotation_product_id,
                 product_id=c.product_id,
+                preparation_id=c.preparation_id,
                 product_name=productos[c.product_id].name,
                 product_internal_reference=productos[c.product_id].internal_reference,
                 stock_location_id=c.stock_location_id,
@@ -2277,15 +2401,130 @@ class ProductionOrderService:
         return ProductionTimelineOut(items=eventos)
 
     # -- cierre y anulacion -------------------------------------------------
-    async def complete(
-        self, order_id: int, *, user: AuthenticatedUser
-    ) -> tuple[ProductionOrder, bool]:
-        """Marca la orden como terminada. **No crea producto terminado.**
+    async def _v2_finished_product_for_result(
+        self,
+        line: V2QuotationProduct,
+        *,
+        create_if_missing: bool,
+        user: AuthenticatedUser,
+    ) -> Product | None:
+        """Resuelve una línea V2 bajo su bloqueo y materializa una sola vez."""
+        product = (
+            await self._session.get(Product, line.product_id)
+            if line.product_id is not None
+            else await self._session.scalar(
+                select(Product)
+                .where(Product.source_v2_quotation_product_id == line.id)
+                .with_for_update()
+            )
+        )
+        if product is None and create_if_missing:
+            name = line.product_name_snapshot
+            if name is None or not name.strip():
+                raise ProductionResultsInvalidError()
+            product = await MasterDataService(
+                self._session, self._audit, self._sequences
+            ).create_custom_finished_product(
+                name=name,
+                user=user,
+                source_v2_quotation_product_id=line.id,
+                width=line.width_cm,
+                height=line.height_cm,
+                length=line.length_cm,
+            )
+        if product is not None and product.product_type is not ProductType.FINISHED_PRODUCT:
+            raise ProductionResultsInvalidError()
+        return product
 
-        Fase 009I no da de alta existencia de producto acabado: no hay reglas
-        acordadas sobre en que ubicacion entraria, con que merma ni con que
-        valoracion, y una entrada inventada seria peor que ninguna.
-        """
+    async def _result_sources(
+        self,
+        order: ProductionOrder,
+        *,
+        v2_lines: Sequence[V2QuotationProduct] | None = None,
+        lock_v2_lines: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Una fuente canonica para leer y validar las lineas de resultados."""
+        if order.v2_firing_handoff_id is not None:
+            firing_handoff = await self._session.get(
+                V2FiringProductionHandoff, order.v2_firing_handoff_id
+            )
+            assert firing_handoff is not None
+            firing_lines = (
+                await self._session.scalars(
+                    select(V2FiringQuotationLine)
+                    .where(
+                        V2FiringQuotationLine.v2_firing_quotation_id
+                        == firing_handoff.v2_firing_quotation_id
+                    )
+                    .order_by(V2FiringQuotationLine.sort_order, V2FiringQuotationLine.id)
+                )
+            ).all()
+            return [
+                {
+                    "line_ref": f"V2F:{line.id}",
+                    "source_kind": "V2F",
+                    "v2_firing_quotation_line_id": line.id,
+                    "started_quantity": Decimal(line.quantity),
+                    "product_id": line.product_id,
+                    "product_name": line.product_name_snapshot or "Pieza sin nombre",
+                    "prototype_id": None,
+                    "customer_owned": True,
+                }
+                for line in firing_lines
+            ]
+
+        if order.v2_handoff_id is not None:
+            production_handoff = await self._session.get(V2ProductionHandoff, order.v2_handoff_id)
+            assert production_handoff is not None
+            quotation_lines = v2_lines
+            if quotation_lines is None:
+                statement = (
+                    select(V2QuotationProduct)
+                    .where(V2QuotationProduct.v2_quotation_id == production_handoff.v2_quotation_id)
+                    .order_by(V2QuotationProduct.sort_order, V2QuotationProduct.id)
+                )
+                if lock_v2_lines:
+                    statement = statement.with_for_update()
+                quotation_lines = (await self._session.scalars(statement)).all()
+            return [
+                {
+                    "line_ref": f"V2P:{line.id}",
+                    "source_kind": "V2P",
+                    "v2_quotation_product_id": line.id,
+                    "started_quantity": Decimal(line.quantity),
+                    "product_id": line.product_id,
+                    "product_name": line.product_name_snapshot or "Pieza sin nombre",
+                    "prototype_id": None,
+                    "v2_quotation_id": production_handoff.v2_quotation_id,
+                    "customer_owned": False,
+                    "quotation_product": line,
+                }
+                for line in quotation_lines
+            ]
+
+        legacy_lines = sorted(order.lines, key=lambda line: (line.sort_order, line.id))
+        return [
+            {
+                "line_ref": f"POL:{line.id}",
+                "source_kind": "POL",
+                "production_order_line_id": line.id,
+                "started_quantity": Decimal(line.quantity or 0),
+                "product_id": line.product_id,
+                "product_name": line.product_name_snapshot,
+                "prototype_id": order.prototype_id,
+                "customer_owned": False,
+            }
+            for line in legacy_lines
+        ]
+
+    async def complete(
+        self,
+        order_id: int,
+        results: Sequence[ProductionResultLineIn],
+        *,
+        user: AuthenticatedUser,
+    ) -> tuple[ProductionOrder, bool]:
+        """Registra resultados físicos y altas de taller en una transacción."""
         order = await self.get(order_id, for_update=True)
         if order.status is ProductionOrderStatus.COMPLETED:
             return order, False
@@ -2297,7 +2536,75 @@ class ProductionOrderService:
         if pendientes:
             raise ProductionOrderConsumptionMissingError(pendientes)
 
+        sources = await self._result_sources(order, lock_v2_lines=True)
+
+        by_ref = {item.line_ref: item for item in results}
+        if len(by_ref) != len(results) or set(by_ref) != {line["line_ref"] for line in sources}:
+            raise ProductionResultsInvalidError()
+
         moment = datetime.now(UTC)
+        for source in sources:
+            result_in = by_ref[source["line_ref"]]
+            started_quantity = source["started_quantity"]
+            if not result_matches_started_quantity(
+                started_quantity=started_quantity,
+                good_quantity=result_in.good_quantity,
+                scrap_quantity=result_in.scrap_quantity,
+                scrap_reason=result_in.scrap_reason,
+            ):
+                raise ProductionResultsInvalidError()
+
+            product_id = source["product_id"]
+            if source.get("quotation_product") is not None:
+                product = await self._v2_finished_product_for_result(
+                    source["quotation_product"],
+                    create_if_missing=result_in.good_quantity > 0,
+                    user=user,
+                )
+                product_id = product.id if product is not None else None
+            elif result_in.good_quantity > 0 and not source["customer_owned"]:
+                if product_id is None:
+                    raise ProductionResultFinishedProductRequiredError()
+                product = await self._session.get(Product, product_id)
+                if product is None or product.product_type is not ProductType.FINISHED_PRODUCT:
+                    raise ProductionResultsInvalidError()
+            if product_id is not None and not source["customer_owned"]:
+                product = await self._session.get(Product, product_id)
+                if product is None or product.product_type is not ProductType.FINISHED_PRODUCT:
+                    raise ProductionResultsInvalidError()
+            if result_in.good_quantity > 0 and not source["customer_owned"]:
+                assert product_id is not None
+                product = await self._session.get(Product, product_id)
+                assert product is not None
+                await self._inventory.apply_movement(
+                    product=product,
+                    location=await self._required_order_location(order),
+                    quantity=result_in.good_quantity,
+                    movement_type=MovementType.PRODUCTION_IN,
+                    reason=f"Produccion terminada {order.code}",
+                    user_id=user.id,
+                    user_name=user.display_name,
+                    production_order_id=order.id,
+                    prototype_id=order.prototype_id,
+                    v2_quotation_id=source.get("v2_quotation_id"),
+                )
+            self._session.add(
+                ProductionOrderResult(
+                    production_order_id=order.id,
+                    production_order_line_id=source.get("production_order_line_id"),
+                    v2_quotation_product_id=source.get("v2_quotation_product_id"),
+                    v2_firing_quotation_line_id=source.get("v2_firing_quotation_line_id"),
+                    product_id=product_id,
+                    started_quantity=started_quantity,
+                    good_quantity=result_in.good_quantity,
+                    scrap_quantity=result_in.scrap_quantity,
+                    scrap_reason=(result_in.scrap_reason or None),
+                    recorded_by=user.id,
+                    recorded_by_name=user.display_name,
+                    recorded_at=moment,
+                )
+            )
+
         order.status = ProductionOrderStatus.COMPLETED
         order.completed_at = moment
         order.updated_at = moment
@@ -2316,6 +2623,194 @@ class ProductionOrderService:
             user_display_name=user.display_name,
         )
         return order, True
+
+    async def _required_order_location(self, order: ProductionOrder) -> StockLocation:
+        location = await self._session.get(StockLocation, order.stock_location_id)
+        if location is None or not location.active:
+            raise ProductionOrderLocationInvalidError()
+        return location
+
+    async def results(self, order_id: int) -> list[ProductionOrderResultOut]:
+        rows = (
+            await self._session.scalars(
+                select(ProductionOrderResult)
+                .where(ProductionOrderResult.production_order_id == order_id)
+                .order_by(ProductionOrderResult.id)
+            )
+        ).all()
+        return [
+            ProductionOrderResultOut(
+                id=row.id,
+                production_order_id=row.production_order_id,
+                line_ref=(
+                    f"POL:{row.production_order_line_id}"
+                    if row.production_order_line_id is not None
+                    else f"V2P:{row.v2_quotation_product_id}"
+                    if row.v2_quotation_product_id is not None
+                    else f"V2F:{row.v2_firing_quotation_line_id}"
+                ),
+                product_id=row.product_id,
+                started_quantity=row.started_quantity,
+                good_quantity=row.good_quantity,
+                scrap_quantity=row.scrap_quantity,
+                scrap_reason=row.scrap_reason,
+                recorded_by_name=row.recorded_by_name,
+                recorded_at=row.recorded_at,
+            )
+            for row in rows
+        ]
+
+    async def wip(self) -> list[ProductionWipOut]:
+        orders = (
+            await self._session.scalars(
+                select(ProductionOrder)
+                .where(ProductionOrder.status == ProductionOrderStatus.STARTED)
+                .order_by(ProductionOrder.started_at, ProductionOrder.id)
+            )
+        ).all()
+        if not orders:
+            return []
+
+        assignment_rows = (
+            await self._session.execute(
+                select(KilnBatchAssignment, KilnBatch)
+                .join(KilnBatch, KilnBatch.id == KilnBatchAssignment.batch_id)
+                .where(
+                    KilnBatchAssignment.production_order_id.in_([order.id for order in orders]),
+                    KilnBatch.status != KilnBatchStatus.CANCELLED,
+                )
+                .order_by(KilnBatchAssignment.id)
+            )
+        ).all()
+        by_line: dict[str, list[tuple[KilnBatchAssignment, KilnBatch]]] = {}
+        for assignment, batch in assignment_rows:
+            if assignment.v2_quotation_product_id is not None:
+                ref = f"V2P:{assignment.v2_quotation_product_id}"
+            elif assignment.v2_firing_quotation_line_id is not None:
+                ref = f"V2F:{assignment.v2_firing_quotation_line_id}"
+            else:
+                continue
+            by_line.setdefault(ref, []).append((assignment, batch))
+
+        output: list[ProductionWipOut] = []
+        for order in orders:
+            lines: list[tuple[str, str, Decimal, ProductionOrderOrigin]] = []
+            if order.v2_firing_handoff_id is not None:
+                firing_handoff = await self._session.get(
+                    V2FiringProductionHandoff, order.v2_firing_handoff_id
+                )
+                if firing_handoff is None:
+                    continue
+                firing_lines = (
+                    await self._session.scalars(
+                        select(V2FiringQuotationLine)
+                        .where(
+                            V2FiringQuotationLine.v2_firing_quotation_id
+                            == firing_handoff.v2_firing_quotation_id
+                        )
+                        .order_by(V2FiringQuotationLine.sort_order, V2FiringQuotationLine.id)
+                    )
+                ).all()
+                lines = [
+                    (
+                        f"V2F:{line.id}",
+                        line.product_name_snapshot or "Pieza de Solo Quema",
+                        Decimal(line.quantity),
+                        ProductionOrderOrigin.SOLO_QUEMA,
+                    )
+                    for line in firing_lines
+                ]
+            elif order.v2_handoff_id is not None:
+                production_handoff = await self._session.get(
+                    V2ProductionHandoff, order.v2_handoff_id
+                )
+                if production_handoff is None:
+                    continue
+                quotation_lines = (
+                    await self._session.scalars(
+                        select(V2QuotationProduct)
+                        .where(
+                            V2QuotationProduct.v2_quotation_id == production_handoff.v2_quotation_id
+                        )
+                        .order_by(V2QuotationProduct.sort_order, V2QuotationProduct.id)
+                    )
+                ).all()
+                lines = [
+                    (
+                        f"V2P:{line.id}",
+                        line.product_name_snapshot or "Pieza V2",
+                        Decimal(line.quantity),
+                        ProductionOrderOrigin.V2_QUOTATION,
+                    )
+                    for line in quotation_lines
+                ]
+            else:
+                legacy_lines = (
+                    await self._session.scalars(
+                        select(ProductionOrderLine)
+                        .where(ProductionOrderLine.production_order_id == order.id)
+                        .order_by(ProductionOrderLine.sort_order, ProductionOrderLine.id)
+                    )
+                ).all()
+                source = (
+                    ProductionOrderOrigin.PROTOTYPE
+                    if order.prototype_id is not None
+                    else ProductionOrderOrigin.QUOTATION
+                )
+                lines = [
+                    (
+                        f"POL:{line.id}",
+                        line.product_name_snapshot,
+                        Decimal(line.quantity or 0),
+                        source,
+                    )
+                    for line in legacy_lines
+                ]
+
+            for line_ref, product_name, quantity, source in lines:
+                if quantity <= 0:
+                    continue
+                assignments = by_line.get(line_ref, [])
+                active = [
+                    (assignment, batch)
+                    for assignment, batch in assignments
+                    if assignment.status is KilnBatchAssignmentStatus.ACTIVE
+                ]
+                completed = [
+                    (assignment, batch)
+                    for assignment, batch in assignments
+                    if batch.status is KilnBatchStatus.COMPLETED
+                ]
+                if completed:
+                    assignment, batch = completed[-1]
+                    stage = ProductionWipStage.QUEMADA
+                elif any(batch.status is KilnBatchStatus.STARTED for _, batch in active):
+                    assignment, batch = next(
+                        pair for pair in active if pair[1].status is KilnBatchStatus.STARTED
+                    )
+                    stage = ProductionWipStage.EN_HORNO
+                elif any(batch.status is KilnBatchStatus.PLANNED for _, batch in active):
+                    assignment, batch = next(
+                        pair for pair in active if pair[1].status is KilnBatchStatus.PLANNED
+                    )
+                    stage = ProductionWipStage.PROGRAMADA_HORNO
+                else:
+                    assignment, batch = None, None
+                    stage = ProductionWipStage.EN_PRODUCCION
+                output.append(
+                    ProductionWipOut(
+                        production_order_id=order.id,
+                        production_order_code=order.code,
+                        source=source,
+                        line_ref=line_ref,
+                        product_name=product_name,
+                        started_quantity=quantity,
+                        stage=stage,
+                        kiln_batch_id=batch.id if batch is not None else None,
+                        kiln_batch_code=batch.code if batch is not None else None,
+                    )
+                )
+        return output
 
     async def cancel(
         self, order_id: int, *, user: AuthenticatedUser
@@ -2414,6 +2909,7 @@ class ProductionOrderService:
         prototype: Prototype | None,
         prototype_quotation: PrototypeQuotation | None,
         v2_quotation: V2Quotation | None = None,
+        v2_firing_quotation: V2FiringQuotation | None = None,
     ) -> dict[str, object]:
         """Los campos de origen de una orden. UN solo sitio que los arma.
 
@@ -2438,6 +2934,8 @@ class ProductionOrderService:
             "prototype_quotation_code": None,
             "v2_quotation_id": None,
             "v2_quotation_code": None,
+            "v2_firing_quotation_id": None,
+            "v2_firing_quotation_code": None,
             # Fase 010I. El cliente CONGELADO en la cotizacion de origen. Una
             # muestra no lo tenia y no se le inventa.
             "customer_name": None,
@@ -2449,6 +2947,18 @@ class ProductionOrderService:
                 "v2_quotation_id": v2_quotation.id if v2_quotation else None,
                 "v2_quotation_code": v2_quotation.code if v2_quotation else None,
                 "customer_name": v2_quotation.customer_name_snapshot if v2_quotation else None,
+            }
+        if order.v2_firing_handoff_id is not None:
+            return {
+                **vacio,
+                "origin_type": ProductionOrderOrigin.SOLO_QUEMA,
+                "v2_firing_quotation_id": (v2_firing_quotation.id if v2_firing_quotation else None),
+                "v2_firing_quotation_code": (
+                    v2_firing_quotation.code if v2_firing_quotation else None
+                ),
+                "customer_name": (
+                    v2_firing_quotation.customer_name_snapshot if v2_firing_quotation else None
+                ),
             }
         if order.prototype_id is not None:
             return {
@@ -2477,6 +2987,19 @@ class ProductionOrderService:
             select(V2Quotation)
             .join(V2ProductionHandoff, V2ProductionHandoff.v2_quotation_id == V2Quotation.id)
             .where(V2ProductionHandoff.id == order.v2_handoff_id)
+        )
+
+    async def _v2_firing_quotation_of(self, order: ProductionOrder) -> V2FiringQuotation | None:
+        """La Solo Quema de una orden, resuelta por su puente de produccion."""
+        if order.v2_firing_handoff_id is None:
+            return None
+        return await self._session.scalar(
+            select(V2FiringQuotation)
+            .join(
+                V2FiringProductionHandoff,
+                V2FiringProductionHandoff.v2_firing_quotation_id == V2FiringQuotation.id,
+            )
+            .where(V2FiringProductionHandoff.id == order.v2_firing_handoff_id)
         )
 
     # -- piezas V2 para el taller (Fase 010I) ---------------------------------
@@ -2567,6 +3090,25 @@ class ProductionOrderService:
         )
         return dict(filas.tuples().all())
 
+    async def _v2_firing_quotations_for(
+        self, orders: Iterable[ProductionOrder]
+    ) -> dict[int, V2FiringQuotation]:
+        """Las Solo Quema de TODA una pagina, por id de puente."""
+        handoff_ids = {
+            order.v2_firing_handoff_id for order in orders if order.v2_firing_handoff_id is not None
+        }
+        if not handoff_ids:
+            return {}
+        filas = await self._session.execute(
+            select(V2FiringProductionHandoff.id, V2FiringQuotation)
+            .join(
+                V2FiringQuotation,
+                V2FiringQuotation.id == V2FiringProductionHandoff.v2_firing_quotation_id,
+            )
+            .where(V2FiringProductionHandoff.id.in_(handoff_ids))
+        )
+        return dict(filas.tuples().all())
+
     async def _origin(self, order: ProductionOrder) -> dict[str, object]:
         """El origen de UNA orden, para la ficha."""
         muestra = (
@@ -2590,6 +3132,7 @@ class ProductionOrderService:
             prototype=muestra,
             prototype_quotation=cpr,
             v2_quotation=await self._v2_quotation_of(order),
+            v2_firing_quotation=await self._v2_firing_quotation_of(order),
         )
 
     async def _origins_for(self, orders: Sequence[ProductionOrder]) -> dict[int, dict[str, object]]:
@@ -2601,6 +3144,7 @@ class ProductionOrderService:
         quotations = await self._quotations_for(orders)
         prototypes = await self._prototypes_for(orders)
         v2_quotations = await self._v2_quotations_for(orders)
+        v2_firing_quotations = await self._v2_firing_quotations_for(orders)
         cpr_ids = {
             muestra.prototype_quotation_id
             for muestra in prototypes.values()
@@ -2632,6 +3176,11 @@ class ProductionOrderService:
                     if order.v2_handoff_id is not None
                     else None
                 ),
+                v2_firing_quotation=(
+                    v2_firing_quotations.get(order.v2_firing_handoff_id)
+                    if order.v2_firing_handoff_id is not None
+                    else None
+                ),
             )
         return resultado
 
@@ -2654,12 +3203,19 @@ class ProductionOrderService:
         # Fase 010I. El cliente de una orden V2 es el que quedo congelado en su
         # cotizacion V2 al emitirla, no el del maestro de hoy.
         v2_quotation = await self._v2_quotation_of(order)
+        v2_firing_quotation = await self._v2_firing_quotation_of(order)
         piezas_v2 = await self._v2_pieces_for([order])
+        fuentes_resultado = await self._result_sources(
+            order,
+            v2_lines=piezas_v2.get(order.v2_handoff_id or 0),
+        )
         cliente = (
             quotation.customer_name_snapshot
             if quotation
             else v2_quotation.customer_name_snapshot
             if v2_quotation
+            else v2_firing_quotation.customer_name_snapshot
+            if v2_firing_quotation
             else None
         )
 
@@ -2684,6 +3240,9 @@ class ProductionOrderService:
                 for pieza in piezas_v2.get(order.v2_handoff_id or 0, [])
             ],
             lines=[self._present_line(line, prepared) for line in order.lines],
+            result_lines=[
+                ProductionResultLineSourceOut.model_validate(fuente) for fuente in fuentes_resultado
+            ],
             readiness=ProductionReadinessOut(
                 ready=readiness.ready,
                 issues=[

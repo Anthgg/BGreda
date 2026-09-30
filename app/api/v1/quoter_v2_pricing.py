@@ -25,20 +25,23 @@ from app.api.deps import (
     V2ReductionsServiceDep,
 )
 from app.core.quoter_v2_config import BASE_CURRENCY
+from app.core.quoter_v2_rules_010p import minutes_to_hours, passive_space_suggestion
 from app.schemas.quoter_v2_pricing import (
+    V2ExternalWorkerOut,
     V2PricingIn,
     V2PricingLineOut,
     V2PricingOut,
     V2ReductionOut,
     V2ReductionsOut,
 )
-from app.services.quoter_v2_pricing import PricingState
+from app.services.quoter_v2_pricing import PricingState, effective_space_cost_per_hour
 
 router = APIRouter(tags=["cotizador-v2"])
 
 
 def _out(estado: PricingState) -> V2PricingOut:
     quotation = estado.quotation
+    por_hora = effective_space_cost_per_hour(quotation)
     return V2PricingOut(
         materials_cost=quotation.materials_cost_total,
         labor_cost=quotation.labor_cost_total,
@@ -89,6 +92,9 @@ def _out(estado: PricingState) -> V2PricingOut:
                 general_cost=linea.allocated_general_cost,
                 production_cost=linea.allocated_production_cost,
                 real_cost=linea.allocated_real_cost,
+                external_commercial_cost=linea.allocated_external_commercial_cost,
+                external_real_cost=linea.allocated_external_real_cost,
+                line_active_minutes=linea.line_active_minutes,
                 line_price=linea.line_price,
                 unit_price_raw=linea.unit_price_raw,
                 unit_price=linea.unit_price,
@@ -99,6 +105,35 @@ def _out(estado: PricingState) -> V2PricingOut:
             )
             for linea in estado.lines
         ],
+        pricing_rules_version=quotation.pricing_rules_version,
+        active_production_minutes=quotation.active_production_minutes,
+        active_production_hours=minutes_to_hours(quotation.active_production_minutes),
+        commercial_external_labor_cost=quotation.commercial_external_labor_cost,
+        real_external_labor_cost=quotation.real_external_labor_cost,
+        labor_cost_gap=quotation.real_external_labor_cost
+        - quotation.commercial_external_labor_cost,
+        external_workers=[
+            V2ExternalWorkerOut(
+                worker_id=fila.worker_id,
+                name=estado.worker_names.get(fila.worker_id),
+                daily_rate=fila.daily_rate,
+                workday_hours=fila.workday_hours,
+                hourly_equivalent=fila.hourly_equivalent,
+                days_paid=fila.days_paid,
+                commercial_cost=fila.commercial_cost,
+                real_cost=fila.real_cost,
+            )
+            for fila in estado.external_labor.per_worker
+        ],
+        space_cost_per_hour_snapshot=quotation.space_cost_per_hour_snapshot,
+        space_cost_per_hour_override=quotation.space_cost_per_hour_override,
+        effective_space_cost_per_hour=por_hora,
+        passive_time_hours=quotation.passive_time_hours,
+        passive_space_suggestion=passive_space_suggestion(quotation.passive_time_hours, por_hora),
+        wholesale_threshold=quotation.wholesale_threshold_snapshot,
+        total_units=estado.total_units,
+        wholesale_suggested=estado.wholesale_suggested,
+        wholesale_suggestion_declined=quotation.wholesale_suggestion_declined_at is not None,
         warnings=estado.warnings,
     )
 

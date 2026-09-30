@@ -1,0 +1,13 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\anthg\BGreda-010p-w2\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\anthg\BGreda-010p-w2
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=session, asyncio_default_test_loop_scope=session
+collecting ... collected 2 items
+
+tests/db/test_production_results_010p.py::test_complete_linea_custom_crea_un_producto_categoria_y_stock_30 PASSED [ 50%]
+tests/db/test_quoter_v2_lifecycle_api.py::TestEmitir::test_cambiar_el_cliente_o_las_condiciones_tras_el_resumen_da_conflicto PASSED [100%]
+
+============================= 2 passed in 24.65s ==============================

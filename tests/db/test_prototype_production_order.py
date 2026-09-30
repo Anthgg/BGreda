@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.inventory import MovementType, StockBalance, StockMovement
 from app.models.production import ProductionOrder, ProductionOrderStatus
 from app.models.prototypes import Prototype, PrototypeMaterialLine
-from tests.db.test_production_orders_api import crear_ubicacion, dar_existencia
+from tests.db.test_production_orders_api import completar_orden, crear_ubicacion, dar_existencia
 from tests.db.test_prototype_quotations import (
     COTIZADOR,
     _caso_referencia,
@@ -449,9 +449,9 @@ async def test_completar_no_vuelve_a_consumir_ni_aprueba_la_muestra(
     db_session.expire_all()
     tras_arranque = await _saldo(db_session, pasta["id"], almacen)
 
-    completada = await api.post(f"{ORDENES}/{orden_id}/complete", headers=head(admin_csrf))
+    completada = await completar_orden(api, admin_csrf, int(orden_id))
     assert completada.status_code == 200, completada.text
-    assert completada.json()["status"] == "COMPLETED"
+    assert completada.json()["order"]["status"] == "COMPLETED"
 
     db_session.expire_all()
     assert await _saldo(db_session, pasta["id"], almacen) == tras_arranque

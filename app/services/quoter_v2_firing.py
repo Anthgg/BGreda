@@ -65,6 +65,7 @@ from app.models.quoter_v2 import (
 from app.models.quoter_v2_settings import V2KilnRate
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_locks import lock_quotation_for_recalculation
 from app.services.quoter_v2_pricing import refresh_pricing
 
 ZERO = Decimal(0)
@@ -259,6 +260,62 @@ def _commercial_rate(rate: V2KilnRate, customer_kind: V2CustomerKind) -> Decimal
     return rate.external_rate
 
 
+async def freeze_kiln_rates(session: AsyncSession, quotation: V2Quotation) -> bool:
+    """Congela las tarifas del horno de la cotizacion que aun no esten congeladas.
+
+    Devuelve True si al horno le falta alguna tarifa. Se llama en cada
+    recalculo y, desde 010P, tambien al CREAR la cotizacion: las tarifas
+    quedan congeladas desde el primer instante y no al primer calculo, asi que
+    un cambio de Configuracion entre crear y calcular ya no se cuela. Lo ya
+    congelado o pactado nunca se reescribe.
+    """
+    if quotation.kiln_id is None:
+        return False
+    tarifas = await _rates_of(session, quotation.kiln_id)
+    cliente = quotation.customer_kind or V2CustomerKind.EXTERNAL
+    falta_tarifa = False
+
+    for tipo, gas_campo, comercial_campo, gas_override, comercial_override in (
+        (
+            FiringType.LOW,
+            "gas_cost_low_snapshot",
+            "commercial_rate_low_snapshot",
+            "gas_low_is_override",
+            "commercial_low_is_override",
+        ),
+        (
+            FiringType.HIGH,
+            "gas_cost_high_snapshot",
+            "commercial_rate_high_snapshot",
+            "gas_high_is_override",
+            "commercial_high_is_override",
+        ),
+    ):
+        fila = tarifas.get(tipo)
+        if fila is None:
+            # Sin tarifa configurada no se inventa una: la aritmetica de abajo
+            # cuenta el hueco como cero y se avisa.
+            #
+            # El snapshot se deja en NULL a proposito. Guardar aqui un cero lo
+            # volveria indistinguible de una tarifa elegida, y el recalculo
+            # siguiente ya no lo rellenaria: configurar la tarifa despues
+            # dejaria el borrador costeando en cero para siempre.
+            falta_tarifa = True
+            continue
+        # Los snapshots se toman UNA vez. Si ya estan —congelados al elegir el
+        # horno o pactados dentro de la cotizacion— se respetan: subir manana
+        # la tarifa del taller no puede reescribir un precio ya entregado.
+        if not getattr(quotation, gas_override) and getattr(quotation, gas_campo) is None:
+            setattr(quotation, gas_campo, fila.gas_cost)
+        if (
+            not getattr(quotation, comercial_override)
+            and getattr(quotation, comercial_campo) is None
+        ):
+            setattr(quotation, comercial_campo, _commercial_rate(fila, cliente))
+
+    return falta_tarifa
+
+
 def _cost_in_kiln(
     load: Decimal,
     rates: dict[FiringType, V2KilnRate],
@@ -388,47 +445,7 @@ async def _recalculate(
     quotation.low_fire_count = hornadas if baja else 0
     quotation.high_fire_count = hornadas if alta else 0
 
-    tarifas = await _rates_of(session, quotation.kiln_id)
-    cliente = quotation.customer_kind or V2CustomerKind.EXTERNAL
-    falta_tarifa = False
-
-    for tipo, gas_campo, comercial_campo, gas_override, comercial_override in (
-        (
-            FiringType.LOW,
-            "gas_cost_low_snapshot",
-            "commercial_rate_low_snapshot",
-            "gas_low_is_override",
-            "commercial_low_is_override",
-        ),
-        (
-            FiringType.HIGH,
-            "gas_cost_high_snapshot",
-            "commercial_rate_high_snapshot",
-            "gas_high_is_override",
-            "commercial_high_is_override",
-        ),
-    ):
-        fila = tarifas.get(tipo)
-        if fila is None:
-            # Sin tarifa configurada no se inventa una: la aritmetica de abajo
-            # cuenta el hueco como cero y se avisa.
-            #
-            # El snapshot se deja en NULL a proposito. Guardar aqui un cero lo
-            # volveria indistinguible de una tarifa elegida, y el recalculo
-            # siguiente ya no lo rellenaria: configurar la tarifa despues
-            # dejaria el borrador costeando en cero para siempre.
-            falta_tarifa = True
-            continue
-        # Los snapshots se toman UNA vez. Si ya estan —congelados al elegir el
-        # horno o pactados dentro de la cotizacion— se respetan: subir manana
-        # la tarifa del taller no puede reescribir un precio ya entregado.
-        if not getattr(quotation, gas_override) and getattr(quotation, gas_campo) is None:
-            setattr(quotation, gas_campo, fila.gas_cost)
-        if (
-            not getattr(quotation, comercial_override)
-            and getattr(quotation, comercial_campo) is None
-        ):
-            setattr(quotation, comercial_campo, _commercial_rate(fila, cliente))
+    falta_tarifa = await freeze_kiln_rates(session, quotation)
 
     if falta_tarifa:
         avisos.append(WARN_RATES_MISSING)
@@ -665,8 +682,14 @@ class V2FiringService:
         return max(elegibles, key=lambda horno: (horno.capacity_cm3, -horno.kiln_id)).kiln_id
 
     async def quotation(self, quotation_id: int) -> V2Quotation:
-        """La cotizacion, para LEER. Sin bloqueo y sin exigir que sea borrador."""
-        quotation = await self._session.get(V2Quotation, quotation_id)
+        """La cotizacion para LEER su quema, sin exigir que sea borrador.
+
+        Con la cabecera BLOQUEADA (Fase 010P): leer un borrador lo recalcula, y
+        recalcular escribe lineas. Sin tomar antes la cabecera, como hacen las
+        escrituras, una lectura y un guardado simultaneos se bloqueaban en
+        cruz (`quoter_v2_locks`).
+        """
+        quotation = await lock_quotation_for_recalculation(self._session, quotation_id)
         if quotation is None:
             raise V2FiringQuotationNotFoundError()
         return quotation

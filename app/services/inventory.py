@@ -15,10 +15,23 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
-from app.models.inventory import MovementType, StockBalance, StockLocation, StockMovement
-from app.models.masters import Product, UnitOfMeasure
+from app.models.inventory import (
+    MovementType,
+    StockBalance,
+    StockLocation,
+    StockLotBalance,
+    StockMovement,
+)
+from app.models.masters import Product, ProductType, UnitOfMeasure
+from app.models.production import ProductionOrder, ProductionOrderResult, ProductionOrderStatus
+from app.models.quoter_v2 import V2ProductionHandoff, V2QuotationProduct
+from app.models.recipes import PreparationStatus, RecipePreparation
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.inventory import StockAdjustmentCreate, StockLocationCreate
+from app.schemas.inventory import (
+    StockAdjustmentCreate,
+    StockDeliveryCreate,
+    StockLocationCreate,
+)
 
 MAX_PAGE_SIZE = 200
 
@@ -55,6 +68,30 @@ class MissingUomError(APIError):
     status_code = 422
     code = "PRODUCT_WITHOUT_UOM"
     message = "El producto no tiene unidad de medida y no puede llevar existencia"
+
+
+class PreparationLotRequiredError(APIError):
+    status_code = 422
+    code = "PREPARATION_LOT_REQUIRED"
+    message = "El consumo de material preparado requiere un lote explicito"
+
+
+class InvalidPreparationLotError(APIError):
+    status_code = 422
+    code = "PREPARATION_LOT_INVALID"
+    message = "El lote no pertenece al material preparado y la ubicacion indicados"
+
+
+class LotInsufficientStockError(APIError):
+    status_code = 422
+    code = "LOT_INSUFFICIENT_STOCK"
+    message = "El lote elegido no tiene existencia suficiente"
+
+
+class DeliveryOriginInvalidError(APIError):
+    status_code = 422
+    code = "DELIVERY_ORIGIN_INVALID"
+    message = "El producto no corresponde al origen de entrega indicado"
 
 
 def _limit(limit: int) -> int:
@@ -150,6 +187,101 @@ class InventoryService:
         )
         return [tuple(row) for row in rows.all()], int(total or 0)
 
+    async def list_lots(
+        self, *, product_id: int | None = None, location_id: int | None = None
+    ) -> list[tuple[StockLotBalance, RecipePreparation]]:
+        stmt = (
+            select(StockLotBalance, RecipePreparation)
+            .join(RecipePreparation, RecipePreparation.id == StockLotBalance.preparation_id)
+            .where(
+                StockLotBalance.quantity > 0,
+                RecipePreparation.status == PreparationStatus.COMPLETED,
+            )
+        )
+        if product_id is not None:
+            stmt = stmt.where(StockLotBalance.product_id == product_id)
+        if location_id is not None:
+            stmt = stmt.where(StockLotBalance.location_id == location_id)
+        stmt = stmt.order_by(RecipePreparation.prepared_at, RecipePreparation.id)
+        return [tuple(row) for row in (await self._session.execute(stmt)).all()]
+
+    async def _apply_prepared_lot_delta(
+        self,
+        *,
+        product: Product,
+        location: StockLocation,
+        quantity: Decimal,
+        movement_type: MovementType,
+        preparation_id: int | None,
+        source_preparation_id: int | None,
+        expected_aggregate: Decimal,
+    ) -> None:
+        if product.product_type is not ProductType.PREPARED_MATERIAL:
+            return
+
+        if movement_type is MovementType.PREPARATION_IN:
+            lot_id = preparation_id
+            if lot_id is None or quantity <= 0:
+                raise PreparationLotRequiredError()
+            await self._session.execute(
+                pg_insert(StockLotBalance)
+                .values(
+                    preparation_id=lot_id,
+                    product_id=product.id,
+                    location_id=location.id,
+                    quantity=Decimal(0),
+                    uom_code=product.base_uom_code,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        StockLotBalance.preparation_id,
+                        StockLotBalance.location_id,
+                    ]
+                )
+            )
+        elif movement_type is MovementType.PREPARATION_OUT:
+            lot_id = source_preparation_id
+            if lot_id is None or quantity >= 0:
+                raise PreparationLotRequiredError()
+        else:
+            lot_id = source_preparation_id or preparation_id
+            if lot_id is None:
+                raise PreparationLotRequiredError()
+
+        preparation = await self._session.get(RecipePreparation, lot_id)
+        if (
+            preparation is None
+            or preparation.prepared_product_id != product.id
+            or preparation.location_id != location.id
+            or preparation.status is not PreparationStatus.COMPLETED
+        ):
+            raise InvalidPreparationLotError()
+
+        lot = await self._session.scalar(
+            select(StockLotBalance)
+            .where(
+                StockLotBalance.preparation_id == lot_id,
+                StockLotBalance.product_id == product.id,
+                StockLotBalance.location_id == location.id,
+            )
+            .with_for_update()
+        )
+        if lot is None:
+            raise InvalidPreparationLotError()
+        lot_quantity = lot.quantity + quantity
+        if lot_quantity < 0:
+            raise LotInsufficientStockError()
+        lot.quantity = lot_quantity
+
+        lot_total = await self._session.scalar(
+            select(func.coalesce(func.sum(StockLotBalance.quantity), Decimal(0))).where(
+                StockLotBalance.product_id == product.id,
+                StockLotBalance.location_id == location.id,
+            )
+        )
+        if lot_total != expected_aggregate:
+            raise RuntimeError("El saldo agregado y la suma de lotes preparados divergen")
+
     async def get_movement(
         self, movement_id: int
     ) -> tuple[StockMovement, Product, StockLocation] | None:
@@ -175,8 +307,10 @@ class InventoryService:
         user_name: str | None,
         import_batch_id: int | None = None,
         preparation_id: int | None = None,
+        source_preparation_id: int | None = None,
         production_order_id: int | None = None,
         prototype_id: int | None = None,
+        v2_quotation_id: int | None = None,
     ) -> StockMovement:
         """Aplica un delta y deja la evidencia que lo respalda.
 
@@ -214,6 +348,22 @@ class InventoryService:
         if new_quantity < 0:
             raise NegativeStockError()
 
+        await self._apply_prepared_lot_delta(
+            product=product,
+            location=location,
+            quantity=quantity,
+            movement_type=movement_type,
+            preparation_id=preparation_id,
+            source_preparation_id=source_preparation_id,
+            expected_aggregate=new_quantity,
+        )
+
+        if (
+            product.product_type is ProductType.PREPARED_MATERIAL
+            and movement_type is not MovementType.PREPARATION_IN
+        ):
+            source_preparation_id = source_preparation_id or preparation_id
+
         balance.quantity = new_quantity
         movement = StockMovement(
             product_id=product.id,
@@ -225,8 +375,10 @@ class InventoryService:
             reason=reason,
             import_batch_id=import_batch_id,
             preparation_id=preparation_id,
+            source_preparation_id=source_preparation_id,
             production_order_id=production_order_id,
             prototype_id=prototype_id,
+            v2_quotation_id=v2_quotation_id,
             created_by=user_id,
             created_by_name=user_name,
         )
@@ -254,4 +406,66 @@ class InventoryService:
             reason=payload.reason,
             user_id=user.id,
             user_name=user.display_name,
+            preparation_id=payload.preparation_id,
         )
+
+    async def deliver(
+        self, payload: StockDeliveryCreate, user: AuthenticatedUser
+    ) -> tuple[StockMovement, Product, StockLocation]:
+        product = await self._session.get(Product, payload.product_id)
+        location = await self._session.get(StockLocation, payload.location_id)
+        if product is None or location is None or not location.active:
+            raise InventoryNotFoundError()
+        if product.product_type is not ProductType.FINISHED_PRODUCT:
+            raise DeliveryOriginInvalidError()
+
+        order: ProductionOrder | None = None
+        if payload.production_order_id is not None:
+            order = await self._session.get(ProductionOrder, payload.production_order_id)
+            if (
+                order is None
+                or order.status is not ProductionOrderStatus.COMPLETED
+                or order.v2_firing_handoff_id is not None
+            ):
+                raise DeliveryOriginInvalidError()
+            result_product_id = await self._session.scalar(
+                select(ProductionOrderResult.product_id).where(
+                    ProductionOrderResult.production_order_id == order.id,
+                    ProductionOrderResult.product_id == product.id,
+                    ProductionOrderResult.good_quantity > 0,
+                )
+            )
+            if result_product_id is None:
+                raise DeliveryOriginInvalidError()
+
+        if payload.v2_quotation_id is not None:
+            line_id = await self._session.scalar(
+                select(V2QuotationProduct.id).where(
+                    V2QuotationProduct.v2_quotation_id == payload.v2_quotation_id,
+                    (V2QuotationProduct.product_id == product.id)
+                    | (V2QuotationProduct.id == product.source_v2_quotation_product_id),
+                )
+            )
+            if line_id is None:
+                raise DeliveryOriginInvalidError()
+            if order is not None:
+                handoff = (
+                    await self._session.get(V2ProductionHandoff, order.v2_handoff_id)
+                    if order.v2_handoff_id is not None
+                    else None
+                )
+                if handoff is None or handoff.v2_quotation_id != payload.v2_quotation_id:
+                    raise DeliveryOriginInvalidError()
+
+        movement = await self.apply_movement(
+            product=product,
+            location=location,
+            quantity=-payload.quantity,
+            movement_type=MovementType.DELIVERY_OUT,
+            reason=payload.reason,
+            user_id=user.id,
+            user_name=user.display_name,
+            production_order_id=order.id if order is not None else None,
+            v2_quotation_id=payload.v2_quotation_id,
+        )
+        return movement, product, location

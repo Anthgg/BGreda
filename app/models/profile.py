@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from enum import StrEnum
 
-from sqlalchemy import Boolean, CheckConstraint, String, text
+from sqlalchemy import ARRAY, Boolean, CheckConstraint, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +50,9 @@ class Profile(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"), index=True
     )
+    capabilities: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]")
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -59,6 +62,10 @@ class Profile(Base, TimestampMixin):
         CheckConstraint(
             "length(btrim(display_name)) > 0",
             name="display_name_not_blank",
+        ),
+        CheckConstraint(
+            "capabilities <@ ARRAY['MASTERS_QUICK_CREATE']::text[]",
+            name="capabilities_allowed",
         ),
     )
 

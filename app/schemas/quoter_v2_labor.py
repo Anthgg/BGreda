@@ -212,6 +212,9 @@ class V2LaborOut(BaseModel):
     hours_overridden: bool
     is_additional_personnel: bool
     labor_cost: Decimal
+    #: Fase 010P. Quien eligio a la persona: DEFAULT la puso el sistema (y
+    #: aceptar «por mayor» puede cambiarla); MANUAL, alguien a mano, y se respeta.
+    assignment_origin: str = "MANUAL"
 
     warnings: list[str] = []
 

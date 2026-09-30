@@ -1,0 +1,54 @@
+# Build-only pipeline for the controlled 010P pre-migration backup job image.
+# This file never executes the Cloud Run Job and never connects to production.
+
+substitutions:
+  _IMAGE: southamerica-west1-docker.pkg.dev/cotizador-greda/cloud-run-source-deploy/bgreda-backup
+  _RELEASE_SHA: UNSET
+  _RELEASE_TAG: p010p-unset
+
+steps:
+  - id: validate-release-identity
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        [[ '$_RELEASE_SHA' =~ ^[0-9a-f]{40}$ ]] || { echo 'RELEASE_SHA must be a full lowercase merge SHA'; exit 1; }
+        [[ '$_RELEASE_TAG' == "p010p-$_RELEASE_SHA" ]] || { echo 'RELEASE_TAG must equal p010p-<full merge SHA>'; exit 1; }
+
+  - id: docker-build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=Dockerfile.backup
+      - --tag=$_IMAGE:$_RELEASE_TAG
+      - --label=git-sha=$_RELEASE_SHA
+      - --label=repository=BGreda-backup
+      - --label=phase=010p
+      - .
+    waitFor: [validate-release-identity]
+
+  - id: docker-push-release
+    name: gcr.io/cloud-builders/docker
+    args: [push, $_IMAGE:$_RELEASE_TAG]
+    waitFor: [docker-build]
+
+  - id: resolve-immutable-digest
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        DIGEST="$$(gcloud artifacts docker images describe '$_IMAGE:$_RELEASE_TAG' --project="$PROJECT_ID" --format='value(image_summary.digest)')"
+        [[ "$$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Artifact Registry did not return an immutable digest'; exit 1; }
+        printf 'BUILD_ID=%s\nBACKUP_IMAGE_DIGEST=%s\nBACKUP_IMAGE_TAG=$_IMAGE:$_RELEASE_TAG\n' "$BUILD_ID" "$$DIGEST"
+    waitFor: [docker-push-release]
+
+images:
+  - $_IMAGE:$_RELEASE_TAG
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 1200s

@@ -28,7 +28,7 @@ from app.models.inventory import MovementType, StockMovement
 from app.models.production import ProductionOrder, ProductionOrderStatus
 from app.models.prototypes import Prototype, PrototypeStatus
 from tests.db.test_masters_api import create_category, create_product
-from tests.db.test_production_orders_api import crear_ubicacion, dar_existencia
+from tests.db.test_production_orders_api import completar_orden, crear_ubicacion, dar_existencia
 from tests.db.test_prototype_production_order import ORDENES, _cpr_confirmada
 from tests.db.test_prototype_quotations import COTIZADOR, _payload, cobrar
 from tests.db.test_prototypes import _muestra_lista as _muestra_por_el_camino_antiguo
@@ -156,7 +156,7 @@ async def test_completar_la_orden_completa_la_muestra(
     """
     datos = await _muestra_lista(api, admin_csrf, db_session, "_k4_estado")
     await api.post(f"{ORDENES}/{datos['orden_id']}/start", headers=head(admin_csrf))
-    completada = await api.post(f"{ORDENES}/{datos['orden_id']}/complete", headers=head(admin_csrf))
+    completada = await completar_orden(api, admin_csrf, int(datos["orden_id"]))
     assert completada.status_code == 200, completada.text
 
     db_session.expire_all()
@@ -203,7 +203,7 @@ async def test_la_evaluacion_se_guarda_en_la_muestra(
     """
     datos = await _muestra_lista(api, admin_csrf, db_session, "_k4_evalua")
     await api.post(f"{ORDENES}/{datos['orden_id']}/start", headers=head(admin_csrf))
-    await api.post(f"{ORDENES}/{datos['orden_id']}/complete", headers=head(admin_csrf))
+    await completar_orden(api, admin_csrf, int(datos["orden_id"]))
 
     aprobada = await api.post(
         f"{PROTOTIPOS}/{datos['muestra_id']}/approve",
@@ -237,7 +237,7 @@ async def test_una_muestra_rechazada_se_repite_con_su_propia_orden(
     """
     datos = await _muestra_lista(api, admin_csrf, db_session, "_k4_itera")
     await api.post(f"{ORDENES}/{datos['orden_id']}/start", headers=head(admin_csrf))
-    await api.post(f"{ORDENES}/{datos['orden_id']}/complete", headers=head(admin_csrf))
+    await completar_orden(api, admin_csrf, int(datos["orden_id"]))
 
     rechazada = await api.post(
         f"{PROTOTIPOS}/{datos['muestra_id']}/reject",

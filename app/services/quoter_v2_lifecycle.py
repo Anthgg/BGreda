@@ -67,8 +67,9 @@ from app.services.audit import AuditRecorder
 from app.services.quoter_v2 import CUSTOMER_ROLES, V2_QUOTATION_ENTITY, V2QuotationService
 from app.services.quoter_v2_firing import V2FiringService, refresh_firing
 from app.services.quoter_v2_labor import V2LaborService
+from app.services.quoter_v2_locks import lock_quotation_for_recalculation
 from app.services.quoter_v2_materials import V2MaterialService
-from app.services.quoter_v2_pricing import refresh_pricing
+from app.services.quoter_v2_pricing import PRICING_RULES_V2, refresh_pricing
 from app.services.quoter_v2_settings import V2SettingsService
 
 ZERO = Decimal(0)
@@ -109,6 +110,8 @@ BLOCK_CURRENCY_REQUIRED = "V2_CONFIRM_CURRENCY_REQUIRED"
 BLOCK_EXCHANGE_RATE_REQUIRED = "V2_CONFIRM_EXCHANGE_RATE_REQUIRED"
 BLOCK_VALIDITY_INVALID = "V2_CONFIRM_VALIDITY_INVALID"
 BLOCK_WORK_DAYS_REQUIRED = "V2_CONFIRM_WORK_DAYS_REQUIRED"
+#: Fase 010P: una linea sin tiempo por pieza no se puede emitir.
+BLOCK_LINE_TIME_REQUIRED = "V2_CONFIRM_LINE_TIME_REQUIRED"
 BLOCK_KILN_REQUIRED = "V2_CONFIRM_KILN_REQUIRED"
 BLOCK_TOTAL_REQUIRED = "V2_CONFIRM_TOTAL_REQUIRED"
 
@@ -348,8 +351,11 @@ class V2LifecycleService:
         Recalcula como cualquier lectura de un borrador —las lineas, las
         tareas o el horno pueden haber cambiado por otra via— y no confirma la
         transaccion: la ruta de lectura no persiste nada.
+
+        Fase 010P: bloquea PRIMERO la cabecera, como las escrituras, porque
+        recalcular escribe lineas (`quoter_v2_locks`).
         """
-        quotation = await self._session.get(V2Quotation, quotation_id)
+        quotation = await lock_quotation_for_recalculation(self._session, quotation_id)
         if quotation is None:
             raise V2LifecycleNotFoundError()
         avisos: list[str] = []
@@ -739,6 +745,9 @@ class V2LifecycleService:
                 "height_cm": linea.height_cm,
                 "body_unit_weight": linea.body_unit_weight,
                 "client_observation": linea.client_observation,
+                # Fase 010P: cuanto tarda y con cuantos moldes es del encargo.
+                "production_time_per_unit_minutes": linea.production_time_per_unit_minutes,
+                "mold_count": linea.mold_count,
             }
             if linea.product_id is None:
                 base["product_name"] = linea.product_name_snapshot
@@ -852,9 +861,36 @@ class V2LifecycleService:
             }
             if tarea.hours_overridden:
                 datos["final_hours_override"] = tarea.final_hours
+            # Fase 010P. Quien la eligio viaja con ella: una eleccion hecha a
+            # mano sigue siendo manual en el duplicado.
+            datos["assignment_origin"] = tarea.assignment_origin
+            # Al copiar las lineas, su proceso pudo recibir ya el trabajador por
+            # defecto: se reemplaza esa tarea en vez de colgar una segunda.
+            ya_asignada = (
+                None
+                if proceso is None
+                else await self._session.scalar(
+                    select(V2QuotationLabor).where(
+                        V2QuotationLabor.v2_quotation_process_id == proceso.id
+                    )
+                )
+            )
             try:
                 async with self._session.begin_nested():
-                    await self._labor.add_labor(nueva.id, datos, user=user)
+                    if ya_asignada is not None:
+                        await self._labor.update_labor(
+                            nueva.id,
+                            ya_asignada.id,
+                            {
+                                clave: valor
+                                for clave, valor in datos.items()
+                                if clave
+                                not in ("v2_quotation_process_id", "v2_quotation_product_id")
+                            },
+                            user=user,
+                        )
+                    else:
+                        await self._labor.add_labor(nueva.id, datos, user=user)
             except APIError:
                 avisos.append(
                     {
@@ -1256,7 +1292,14 @@ class V2LifecycleService:
             bloqueos.append(Blocker(BLOCK_EXCHANGE_RATE_REQUIRED))
         if dias is None or dias <= 0 or dias > MAX_VALIDITY_DAYS:
             bloqueos.append(Blocker(BLOCK_VALIDITY_INVALID))
-        if quotation.effective_work_days is None:
+        if quotation.pricing_rules_version >= PRICING_RULES_V2:
+            # Fase 010P. El costo sale del tiempo de cada pieza: una linea sin
+            # tiempo no puede emitirse. Los dias efectivos ya no mueven el precio
+            # y dejan de bloquear.
+            for linea in lines:
+                if linea.quantity > 0 and linea.production_time_per_unit_minutes is None:
+                    bloqueos.append(Blocker(BLOCK_LINE_TIME_REQUIRED, linea.id))
+        elif quotation.effective_work_days is None:
             bloqueos.append(Blocker(BLOCK_WORK_DAYS_REQUIRED))
         quemas = bool(quotation.low_fire_enabled) or bool(quotation.high_fire_enabled)
         if quemas and quotation.kiln_id is None:

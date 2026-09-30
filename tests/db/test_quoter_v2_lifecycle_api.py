@@ -90,6 +90,8 @@ async def cotizacion_completa(
                 "body_material_id": pasta_id,
                 "body_unit_weight": "450",
                 "client_observation": f"Observacion de {nombre}",
+                # Fase 010P: sin tiempo por pieza la linea no se puede emitir.
+                "production_time_per_unit_minutes": "6",
             },
             headers=h(csrf),
         )
@@ -844,3 +846,33 @@ class TestDocumento:
         assert Decimal(resumen["subtotal_amount"]) == sum(
             (Decimal(linea["line_subtotal"]) for linea in resumen["lines"]), Decimal(0)
         )
+
+
+async def test_25_rondas_concurrentes_de_precio_quema_preview_y_edicion(
+    api: httpx.AsyncClient, admin_csrf: str
+) -> None:
+    datos = await cotizacion_completa(api, admin_csrf)
+    qid = datos["id"]
+    line_id = datos["lines"][0]
+
+    for ronda in range(1, 26):
+        respuestas = await asyncio.gather(
+            api.get(f"{V2}/{qid}/pricing"),
+            api.get(f"{V2}/{qid}/firing"),
+            api.get(f"{V2}/{qid}/confirmation-preview"),
+            api.put(
+                f"{V2}/{qid}/products/{line_id}",
+                json={"production_time_per_unit_minutes": str(6 + ronda)},
+                headers=h(admin_csrf),
+            ),
+        )
+        fallos = [
+            f"{r.request.method} {r.request.url}: {r.status_code} {r.text[:300]}"
+            for r in respuestas
+            if r.status_code != 200
+        ]
+        assert not fallos, f"ronda {ronda}: {fallos}"
+
+    precio = await api.get(f"{V2}/{qid}/pricing")
+    assert precio.status_code == 200, precio.text
+    assert Decimal(precio.json()["active_production_minutes"]) == Decimal(3100)

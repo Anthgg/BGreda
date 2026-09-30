@@ -61,6 +61,11 @@ class MovementType(StrEnum):
     #: los materiales que alguien eligio para ESE prototipo, y mezclarlos
     #: haria imposible responder «cuanto barro se fue en muestras».
     PROTOTYPE_OUT = "PROTOTYPE_OUT"
+    #: Fase 010P W2: buenas de una linea de produccion que pasan a producto
+    #: terminado disponible en el taller.
+    PRODUCTION_IN = "PRODUCTION_IN"
+    #: Fase 010P W2: salida de producto terminado entregado al cliente.
+    DELIVERY_OUT = "DELIVERY_OUT"
 
 
 class StockLocation(Base, TimestampMixin):
@@ -101,6 +106,37 @@ class StockBalance(Base, TimestampMixin):
         UniqueConstraint("product_id", "location_id", name="uq_stock_balances_product_id"),
         CheckConstraint("quantity >= 0", name="quantity_not_negative"),
         Index("ix_stock_balances_location", "location_id"),
+    )
+
+
+class StockLotBalance(Base, TimestampMixin):
+    """Saldo de una preparacion fisica en una ubicacion."""
+
+    __tablename__ = "stock_lot_balances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    preparation_id: Mapped[int] = mapped_column(
+        ForeignKey("recipe_preparations.id", ondelete="RESTRICT"), nullable=False
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
+    )
+    location_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_locations.id", ondelete="RESTRICT"), nullable=False
+    )
+    quantity: Mapped[Decimal] = mapped_column(
+        stock_quantity_numeric(), nullable=False, server_default=text("0")
+    )
+    uom_code: Mapped[str] = mapped_column(
+        ForeignKey("units_of_measure.code", ondelete="RESTRICT"), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "preparation_id", "location_id", name="uq_stock_lot_balances_preparation_location"
+        ),
+        CheckConstraint("quantity >= 0", name="quantity_not_negative"),
+        Index("ix_stock_lot_balances_product_location", "product_id", "location_id"),
     )
 
 
@@ -146,6 +182,12 @@ class StockMovement(Base):
     production_order_id: Mapped[int | None] = mapped_column(
         ForeignKey("production_orders.id", ondelete="RESTRICT"), nullable=True, index=True
     )
+    source_preparation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recipe_preparations.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    v2_quotation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("v2_quotations.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     import_batch_id: Mapped[int | None] = mapped_column(
         ForeignKey("import_batches.id", ondelete="RESTRICT")
     )
@@ -162,7 +204,8 @@ class StockMovement(Base):
         CheckConstraint("balance_after >= 0", name="balance_after_not_negative"),
         CheckConstraint(
             "movement_type IN ('INITIAL_IMPORT', 'ADJUSTMENT', 'IN', 'OUT', "
-            "'PREPARATION_OUT', 'PREPARATION_IN', 'PRODUCTION_OUT', 'PROTOTYPE_OUT')",
+            "'PREPARATION_OUT', 'PREPARATION_IN', 'PRODUCTION_OUT', 'PROTOTYPE_OUT', "
+            "'PRODUCTION_IN', 'DELIVERY_OUT')",
             name="movement_type_allowed",
         ),
         Index("ix_stock_movements_product_created", "product_id", "created_at"),

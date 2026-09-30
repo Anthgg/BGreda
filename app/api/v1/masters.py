@@ -12,7 +12,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
-from app.api.deps import AdminUserDep, CurrentUserDep, DbSessionDep, MasterDataServiceDep
+from app.api.deps import (
+    AdminUserDep,
+    CurrentUserDep,
+    DbSessionDep,
+    MasterDataServiceDep,
+    MastersQuickCreateDep,
+)
+from app.core.errors import AuthInsufficientRoleError
 from app.models.masters import (
     Partner,
     PartnerRole,
@@ -22,6 +29,7 @@ from app.models.masters import (
     ProductType,
     UnitOfMeasure,
 )
+from app.models.profile import UserRole
 from app.schemas.common import ErrorResponse
 from app.schemas.masters import (
     PartnerCreate,
@@ -34,6 +42,7 @@ from app.schemas.masters import (
     ProductCategoryOut,
     ProductCategoryUpdate,
     ProductCreate,
+    ProductDetailOut,
     ProductOut,
     ProductPage,
     ProductUpdate,
@@ -203,19 +212,25 @@ async def list_products(
     return ProductPage(items=items, total=total, limit=limit, offset=offset)
 
 
-@router.get("/products/{product_id}", response_model=ProductOut, responses=_ERRORS)
+@router.get("/products/{product_id}", response_model=ProductDetailOut, responses=_ERRORS)
 async def read_product(
     product_id: int,
     _: CurrentUserDep,
     service: MasterDataServiceDep,
     session: DbSessionDep,
-) -> ProductOut:
+) -> ProductDetailOut:
     product = await service.get_product(product_id)
     category = await session.get(ProductCategory, product.product_category_id)
     pos_category = (
         await session.get(PosCategory, product.pos_category_id) if product.pos_category_id else None
     )
-    return _product_out(product, category=category, pos_category=pos_category)
+    out = _product_out(product, category=category, pos_category=pos_category)
+    return ProductDetailOut.model_validate(
+        {
+            **out.model_dump(),
+            "source_v2_quotation_product_id": product.source_v2_quotation_product_id,
+        }
+    )
 
 
 @router.post(
@@ -226,10 +241,16 @@ async def read_product(
 )
 async def create_product(
     payload: ProductCreate,
-    user: AdminUserDep,
+    user: MastersQuickCreateDep,
     service: MasterDataServiceDep,
     session: DbSessionDep,
 ) -> ProductOut:
+    if user.role is UserRole.OPERATOR and payload.product_type not in {
+        ProductType.FINISHED_PRODUCT,
+        ProductType.RAW_MATERIAL,
+        ProductType.PREPARED_MATERIAL,
+    }:
+        raise AuthInsufficientRoleError()
     product = await service.create_product(payload, user)
     await session.commit()
     await session.refresh(product)

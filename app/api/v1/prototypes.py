@@ -5,9 +5,9 @@ decide.** Quien esta en el taller registra la muestra, elige sus materiales, la
 arranca y la completa. Aprobar, rechazar y anular son decisiones administrativas
 —condicionan si un pedido entero se fabrica— y no se delegan.
 
-`POST /{id}/start` es el unico endpoint de todo el modulo que mueve inventario.
-Crear, editar, poner materiales, completar, aprobar, rechazar, anular e iterar
-dejan los saldos exactamente como estaban.
+`POST /{id}/start` descuenta materiales. `POST /{id}/complete` recibe el
+resultado físico y suma solo las unidades buenas al producto terminado.
+Crear, editar, aprobar, rechazar, anular e iterar no mueven inventario.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from app.api.deps import (
 )
 from app.models.prototypes import PrototypeApproval, PrototypeStatus
 from app.schemas.prototypes import (
+    PrototypeCompleteIn,
     PrototypeCreateIn,
     PrototypeDecisionIn,
     PrototypeMaterialsIn,
@@ -110,6 +111,7 @@ async def create_prototype(
             MaterialInput(
                 product_id=item.product_id,
                 quantity=item.quantity,
+                preparation_id=item.preparation_id,
                 material_role=item.material_role,
                 stage=item.stage,
             )
@@ -177,6 +179,7 @@ async def set_prototype_materials(
             MaterialInput(
                 product_id=item.product_id,
                 quantity=item.quantity,
+                preparation_id=item.preparation_id,
                 material_role=item.material_role,
                 stage=item.stage,
             )
@@ -216,16 +219,24 @@ async def start_prototype(
 @router.post("/{prototype_id}/complete", response_model=PrototypeOut)
 async def complete_prototype(
     prototype_id: int,
+    payload: PrototypeCompleteIn,
     service: PrototypeServiceDep,
     actor: WorkshopUserDep,
     session: DbSessionDep,
 ) -> PrototypeOut:
-    """Cierra la fabricacion. NO consume otra vez y NO decide nada.
+    """Cierra con cantidades físicas explícitas, sin consumir materiales otra vez.
 
     Una muestra completada y sin evaluar queda COMPLETED + PENDING, y eso no es
     un estado a medias: es el estado normal mientras alguien la mira.
     """
-    prototype, _changed = await service.complete(prototype_id, user=actor)
+    prototype, _changed = await service.complete(
+        prototype_id,
+        started_quantity=payload.started_quantity,
+        good_quantity=payload.good_quantity,
+        scrap_quantity=payload.scrap_quantity,
+        scrap_reason=payload.scrap_reason,
+        user=actor,
+    )
     result = await service.present(prototype)
     await session.commit()
     return result

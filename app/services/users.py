@@ -132,6 +132,7 @@ class UserService:
             email=cuenta.email if cuenta else None,
             role=_rol(perfil),
             active=perfil.active,
+            capabilities=list(perfil.capabilities or []),
         )
 
     # ------------------------------------------------------------------
@@ -176,6 +177,7 @@ class UserService:
             email=cuenta.email,
             role=_rol(perfil),
             active=perfil.active,
+            capabilities=list(perfil.capabilities or []),
         )
 
     async def _compensar(self, auth_user_id: uuid.UUID) -> None:
@@ -202,7 +204,7 @@ class UserService:
     async def update(
         self, user_id: uuid.UUID, payload: UserUpdateIn, *, user: AuthenticatedUser
     ) -> UserOut:
-        """Cambia nombre visible y/o rol. No toca Supabase.
+        """Cambia nombre visible, rol y capacidades. No toca Supabase.
 
         Cambiar como se llama alguien en la casa no es cambiar su cuenta: el
         correo y la contrasena siguen siendo de Supabase y aqui no se rozan.
@@ -218,6 +220,10 @@ class UserService:
                 await self._exigir_otro_admin(perfil)
             cambios["role"] = (_rol(perfil).value, payload.role.value)
             perfil.role = payload.role
+        current_capabilities = list(perfil.capabilities or [])
+        if payload.capabilities is not None and payload.capabilities != current_capabilities:
+            cambios["capabilities"] = (current_capabilities, payload.capabilities)
+            perfil.capabilities = list(payload.capabilities)
 
         if cambios:
             self._audit.record_changes(

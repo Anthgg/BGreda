@@ -1,24 +1,9 @@
-"""Fase 010J — el caso canonico del Excel FINAL, recorrido por la API del flujo.
+"""Recorrido vivo de componentes del caso de Excel anterior a 010P.
 
-Oraculo: «Cotizador_Greda_V2_modelo_CORREGIDO_SIN_NOMBRE.xlsx». A diferencia de
-la prueba de 010G, aqui no se fuerza ningun importe con acuerdos: la cotizacion
-se arma con las ENTRADAS de la hoja —pesos, costo por gramo de cada pasta, el
-esmalte de referencia, las tecnicas con su rendimiento, el trabajador interno,
-la ilustracion del producto, los hornos con sus tarifas— y lo que sale tiene
-que ser, al centimo, lo que el Excel calcula:
-
-    Externo, por menor, horno Chico, baja + alta, quema COMPARTIDA,
-    separacion 3 cm, factor x3, PEN, IGV 18 %, 4 dias efectivos.
-
-    Plato palta 20 u x S/242,00       4840,00
-    Tasa Buho 50 u x S/45,50          2275,00
-    PLATOS HONDOS CHICOS 12 u x 245   2940,00
-    SUBTOTAL 10055,00   IGV 1809,90   TOTAL 11864,90
-
-Las reglas que el caso ejercita son justamente las que 010J cambio: quema
-proporcional (501,88 % cobra 5,0188 hornadas, no 6), separacion entre piezas,
-mano de obra interna a costo cero, ilustracion cargada al producto que la
-lleva y precio objetivo al factor x3.
+Los totales históricos de v1 se conservan en
+``tests/fixtures/LEGACY_REFERENCE_PRE_010P.json``. Este smoke usa hoy reglas
+010P y solo comprueba componentes que esa fase no cambió, junto con la
+coherencia entre precio, confirmación y PDF.
 """
 
 from __future__ import annotations
@@ -28,9 +13,14 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 from pypdf import PdfReader
 
 from tests.db.v2_capacidades import habilitar
+
+#: Caso canonico del Excel anterior a 010P: referencia historica, no oraculo de
+#: las reglas 010P (tests/fixtures/LEGACY_REFERENCE_PRE_010P.json).
+pytestmark = pytest.mark.legacy_reference_pre_010p
 
 V2 = "/api/v1/quotations-v2"
 KILNS = "/api/v1/kilns"
@@ -256,6 +246,7 @@ async def armar_cotizacion(
         datos: dict[str, Any] = {
             "product_name": producto["name"],
             "quantity": producto["quantity"],
+            "production_time_per_unit_minutes": "10",
             "length_cm": largo,
             "width_cm": ancho,
             "height_cm": alto,
@@ -339,7 +330,7 @@ class TestElCasoCanonicoDelExcelFinal:
     async def test_costos_precio_ganancia_y_documento(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        cotizacion, lineas, _hornos = await armar_cotizacion(api, admin_csrf)
+        cotizacion, _lineas, _hornos = await armar_cotizacion(api, admin_csrf)
 
         mano_de_obra = (await api.get(f"{V2}/{cotizacion}/labor")).json()
         exacto(mano_de_obra["labor_cost"], "0", "mano de obra interna")
@@ -348,30 +339,20 @@ class TestElCasoCanonicoDelExcelFinal:
         cerca(precio["materials_cost"], "285.36", "materiales")
         exacto(precio["labor_cost"], "0", "mano de obra")
         cerca(precio["illustration_cost"], "44", "ilustracion")
-        exacto(precio["space_cost"], "560", "espacio")
-        exacto(precio["administration_cost"], "200", "administracion")
+        cerca(precio["gas_cost"], "526.976471", "gas")
+        cerca(precio["firing_commercial_cost"], "2258.470588", "quema comercial")
+        exacto(precio["administration_cost"], "0", "administracion retail")
         exacto(precio["extras_cost"], "0", "adicionales")
-        cerca(precio["production_cost"], "3347.830588", "costo de produccion")
-        cerca(precio["real_cost"], "1616.336471", "costo real")
-        exacto(precio["factor_target"], "3", "factor objetivo")
-        cerca(precio["price_min"], "6695.661176", "precio minimo x2")
-        cerca(precio["price_target"], "10043.491764", "precio objetivo x3")
-
-        unitarios = {linea["line_id"]: linea for linea in precio["lines"]}
-        for nombre, unitario, subtotal in (
-            ("Plato palta", "242", "4840"),
-            ("Tasa Buho", "45.5", "2275"),
-            ("PLATOS HONDOS CHICOS", "245", "2940"),
-        ):
-            exacto(unitarios[lineas[nombre]]["unit_price"], unitario, f"unitario {nombre}")
-            exacto(unitarios[lineas[nombre]]["line_subtotal"], subtotal, f"subtotal {nombre}")
-
-        exacto(precio["subtotal"], "10055", "subtotal")
-        exacto(precio["tax"], "1809.90", "IGV")
-        exacto(precio["total"], "11864.90", "total")
-        cerca(precio["rounding_adjustment"], "11.508236", "ajuste de redondeo")
-        cerca(precio["estimated_profit"], "8438.663529", "ganancia")
-        cerca(precio["effective_margin_percent"], "83.925048", "margen %")
+        assert precio["pricing_rules_version"] == 2
+        assert Decimal(str(precio["active_production_minutes"])) > 0
+        subtotal_calculado = sum(
+            (Decimal(str(linea["line_subtotal"])) for linea in precio["lines"]),
+            Decimal(0),
+        )
+        subtotal = Decimal(str(precio["subtotal"]))
+        total = Decimal(str(precio["total"]))
+        assert subtotal == subtotal_calculado
+        assert total == subtotal + Decimal(str(precio["tax"]))
 
         # --- El documento: emitido con esos numeros y sin un costo interno ----
         cliente = await _post(
@@ -390,8 +371,8 @@ class TestElCasoCanonicoDelExcelFinal:
             {"expected_fingerprint": resumen["fingerprint"]},
         )
         congelado = (await api.get(f"{V2}/{cotizacion}/confirmation-preview")).json()
-        exacto(congelado["subtotal_amount"], "10055", "subtotal emitido")
-        exacto(congelado["total_amount"], "11864.90", "total emitido")
+        assert Decimal(str(congelado["subtotal_amount"])) == subtotal
+        assert Decimal(str(congelado["total_amount"])) == total
 
         pdf = await api.get(f"{V2}/{cotizacion}/pdf")
         assert pdf.status_code == 200, pdf.text
@@ -402,7 +383,7 @@ class TestElCasoCanonicoDelExcelFinal:
             .replace(" ", "")
             .replace(chr(10), "")
         )
-        assert "S/11,864.90" in texto
+        assert f"S/{total:,.2f}" in texto
         for prohibido in (
             "Costoreal",
             "Gasreal",
@@ -422,17 +403,11 @@ class TestElCasoCanonicoDelExcelFinal:
         antes = (await api.get(f"{V2}/{cotizacion}/pricing")).json()
 
         reducciones = (await api.get(f"{V2}/{cotizacion}/reductions")).json()
-        exacto(reducciones["current_subtotal"], "10055", "subtotal actual")
+        assert Decimal(str(reducciones["current_subtotal"])) == Decimal(str(antes["subtotal"]))
         items = {item["code"]: item for item in reducciones["items"]}
 
-        cerca(items["OTHER_KILN"]["savings"], "4343.791764", "ahorro con Grande")
-        cerca(items["OTHER_KILN"]["estimated_subtotal"], "5711.208236", "estimado con Grande")
         assert items["OTHER_KILN"]["suggestion"] == "Horno Grande 010J"
-        cerca(items["MIN_FACTOR"]["savings"], "3347.830588", "ahorro factor x2")
-        cerca(items["MIN_FACTOR"]["estimated_subtotal"], "6707.169412", "estimado factor x2")
         exacto(items["MIN_FACTOR"]["suggestion"], "2", "nunca por debajo de x2")
-        exacto(items["REMOVE_ILLUSTRATION"]["savings"], "132", "ahorro sin ilustracion")
-        exacto(items["REMOVE_ILLUSTRATION"]["estimated_subtotal"], "9923", "sin ilustracion")
         assert not items["REMOVE_EXTRAS"]["applicable"]
         assert not items["INTERNAL_STAFF"]["applicable"], "ya es todo interno"
         assert not items["SHARED_FIRING"]["applicable"], "ya es compartida"
@@ -481,12 +456,25 @@ class TestElCasoCanonicoDelExcelFinal:
     async def test_personal_externo_se_paga_por_hora(
         self, api: httpx.AsyncClient, admin_csrf: str
     ) -> None:
-        """Mismo caso con el trabajador EXTERNO: 29,546667 h a 220/8 = 27,5 por hora."""
+        """Mismo caso con el trabajador EXTERNO, ya con las reglas 010P.
+
+        El importe historico (812,533343: horas de CADA tarea x 27,5) era de v1 y
+        vive solo en LEGACY_REFERENCE_PRE_010P. Con 010P el externo cuesta por
+        las horas ACTIVAS del pedido, el MAXIMO de las lineas: 50 tazas x 10 min
+        = 500 min = 8,333333 h. Al cliente, 8,333333 x 220/8 = 229,166667; al
+        taller, jornales enteros: ceil(8,33 / 8) = 2 x 220 = 440.
+        """
         cotizacion, _lineas, _hornos = await armar_cotizacion(api, admin_csrf, "EXTERNAL")
+        #: Las horas se guardan con seis decimales: 8,333333 x 27,5.
+        horas = Decimal("0.0001")
+        precio = (await api.get(f"{V2}/{cotizacion}/pricing")).json()
+        cerca(precio["commercial_external_labor_cost"], "229.166667", "externo comercial", horas)
+        cerca(precio["real_external_labor_cost"], "440", "externo real")
+        cerca(precio["labor_cost_gap"], "210.833333", "brecha", horas)
         mano_de_obra = (await api.get(f"{V2}/{cotizacion}/labor")).json()
-        # 10,666667 + 8 + 3,84 + 3,2 + 3,84 horas.
-        cerca(mano_de_obra["labor_cost"], "812.533343", "externo por hora", Decimal("0.0001"))
+        cerca(mano_de_obra["labor_cost"], "229.166667", "mano de obra del pedido", horas)
+        assert all(Decimal(t["labor_cost"]) == 0 for t in mano_de_obra["items"])
         reducciones = (await api.get(f"{V2}/{cotizacion}/reductions")).json()
         interno = next(i for i in reducciones["items"] if i["code"] == "INTERNAL_STAFF")
         assert interno["applicable"]
-        cerca(interno["cost_reduction"], "812.533343", "ahorro con interno", Decimal("0.0001"))
+        cerca(interno["cost_reduction"], "229.166667", "ahorro con interno", horas)

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.inventory import StockBalance, StockMovement
 from app.models.production import ProductionOrderCommunication
 from tests.db.conftest import OPERATOR_EMAIL, OPERATOR_PASSWORD, authenticate
+from tests.db.test_production_orders_api import completar_orden
 from tests.db.test_production_v2_consumption import consumir, orden_con_existencia
 from tests.db.test_production_v2_origin import ORDERS
 from tests.db.test_quoter_v2_lifecycle_api import h
@@ -316,9 +317,7 @@ class TestEstados:
         await consumir(
             api, admin_csrf, oid, product_id=viva["pasta_id"], quantity="10", key="aviso-pasta"
         )
-        assert (
-            await api.post(f"{ORDERS}/{oid}/complete", headers=h(admin_csrf))
-        ).status_code == 200
+        assert (await completar_orden(api, admin_csrf, int(oid))).status_code == 200
         r = await registrar(
             api, admin_csrf, oid, key="aviso-finalizada", message="Ya puede pasar a recoger."
         )

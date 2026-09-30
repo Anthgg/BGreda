@@ -59,7 +59,7 @@ se le carga cada parte.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -67,6 +67,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import APIError
+from app.core.quoter_v2_config import DEFAULT_WORKDAY_HOURS
 from app.core.quoter_v2_pricing import (
     PricingMathError,
     allocate_by_weight,
@@ -79,12 +80,31 @@ from app.core.quoter_v2_pricing import (
     unit_price,
     within_factor_range,
 )
+from app.core.quoter_v2_rules_010p import (
+    ExternalLaborCost,
+    ExternalWorkerSnapshot,
+    RulesMathError,
+    allocate_by_active_minutes,
+    external_labor_cost,
+    line_active_minutes,
+    minutes_to_hours,
+    order_active_minutes,
+    space_cost,
+    space_cost_per_hour,
+    wholesale_suggested,
+)
 from app.models.audit import AuditAction
 from app.models.quoter_v2 import V2Quotation, V2QuotationProduct, V2QuotationStatus
-from app.models.quoter_v2_labor import V2QuotationLabor
+from app.models.quoter_v2_labor import (
+    V2QuotationLabor,
+    V2QuotationWorker,
+    V2Worker,
+    V2WorkerType,
+)
 from app.models.quoter_v2_processes import V2QuotationExtra
 from app.schemas.auth import AuthenticatedUser
 from app.services.audit import AuditRecorder
+from app.services.quoter_v2_locks import lock_quotation_for_recalculation
 
 ZERO = Decimal(0)
 
@@ -101,6 +121,13 @@ WARN_NO_COST = "V2_PRICING_NO_COST"
 WARN_WORK_DAYS_NOT_SET = "V2_PRICING_WORK_DAYS_NOT_SET"
 WARN_LINE_WITHOUT_QUANTITY = "V2_PRICING_LINE_WITHOUT_QUANTITY"
 WARN_SELLING_BELOW_COST = "V2_PRICING_SELLING_BELOW_REAL_COST"
+# Fase 010P.
+WARN_LINE_TIME_MISSING = "V2_PRICING_LINE_TIME_MISSING"
+WARN_PASSIVE_TIME_AVAILABLE = "V2_PRICING_PASSIVE_TIME_AVAILABLE"
+WARN_WHOLESALE_THRESHOLD_EXCEEDED = "V2_WHOLESALE_THRESHOLD_EXCEEDED"
+#: Desde esta version de reglas el costo sale del tiempo del pedido (010P).
+PRICING_RULES_V2 = 2
+EMPTY_EXTERNAL_LABOR = ExternalLaborCost(commercial=ZERO, real=ZERO, gap=ZERO, per_worker=())
 
 
 class V2PricingQuotationNotFoundError(APIError):
@@ -140,6 +167,13 @@ class PricingState:
     quotation: V2Quotation
     lines: list[V2QuotationProduct]
     warnings: list[str]
+    #: Fase 010P. El personal externo persona por persona (comercial y real).
+    external_labor: ExternalLaborCost = EMPTY_EXTERNAL_LABOR
+    #: Unidades del pedido ENTERO y si se sugiere pasar a por mayor.
+    total_units: int = 0
+    wholesale_suggested: bool = False
+    #: Nombres de los externos, para presentar el desglose.
+    worker_names: dict[int, str] = field(default_factory=dict)
 
 
 async def _lines_of(session: AsyncSession, quotation_id: int) -> list[V2QuotationProduct]:
@@ -292,9 +326,15 @@ async def refresh_pricing(session: AsyncSession, quotation: V2Quotation) -> list
         return await _recalculate(session, quotation, lineas)
 
 
-async def _recalculate(
+async def _costs_v1(
     session: AsyncSession, quotation: V2Quotation, lineas: list[V2QuotationProduct]
 ) -> list[str]:
+    """Costos con las reglas ANTERIORES a 010P (`pricing_rules_version = 1`).
+
+    Solo lo emitido conserva la version 1, y lo emitido no se recalcula: se
+    mantiene para que un borrador v1 que quedara en alguna base siga
+    explicandose con las reglas con las que nacio.
+    """
     avisos: list[str] = []
 
     # ---- 1. Lo que cuesta cada cosa ----------------------------------
@@ -373,6 +413,200 @@ async def _recalculate(
         avisos.append(WARN_NO_LINES)
     if quotation.production_cost_total <= ZERO:
         avisos.append(WARN_NO_COST)
+
+    return avisos
+
+
+async def external_workers_of(
+    session: AsyncSession, quotation: V2Quotation
+) -> list[ExternalWorkerSnapshot]:
+    """Los EXTERNOS DISTINTOS asignados hoy a la cotizacion, con su tarifa congelada.
+
+    Una persona en tres procesos es UNA persona: cuenta una vez, con UN jornal.
+    La tarifa sale de `v2_quotation_workers` (congelada en su primera
+    asignacion); una tarea sin esa fila —anterior a 0043— usa el congelado de
+    su tarea mas reciente. Quien ya no tiene tareas no cuenta.
+    """
+    tareas = (
+        await session.execute(
+            select(
+                V2QuotationLabor.worker_id,
+                V2QuotationLabor.worker_type_snapshot,
+                V2QuotationLabor.daily_rate_snapshot,
+                V2QuotationLabor.workday_hours_snapshot,
+            )
+            .where(V2QuotationLabor.v2_quotation_id == quotation.id)
+            .order_by(V2QuotationLabor.id.desc())
+        )
+    ).all()
+    congelados = {
+        fila.worker_id: fila
+        for fila in (
+            await session.scalars(
+                select(V2QuotationWorker).where(V2QuotationWorker.v2_quotation_id == quotation.id)
+            )
+        ).all()
+    }
+    externos: dict[int, ExternalWorkerSnapshot] = {}
+    for worker_id, tipo, jornal, jornada in tareas:
+        if worker_id in externos:
+            continue
+        fila = congelados.get(worker_id)
+        if fila is not None:
+            tipo, jornal, jornada = (
+                fila.worker_type_snapshot,
+                fila.daily_rate_snapshot,
+                fila.workday_hours_snapshot,
+            )
+        if tipo is not V2WorkerType.EXTERNAL:
+            continue
+        externos[worker_id] = ExternalWorkerSnapshot(
+            worker_id=worker_id, daily_rate=jornal, workday_hours=jornada
+        )
+    return [externos[clave] for clave in sorted(externos)]
+
+
+def effective_space_cost_per_hour(quotation: V2Quotation) -> Decimal:
+    """El costo de espacio por hora de ESTA cotizacion: el acuerdo o el congelado."""
+    if quotation.space_cost_per_hour_override is not None:
+        return quotation.space_cost_per_hour_override
+    if quotation.space_cost_per_hour_snapshot is not None:
+        return quotation.space_cost_per_hour_snapshot
+    # Una cotizacion sin el congelado por hora (anterior a 0042) lo deriva de
+    # lo que si congelo: su costo por dia y su jornada.
+    dia = quotation.space_service_cost_per_day_snapshot
+    jornada = quotation.workday_hours_snapshot
+    if dia is None or jornada is None or jornada <= ZERO:
+        return ZERO
+    return space_cost_per_hour(dia, jornada)
+
+
+def workday_hours_of(quotation: V2Quotation) -> Decimal:
+    jornada = quotation.workday_hours_snapshot
+    return jornada if jornada is not None and jornada > ZERO else DEFAULT_WORKDAY_HOURS
+
+
+def total_units_of(lineas: list[V2QuotationProduct]) -> int:
+    """Unidades del pedido ENTERO: lo que mira el umbral por mayor (P4)."""
+    return sum((linea.quantity for linea in lineas), 0)
+
+
+async def _costs_v2(
+    session: AsyncSession, quotation: V2Quotation, lineas: list[V2QuotationProduct]
+) -> list[str]:
+    """Costos con las reglas de 010P (`pricing_rules_version = 2`).
+
+    1. Tiempo: cada linea, ceil(cantidad/moldes) x minutos por unidad; el
+       pedido, el MAXIMO de sus lineas (productos distintos van en paralelo).
+    2. Personal: el interno no cuesta; cada externo DISTINTO cuesta horas x
+       jornal/jornada al cliente (comercial) y jornales enteros al taller
+       (real). La tarea ya no lleva costo propio: el costo es del pedido.
+    3. Espacio: horas ACTIVAS x costo por hora. El tiempo pasivo solo se sugiere.
+    4. Primero los totales del pedido; despues se reparten por peso normalizado
+       de minutos activos. Nunca horas-de-linea x costo-hora sumadas.
+    """
+    avisos: list[str] = []
+
+    # ---- 1. Tiempo -------------------------------------------------------
+    for linea in lineas:
+        linea.line_active_minutes = line_active_minutes(
+            linea.quantity, linea.mold_count or 1, linea.production_time_per_unit_minutes
+        )
+    if any(
+        linea.quantity > 0 and linea.production_time_per_unit_minutes is None for linea in lineas
+    ):
+        avisos.append(WARN_LINE_TIME_MISSING)
+    minutos = order_active_minutes([linea.line_active_minutes for linea in lineas])
+    quotation.active_production_minutes = minutos
+    horas = minutes_to_hours(minutos)
+
+    # ---- 2. Personal externo -----------------------------------------------
+    try:
+        externo = external_labor_cost(
+            horas, await external_workers_of(session, quotation), workday_hours_of(quotation)
+        )
+    except RulesMathError as error:
+        raise V2PricingInputInvalid(str(error)) from error
+    quotation.commercial_external_labor_cost = externo.commercial
+    quotation.real_external_labor_cost = externo.real
+    # «Mano de obra» del precio es lo que se imputa al cliente.
+    quotation.labor_cost_total = externo.commercial
+
+    # ---- 3. Espacio, administracion, ilustracion, adicionales ---------------
+    espacio = space_cost(horas, effective_space_cost_per_hour(quotation))
+    if quotation.passive_time_hours > ZERO:
+        avisos.append(WARN_PASSIVE_TIME_AVAILABLE)
+    administracion = quotation.administrative_cost_snapshot or ZERO
+    ilustracion = quotation.illustration_cost
+    quema_comercial = quotation.firing_commercial_total
+    gas_real = quotation.firing_gas_total
+    extras_por_linea, extras_generales, extras_total = await _extras_by_line(session, quotation.id)
+
+    materiales_total = ZERO
+    for linea in lineas:
+        directo = linea.body_cost + linea.glaze_cost
+        materiales_total += directo
+        linea.direct_cost = (
+            directo + extras_por_linea.get(linea.id, ZERO) + (linea.illustration_cost or ZERO)
+        )
+    directo_total = sum((linea.direct_cost for linea in lineas), ZERO)
+    general_total = administracion + ilustracion + extras_generales
+
+    quotation.materials_cost_total = materiales_total
+    quotation.extras_cost_total = extras_total
+    quotation.space_cost = espacio
+    quotation.direct_cost_total = directo_total
+    quotation.production_cost_total = (
+        directo_total + quema_comercial + espacio + general_total + externo.commercial
+    )
+    quotation.real_cost_total = directo_total + gas_real + espacio + general_total + externo.real
+
+    # ---- 4. Repartir los totales del pedido ---------------------------------
+    cantidades = [Decimal(linea.quantity) for linea in lineas]
+    minutos_linea = [linea.line_active_minutes or ZERO for linea in lineas]
+    espacios = allocate_by_active_minutes(espacio, minutos_linea, cantidades)
+    comerciales = allocate_by_active_minutes(externo.commercial, minutos_linea, cantidades)
+    reales = allocate_by_active_minutes(externo.real, minutos_linea, cantidades)
+    generales = allocate_by_weight(
+        general_total, _pesos([linea.direct_cost for linea in lineas], cantidades)
+    )
+    for linea, espacio_l, general_l, comercial_l, real_l in zip(
+        lineas, espacios, generales, comerciales, reales, strict=True
+    ):
+        linea.allocated_space_cost = espacio_l
+        linea.allocated_general_cost = general_l
+        linea.allocated_external_commercial_cost = comercial_l
+        linea.allocated_external_real_cost = real_l
+        linea.allocated_production_cost = (
+            linea.direct_cost + linea.firing_commercial_cost + espacio_l + general_l + comercial_l
+        )
+        linea.allocated_real_cost = (
+            linea.direct_cost + linea.firing_gas_cost + espacio_l + general_l + real_l
+        )
+
+    if not lineas:
+        avisos.append(WARN_NO_LINES)
+    if quotation.production_cost_total <= ZERO:
+        avisos.append(WARN_NO_COST)
+    if wholesale_suggested(
+        quotation.production_type,
+        total_units_of(lineas),
+        quotation.wholesale_threshold_snapshot,
+        declined=quotation.wholesale_suggestion_declined_at is not None,
+    ):
+        avisos.append(WARN_WHOLESALE_THRESHOLD_EXCEEDED)
+    return avisos
+
+
+async def _recalculate(
+    session: AsyncSession, quotation: V2Quotation, lineas: list[V2QuotationProduct]
+) -> list[str]:
+    avisos: list[str] = []
+
+    if quotation.pricing_rules_version >= PRICING_RULES_V2:
+        avisos += await _costs_v2(session, quotation, lineas)
+    else:
+        avisos += await _costs_v1(session, quotation, lineas)
 
     # ---- 3. Del costo al precio --------------------------------------
     factor = quotation.commercial_factor
@@ -479,10 +713,39 @@ class V2PricingService:
         """
         quotation = await self.quotation(quotation_id)
         avisos = await refresh_pricing(self._session, quotation)
+        lineas = await _lines_of(self._session, quotation_id)
+        externo = EMPTY_EXTERNAL_LABOR
+        if quotation.pricing_rules_version >= PRICING_RULES_V2:
+            # El desglose persona por persona se deriva de lo congelado: es una
+            # lectura, no un recalculo. Una emitida ensena el de su emision.
+            externo = external_labor_cost(
+                minutes_to_hours(quotation.active_production_minutes),
+                await external_workers_of(self._session, quotation),
+                workday_hours_of(quotation),
+            )
+        unidades = total_units_of(lineas)
+        ids = [fila.worker_id for fila in externo.per_worker]
+        nombres: dict[int, str] = {}
+        if ids:
+            filas = await self._session.execute(
+                select(V2Worker.id, V2Worker.name).where(V2Worker.id.in_(ids))
+            )
+            for worker_id, nombre in filas.all():
+                nombres[worker_id] = nombre
         return PricingState(
             quotation=quotation,
-            lines=await _lines_of(self._session, quotation_id),
+            lines=lineas,
             warnings=avisos,
+            external_labor=externo,
+            worker_names=nombres,
+            total_units=unidades,
+            wholesale_suggested=quotation.status is V2QuotationStatus.DRAFT
+            and wholesale_suggested(
+                quotation.production_type,
+                unidades,
+                quotation.wholesale_threshold_snapshot,
+                declined=quotation.wholesale_suggestion_declined_at is not None,
+            ),
         )
 
     async def set_pricing(
@@ -509,6 +772,20 @@ class V2PricingService:
                     code="V2_PRICING_FACTOR_REQUIRED",
                 )
             self._apply_factor(quotation, factor)
+        # Fase 010P. El costo de espacio por hora puede acordarse para ESTA
+        # cotizacion (nulo retira el acuerdo y vuelve el congelado), y el tiempo
+        # pasivo se informa para sugerirlo en precio: nunca suma a un costo.
+        if "space_cost_per_hour_override" in data:
+            acuerdo = data["space_cost_per_hour_override"]
+            if acuerdo is not None and acuerdo < ZERO:
+                raise V2PricingInputInvalid("El costo de espacio por hora no puede ser negativo")
+            quotation.space_cost_per_hour_override = acuerdo
+        if "passive_time_hours" in data:
+            pasivo = data["passive_time_hours"]
+            pasivo = ZERO if pasivo is None else pasivo
+            if pasivo < ZERO:
+                raise V2PricingInputInvalid("El tiempo pasivo no puede ser negativo")
+            quotation.passive_time_hours = pasivo
 
         estado = await self.pricing_state(quotation_id)
         await self._session.flush()
@@ -521,6 +798,8 @@ class V2PricingService:
             user_display_name=user.display_name,
             metadata={
                 "commercial_factor": str(quotation.commercial_factor),
+                "space_cost_per_hour_override": str(quotation.space_cost_per_hour_override),
+                "passive_time_hours": str(quotation.passive_time_hours),
                 "production_cost_total": str(quotation.production_cost_total),
                 "subtotal_amount": str(quotation.subtotal_amount),
                 "total_amount": str(quotation.total_amount),
@@ -550,8 +829,13 @@ class V2PricingService:
         quotation.commercial_factor = factor
 
     async def quotation(self, quotation_id: int) -> V2Quotation:
-        """La cotizacion, para LEER. Sin bloqueo y sin exigir que sea borrador."""
-        quotation = await self._session.get(V2Quotation, quotation_id)
+        """La cotizacion para LEER su precio, sin exigir que sea borrador.
+
+        Con la cabecera BLOQUEADA (Fase 010P): leer un borrador lo recalcula, y
+        recalcular escribe lineas. Tomar la cabecera primero, como las
+        escrituras, deja un solo orden de bloqueo (`quoter_v2_locks`).
+        """
+        quotation = await lock_quotation_for_recalculation(self._session, quotation_id)
         if quotation is None:
             raise V2PricingQuotationNotFoundError()
         return quotation

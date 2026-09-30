@@ -1,0 +1,46 @@
+
+> fgreda@0.1.0 test
+> vitest run src/features/production/Produccion010I.test.tsx --testNamePattern muestra cliente --reporter=verbose
+
+
+ RUN  v4.1.11 C:/Users/anthg/.codex/worktrees/010p-w3-frontend/FGreda
+
+ ↓ src/features/production/Produccion010I.test.tsx > estados con los nombres del taller > INICIO, EN PROCESO, FINALIZADO y ANULADA, sin estados nuevos
+ ↓ src/features/production/Produccion010I.test.tsx > estados con los nombres del taller > una orden V2 se puede iniciar sin cobro Legacy
+ ↓ src/features/production/Produccion010I.test.tsx > estados con los nombres del taller > el saldo después se calcula exacto, sin pasar por number
+ ✓ src/features/production/Produccion010I.test.tsx > listado de producción > muestra cliente, resumen de piezas y origen V2, sin importes 376ms
+ ↓ src/features/production/Produccion010I.test.tsx > listado de producción > para ADMIN el código de la V2 enlaza a la cotización
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > el operario ve cliente, piezas, medidas y material planificado, sin precios
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > una orden V2 NO aparece como pendiente de pago
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > caso A: dice qué falta y no deja finalizar
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > caso B: sin nada pendiente no hay bloqueo falso
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > Solo quema completa con la referencia V2F y cantidad devueltas por GET
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > si el backend rechaza finalizar, se traduce lo que falta
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > el seguimiento pinta cada tipo con su propio detalle, en el orden del backend
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > con consumos, anular se explica en vez de ofrecerse (D1)
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > finalizada o anulada no ofrece registrar consumo
+ ↓ src/features/production/Produccion010I.test.tsx > ficha de una orden V2 > 404: pantalla clara, sin romper
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > rellenar no envía nada; confirmar muestra saldo antes y después
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > confirmar manda UNA petición con su clave, aunque se haga doble clic
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > stock insuficiente: se traduce y el reintento usa la MISMA clave
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > volver a editar es otra operación: otra clave
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > si no alcanza el saldo leído, lo dice y no deja confirmar
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > exige escoger el segundo lote preparado y manda su preparation_id sin FIFO
+ ↓ src/features/production/Produccion010I.test.tsx > registrar consumo > traduce LOT_INSUFFICIENT_STOCK para un lote elegido
+ ↓ src/features/production/Produccion010I.test.tsx > registrar comunicación > dice REGISTRAR, nunca enviar, y aclara que no sale nada del sistema
+ ↓ src/features/production/Produccion010I.test.tsx > registrar comunicación > la sugerencia rellena el texto, se puede editar y se manda el FINAL con sus saltos
+ ↓ src/features/production/Produccion010I.test.tsx > registrar comunicación > la comunicación registrada aparece en el seguimiento y en su sección
+ ↓ src/features/production/Produccion010I.test.tsx > registrar comunicación > con la orden FINALIZADO se sigue pudiendo registrar
+ ↓ src/features/production/Produccion010I.test.tsx > registrar comunicación > con la orden ANULADA se sigue pudiendo registrar
+ ↓ src/features/production/Produccion010I.test.tsx > registrar comunicación > el operario también registra comunicaciones
+ ↓ src/features/production/Produccion010I.test.tsx > registrar quema > manda sólo los campos del backend: horno, tipo y cuándo
+ ↓ src/features/production/Produccion010I.test.tsx > registrar quema > en INICIO no se ofrece registrar quema
+ ↓ src/features/production/Produccion010I.test.tsx > hallazgos del smoke local > sin tocar la fecha se manda el instante EXACTO y el reintento repite fecha y clave
+ ↓ src/features/production/Produccion010I.test.tsx > hallazgos del smoke local > cambiar el mensaje tras un fallo es otra comunicación: otra clave
+ ↓ src/features/production/Produccion010I.test.tsx > hallazgos del smoke local > el aviso de éxito no sobrevive a la acción siguiente
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 32 skipped (33)
+   Start at  15:32:12
+   Duration  8.04s (transform 4.64s, setup 613ms, import 5.72s, tests 381ms, environment 1.00s)
+

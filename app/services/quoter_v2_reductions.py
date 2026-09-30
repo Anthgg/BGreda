@@ -40,7 +40,7 @@ from app.models.quoter_v2 import V2FiringMode, V2Quotation
 from app.models.quoter_v2_labor import V2QuotationLabor, V2WorkerType
 from app.services.audit import AuditRecorder
 from app.services.quoter_v2_firing import V2FiringService
-from app.services.quoter_v2_pricing import V2PricingService
+from app.services.quoter_v2_pricing import PRICING_RULES_V2, V2PricingService
 
 ZERO = Decimal(0)
 
@@ -163,6 +163,10 @@ class V2ReductionsService:
 
     async def _external_labor(self, quotation: V2Quotation) -> Decimal:
         """Lo que cuesta el personal EXTERNO: lo que se ahorra haciendolo en casa."""
+        if quotation.pricing_rules_version >= PRICING_RULES_V2:
+            # Fase 010P: la tarea ya no lleva costo. Lo externo es del PEDIDO, y
+            # al precio llega lo comercial (horas activas x jornal / jornada).
+            return quotation.commercial_external_labor_cost or ZERO
         total = await self._session.scalar(
             select(func.coalesce(func.sum(V2QuotationLabor.labor_cost), 0)).where(
                 V2QuotationLabor.v2_quotation_id == quotation.id,

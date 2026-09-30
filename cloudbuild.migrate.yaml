@@ -6,8 +6,9 @@
 # Solo ejecutar cuando MIGRATION_REQUIRED: YES
 # (cuando PRODUCTION_ALEMBIC_CURRENT != CODE_HEAD)
 #
-# Ejecutar manualmente:
-#   gcloud builds submit --config cloudbuild.migrate.yaml .
+# Ejecutar SOLO manualmente con un digest resuelto en Artifact Registry:
+#   gcloud builds submit --config cloudbuild.migrate.yaml \
+#     --substitutions=_IMAGE_DIGEST=<64-hex-digest> .
 #
 # El job:
 #   1. Verifica que no hay múltiples heads de Alembic (head_count == 1)
@@ -27,16 +28,27 @@
 # plantilla, de modo que no era decorativa: impedia ejecutar el job.
 substitutions:
   _IMAGE: southamerica-west1-docker.pkg.dev/cotizador-greda/cloud-run-source-deploy/bgreda-api
+  _IMAGE_DIGEST: UNSET
 
 steps:
+  - id: validate-image-digest
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        [[ '$_IMAGE_DIGEST' =~ ^[0-9a-f]{64}$ ]] || { echo '_IMAGE_DIGEST must be the immutable 64-character Artifact Registry sha256 digest'; exit 1; }
+        echo 'IMMUTABLE_IMAGE=$_IMAGE@sha256:$_IMAGE_DIGEST'
+
   # ------------------------------------------------------------------
-  # 1. Obtener imagen más reciente del backend para correr alembic
+  # 1. Obtener exactamente la imagen backend 010P fijada por digest.
   # ------------------------------------------------------------------
   - id: pull-image
     name: gcr.io/cloud-builders/docker
     args:
       - pull
-      - $_IMAGE:main-latest
+      - $_IMAGE@sha256:$_IMAGE_DIGEST
+    waitFor: [validate-image-digest]
 
   # ------------------------------------------------------------------
   # 2. Verificar precondiciones de migración
@@ -51,8 +63,7 @@ steps:
         echo " BGreda — Verificación de migración Alembic"
         echo "===================================================="
         echo ""
-        echo "COMMIT_SHA: $COMMIT_SHA"
-        echo "Imagen: $_IMAGE:main-latest"
+        echo "Imagen: $_IMAGE@sha256:$_IMAGE_DIGEST"
         echo ""
         echo "IMPORTANTE: Este job no ejecuta migración automáticamente."
         echo "Solo lo hace si PRODUCTION_CURRENT < CODE_HEAD."
@@ -70,7 +81,7 @@ steps:
   #    Para CI dry-run, este step verifica solo la sintaxis offline.
   # ------------------------------------------------------------------
   - id: migrate
-    name: $_IMAGE:main-latest
+    name: $_IMAGE@sha256:$_IMAGE_DIGEST
     entrypoint: bash
     # Cloud Build ejecuta cada step en /workspace e IGNORA el WORKDIR de la
     # imagen. Sin esto alembic no encuentra alembic.ini y falla con
@@ -107,6 +118,12 @@ steps:
 
         CODE_HEAD=$$(echo "$$HEADS_OUT" | awk '{print $$1}')
         echo "CODE_HEAD: $$CODE_HEAD"
+
+        if [ "$$CODE_HEAD" != "0045" ]; then
+          echo "ERROR: la imagen de release debe contener exactamente el head 0045."
+          echo "STATUS: MIGRATION_ABORTED_UNEXPECTED_CODE_HEAD"
+          exit 1
+        fi
 
         # Una revision es alfanumerica. Cualquier otra cosa —"FAILED:", vacio—
         # significa que alembic no respondio, y comparar dos respuestas rotas

@@ -20,12 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.db.test_production_orders_api import (
     ORDERS,
+    arrancar_orden,
     confirmada_y_pagada,
     confirmar,
     crear_orden,
     escenario,
+    lotes_del_escenario,
 )
-from tests.db.test_quotation_builder_api import head
 
 BUILDER = "/api/v1/quotation-builder"
 
@@ -159,7 +160,12 @@ async def test_el_pdf_comercial_de_la_cotizacion_no_cambia(
         api, admin_csrf, quotation_id=confirmada["id"], location_id=datos["location_id"]
     )
     assert creada.status_code == 201, creada.text
-    arrancada = await api.post(f"{ORDERS}/{creada.json()['id']}/start", headers=head(admin_csrf))
+    arrancada = await arrancar_orden(
+        api,
+        admin_csrf,
+        int(creada.json()["id"]),
+        preparation_lots_by_product_id=lotes_del_escenario(datos),
+    )
     assert arrancada.status_code == 200, arrancada.text
 
     despues = await api.get(f"/api/v1/quotations/{confirmada['id']}/pdf")
