@@ -1,0 +1,20 @@
+
+> fgreda@0.1.0 test
+> vitest run
+
+
+ RUN  v4.1.11 C:/Users/anthg/.codex/worktrees/010p-w3-frontend/FGreda
+
+Error: Not implemented: navigation (except hash changes)
+    at module.exports (C:\Users\anthg\.codex\worktrees\010p-w3-frontend\FGreda\node_modules\jsdom\lib\jsdom\browser\not-implemented.js:9:17)
+    at navigateFetch (C:\Users\anthg\.codex\worktrees\010p-w3-frontend\FGreda\node_modules\jsdom\lib\jsdom\living\window\navigation.js:77:3)
+    at exports.navigate (C:\Users\anthg\.codex\worktrees\010p-w3-frontend\FGreda\node_modules\jsdom\lib\jsdom\living\window\navigation.js:55:3)
+    at Timeout._onTimeout (C:\Users\anthg\.codex\worktrees\010p-w3-frontend\FGreda\node_modules\jsdom\lib\jsdom\living\nodes\HTMLHyperlinkElementUtils-impl.js:81:7)
+    at listOnTimeout (node:internal/timers:605:17)
+    at processTimers (node:internal/timers:541:7) undefined
+
+ Test Files  103 passed (103)
+      Tests  1220 passed (1220)
+   Start at  20:23:01
+   Duration  103.22s (transform 74.39s, setup 221.49s, import 280.91s, tests 533.89s, environment 375.52s)
+
