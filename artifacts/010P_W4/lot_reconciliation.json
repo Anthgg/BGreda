@@ -1,7 +1,7 @@
 {
   "report": "010P W4 lot reconciliation after full revision E2E",
-  "generated_at_utc": "2026-09-29T19:35:17.966Z",
-  "source_database": "bgreda_test_010p_sq_fb0fae8ff538",
+  "generated_at_utc": "2026-09-30T01:05:20.598Z",
+  "source_database": "bgreda_test_010p_sq_027fe042db79",
   "alembic_revision": "0045",
   "unreconciled_rows": 0,
   "lot_balance_count": 2,

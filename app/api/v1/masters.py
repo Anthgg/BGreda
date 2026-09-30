@@ -42,6 +42,7 @@ from app.schemas.masters import (
     ProductCategoryOut,
     ProductCategoryUpdate,
     ProductCreate,
+    ProductDetailOut,
     ProductOut,
     ProductPage,
     ProductUpdate,
@@ -211,19 +212,25 @@ async def list_products(
     return ProductPage(items=items, total=total, limit=limit, offset=offset)
 
 
-@router.get("/products/{product_id}", response_model=ProductOut, responses=_ERRORS)
+@router.get("/products/{product_id}", response_model=ProductDetailOut, responses=_ERRORS)
 async def read_product(
     product_id: int,
     _: CurrentUserDep,
     service: MasterDataServiceDep,
     session: DbSessionDep,
-) -> ProductOut:
+) -> ProductDetailOut:
     product = await service.get_product(product_id)
     category = await session.get(ProductCategory, product.product_category_id)
     pos_category = (
         await session.get(PosCategory, product.pos_category_id) if product.pos_category_id else None
     )
-    return _product_out(product, category=category, pos_category=pos_category)
+    out = _product_out(product, category=category, pos_category=pos_category)
+    return ProductDetailOut.model_validate(
+        {
+            **out.model_dump(),
+            "source_v2_quotation_product_id": product.source_v2_quotation_product_id,
+        }
+    )
 
 
 @router.post(

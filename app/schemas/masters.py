@@ -143,6 +143,12 @@ class ProductOut(_Out):
     depth: Decimal | None = None
 
 
+class ProductDetailOut(ProductOut):
+    """Detalle de producto con su vínculo de origen V2, cuando fue creado allí."""
+
+    source_v2_quotation_product_id: int | None = None
+
+
 class ProductPage(BaseModel):
     items: list[ProductOut]
     total: int

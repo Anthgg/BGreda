@@ -14,6 +14,7 @@ Lo que se fija:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -414,10 +415,16 @@ class TestNotasYQuemas:
         self, api: httpx.AsyncClient, admin_csrf: str, db_session: AsyncSession
     ) -> None:
         datos = await orden_con_existencia(api, admin_csrf)
+        orden = await api.get(f"{ORDERS}/{datos['order_id']}")
+        assert orden.status_code == 200, orden.text
         payload = {
             "kind": "NOTE",
             "body": "Revisar asas",
-            "occurred_at": datetime.now(UTC).isoformat(),
+            # Anclar el hecho al created_at persistido evita que esta prueba
+            # de idempotencia dependa del desfase entre el reloj de la BD y Python.
+            "occurred_at": (
+                datetime.fromisoformat(orden.json()["created_at"]) + timedelta(microseconds=1)
+            ).isoformat(),
         }
 
         primera = await anotar(api, admin_csrf, datos["order_id"], key="nota-doble-clic", **payload)
@@ -595,12 +602,35 @@ class TestSeguimiento:
     ) -> None:
         datos = await orden_con_existencia(api, admin_csrf)
         oid = datos["order_id"]
-        await anotar(api, admin_csrf, oid, key="seguimiento-nota-1", kind="NOTE", body="Arrancamos")
+        orden = await api.get(f"{ORDERS}/{oid}")
+        assert orden.status_code == 200, orden.text
+        note_occurred_at = datetime.fromisoformat(orden.json()["created_at"]) + timedelta(
+            microseconds=1
+        )
+        nota = await anotar(
+            api,
+            admin_csrf,
+            oid,
+            key="seguimiento-nota-1",
+            kind="NOTE",
+            body="Arrancamos",
+            occurred_at=note_occurred_at.isoformat(),
+        )
+        assert nota.status_code == 201, nota.text
         await arrancar(api, admin_csrf, oid)
         consumo = await consumir(
             api, admin_csrf, oid, product_id=datos["pasta_id"], quantity="80", key="seguim-pasta"
         )
         assert consumo.status_code == 201, consumo.text
+        timeline = await api.get(f"{ORDERS}/{oid}/timeline")
+        assert timeline.status_code == 200, timeline.text
+        before_firing = timeline.json()["items"]
+        timestamps_before_firing = [
+            datetime.fromisoformat(event["occurred_at"])
+            for event in before_firing
+            if event["type"] in {"STATUS", "CONSUMPTION"}
+        ]
+        firing_occurred_at = max(timestamps_before_firing) + timedelta(seconds=1)
         kiln_id = await horno(api, admin_csrf)
         quema = await anotar(
             api,
@@ -610,8 +640,13 @@ class TestSeguimiento:
             kind="FIRING_NOTE",
             kiln_id=kiln_id,
             firing_type="LOW",
+            occurred_at=firing_occurred_at.isoformat(),
         )
         assert quema.status_code == 201, quema.text
+        # La fecha del hecho queda ligada a la fecha persistida del consumo,
+        # que puede usar otro reloj. Completar después de esa fecha mantiene
+        # el orden cronológico que esta prueba está verificando.
+        await asyncio.sleep(max(0.0, (firing_occurred_at - datetime.now(UTC)).total_seconds()))
         assert (await finalizar(api, admin_csrf, oid)).status_code == 200
 
         r = await api.get(f"{ORDERS}/{oid}/timeline")
@@ -619,7 +654,11 @@ class TestSeguimiento:
         assert r.status_code == 200, r.text
         items = r.json()["items"]
         resumen = [(e["type"], e["status"]) for e in items]
-        assert resumen == [
+        # El timeline ordena por occurred_at. Los estados se marcan con el
+        # reloj de la aplicación; los consumos usan created_at de PostgreSQL,
+        # así que un leve desfase puede cambiar su orden relativo sin perder
+        # ningún hecho ni romper la cronología persistida.
+        esperado = [
             ("STATUS", "CREATED"),
             ("NOTE", None),
             ("STATUS", "STARTED"),
@@ -627,11 +666,14 @@ class TestSeguimiento:
             ("FIRING_NOTE", None),
             ("STATUS", "COMPLETED"),
         ]
+        assert sorted(resumen) == sorted(esperado), [
+            (event["type"], event.get("status"), event["occurred_at"]) for event in items
+        ]
         instantes = [datetime.fromisoformat(e["occurred_at"]) for e in items]
         assert instantes == sorted(instantes)
         assert all(e["actor_name"] for e in items)
         # Solo viaja el detalle de su tipo, y el consumo sigue sin ensenar costos.
-        consumo_evt = items[3]
+        consumo_evt = next(event for event in items if event["type"] == "CONSUMPTION")
         assert consumo_evt["note"] is None
         assert consumo_evt["consumption"]["quantity"] in ("80", "80.000000000000")
         assert not any("cost" in k for k in consumo_evt["consumption"])

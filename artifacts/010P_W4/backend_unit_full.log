@@ -1,0 +1,53 @@
+........................................................................ [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+........................................................................ [ 19%]
+........................................................................ [ 24%]
+........................................................................ [ 29%]
+........................................................................ [ 33%]
+........................................................................ [ 38%]
+........................................................................ [ 43%]
+........................................................................ [ 48%]
+........................................................................ [ 53%]
+........................................................................ [ 58%]
+........................................................................ [ 62%]
+........................................................................ [ 67%]
+........................................................................ [ 72%]
+........................................................................ [ 77%]
+........................................................................ [ 82%]
+........................................................................ [ 87%]
+........................................................................ [ 91%]
+........................................................................ [ 96%]
+.................................................                        [100%]
+============================== warnings summary ===============================
+tests/unit/test_migration_0015.py: 1 warning
+tests/unit/test_migration_0016.py: 1 warning
+tests/unit/test_migration_0017.py: 1 warning
+tests/unit/test_migration_0018.py: 1 warning
+tests/unit/test_migration_0019.py: 1 warning
+tests/unit/test_migration_0020.py: 2 warnings
+tests/unit/test_migration_0021.py: 2 warnings
+tests/unit/test_migration_0022.py: 1 warning
+tests/unit/test_migration_0023.py: 1 warning
+tests/unit/test_migration_0024.py: 1 warning
+tests/unit/test_migration_0025.py: 1 warning
+tests/unit/test_migration_0026.py: 1 warning
+tests/unit/test_migration_0027.py: 1 warning
+tests/unit/test_migration_0028.py: 1 warning
+tests/unit/test_migration_0029.py: 1 warning
+tests/unit/test_migration_0030.py: 2 warnings
+tests/unit/test_migration_0031.py: 2 warnings
+tests/unit/test_migration_0032.py: 2 warnings
+tests/unit/test_migration_0033.py: 1 warning
+tests/unit/test_migration_0034.py: 1 warning
+tests/unit/test_migration_0035.py: 1 warning
+tests/unit/test_migration_0036.py: 1 warning
+tests/unit/test_migration_0037.py: 1 warning
+tests/unit/test_migration_0038.py: 1 warning
+tests/unit/test_migration_0039.py: 1 warning
+tests/unit/test_migration_0040.py: 1 warning
+  C:\Users\anthg\BGreda-010p-w2\.venv\Lib\site-packages\alembic\config.py:604: DeprecationWarning: No path_separator found in configuration; falling back to legacy splitting on spaces, commas, and colons for prepend_sys_path.  Consider adding path_separator=os to Alembic config.
+    util.warn_deprecated(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1489 passed, 31 warnings in 38.83s

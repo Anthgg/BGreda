@@ -88,6 +88,9 @@ async def test_complete_linea_custom_crea_un_producto_categoria_y_stock_30(
         "Piezas personalizadas",
         "Piezas personalizadas",
     )
+    product_detail = await api.get(f"/api/v1/products/{product.id}", headers=h(admin_csrf))
+    assert product_detail.status_code == 200, product_detail.text
+    assert product_detail.json()["source_v2_quotation_product_id"] == datos["line_id"]
     assert (
         await db_session.scalar(
             select(func.count())

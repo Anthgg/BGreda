@@ -12,7 +12,7 @@ WITH prepared_lot_sums AS (
     WHERE p.product_type = 'PREPARED_MATERIAL'
     GROUP BY b.product_id, b.location_id, b.quantity
 ), latest_movements AS (
-    SELECT product_id, location_id, balance_after,
+    SELECT id, product_id, location_id, movement_type, created_at, balance_after,
            ROW_NUMBER() OVER (
                PARTITION BY product_id, location_id ORDER BY created_at DESC, id DESC
            ) AS position
@@ -72,6 +72,21 @@ SELECT jsonb_build_object(
             ON b.product_id = m.product_id AND b.location_id = m.location_id
         WHERE m.position = 1 AND (b.id IS NULL OR m.balance_after <> b.quantity)
     ),
+    'last_movement_balance_mismatch_details', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'movement_id', m.id,
+            'movement_type', m.movement_type,
+            'product_id', m.product_id,
+            'location_id', m.location_id,
+            'created_at', m.created_at,
+            'movement_balance_after', m.balance_after::text,
+            'stock_balance_quantity', b.quantity::text
+        ) ORDER BY m.id)
+        FROM latest_movements AS m
+        LEFT JOIN stock_balances AS b
+            ON b.product_id = m.product_id AND b.location_id = m.location_id
+        WHERE m.position = 1 AND (b.id IS NULL OR m.balance_after <> b.quantity)
+    ), '[]'::jsonb),
     'production_in_result_quantity_mismatches', (SELECT COUNT(*) FROM production_in_differences),
     'invalid_production_result_totals', (
         SELECT COUNT(*) FROM production_order_results
