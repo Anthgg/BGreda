@@ -230,7 +230,8 @@ async def test_draft_confirm_freezes_sources_and_updates_price_explicitly(
     assert price_response.status_code == 200, price_response.text
     updated = price_response.json()
     assert Decimal(updated["old_price"]) == Decimal("459")
-    assert Decimal(updated["new_price"]) == Decimal(confirmed["calculated_unit_price"])
+    quantized_unit = Decimal(confirmed["calculated_unit_price"]).quantize(Decimal("0.000001"))
+    assert Decimal(updated["new_price"]).quantize(Decimal("0.000001")) == quantized_unit
     events = await db_session.scalar(select(func.count()).select_from(QuotationProductPriceUpdate))
     assert events == 1
 
@@ -1131,12 +1132,18 @@ async def test_product_list_price_no_auto_update_on_confirmation(
         headers=head(admin_csrf),
     )
     assert update_price_res.status_code == 200
-    expected_new_price = Decimal(quote["calculated_unit_price"])
-    assert Decimal(update_price_res.json()["new_price"]) == expected_new_price
+    expected_new_price = Decimal(quote["calculated_unit_price"]).quantize(Decimal("0.000001"))
+    assert (
+        Decimal(update_price_res.json()["new_price"]).quantize(Decimal("0.000001"))
+        == expected_new_price
+    )
 
     # Ahora si se actualizo el producto maestro
     prod_updated = await api.get(f"/api/v1/products/{product['id']}", headers=head(admin_csrf))
-    assert Decimal(prod_updated.json()["sale_price"]) == expected_new_price
+    assert (
+        Decimal(prod_updated.json()["sale_price"]).quantize(Decimal("0.000001"))
+        == expected_new_price
+    )
 
 
 @pytest.mark.asyncio

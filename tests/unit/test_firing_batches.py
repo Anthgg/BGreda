@@ -72,6 +72,33 @@ def _line(quantity: int, side: str, keys: tuple[str, ...], factor_kiln_id: int =
 
 
 class TestMultiBatchFiring:
+    @pytest.mark.parametrize(
+        "quantity,expected_batches,expected_cost",
+        [
+            (1, 1, Decimal(500)),
+            (2, 2, Decimal(1000)),
+            (3, 3, Decimal(1500)),
+        ],
+    )
+    def test_hornadas_cobran_tarifa_real_sin_factor_de_ocupacion(
+        self,
+        quantity: int,
+        expected_batches: int,
+        expected_cost: Decimal,
+    ) -> None:
+        factors = {1: [(1, 100, Decimal("3.5"))]}
+        math = compute_firing(
+            [_session("1:LOW", 1, "LOW", "500", "1000")],
+            [_line(quantity, "10", ("1:LOW",))],
+            factors,
+            multi_batch=True,
+        )
+
+        assert math.sessions[0].batches == expected_batches
+        assert math.lines[0].occupancy_factor == Decimal("3.5")
+        assert math.lines[0].allocated_cost == expected_cost
+        assert math.total_cost == expected_cost
+
     def test_una_hornada_cuesta_la_tarifa_completa(self) -> None:
         # 1 pieza de 10x10x10 = 1000 cm3, horno de 1000 -> exactamente 1.
         math = compute_firing(

@@ -336,17 +336,17 @@ async def test_el_simulador_reproduce_el_caso_de_referencia(
     assert Decimal(palta["base_cost"]).quantize(Decimal("0.01")) == Decimal("1041.38")
     assert palta["occupancy_bracket"] == 80
     assert Decimal(palta["occupancy_factor"]) == Decimal("1.2")
-    assert Decimal(palta["allocated_cost"]).quantize(Decimal("0.01")) == Decimal("1249.66")
+    assert Decimal(palta["allocated_cost"]).quantize(Decimal("0.01")) == Decimal("1041.38")
     assert Decimal(resultado["lines"][1]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
-        "70.07"
+        "23.36"
     )
     assert Decimal(resultado["lines"][2]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
-        "336.33"
+        "112.11"
     )
-    assert Decimal(resultado["total_cost"]).quantize(Decimal("0.01")) == Decimal("1656.06")
+    assert Decimal(resultado["total_cost"]).quantize(Decimal("0.01")) == Decimal("1176.85")
     assert Decimal(resultado["tax_percentage"]) == Decimal(18)
-    assert Decimal(resultado["tax_amount"]).quantize(Decimal("0.01")) == Decimal("298.09")
-    assert Decimal(resultado["total_with_tax"]).quantize(Decimal("0.01")) == Decimal("1954.15")
+    assert Decimal(resultado["tax_amount"]).quantize(Decimal("0.01")) == Decimal("211.83")
+    assert Decimal(resultado["total_with_tax"]).quantize(Decimal("0.01")) == Decimal("1388.68")
     assert resultado["currency_symbol"] == "S/"
 
 
@@ -440,7 +440,7 @@ async def test_crear_borrador_emite_correlativo_y_calcula(
     assert len(hoja["sessions"]) == 3
     assert len(hoja["lines"]) == 3
     assert Decimal(hoja["lines"][0]["allocated_cost"]).quantize(Decimal("0.01")) == Decimal(
-        "1249.66"
+        "1041.38"
     )
 
 
@@ -833,7 +833,7 @@ async def test_limpiar_notas_horno_con_null(api: httpx.AsyncClient, admin_csrf: 
     assert obtenido["notes"] is None
 
 
-async def test_horno_nuevo_sin_factores_bloquea_y_permite_configurarlos(
+async def test_horno_nuevo_sin_factores_calcula_y_permite_configurarlos(
     api: httpx.AsyncClient, admin_csrf: str
 ) -> None:
     # 1. Crear horno sin factores
@@ -854,8 +854,9 @@ async def test_horno_nuevo_sin_factores_bloquea_y_permite_configurarlos(
     )
     assert rate_resp.status_code == 201
 
-    # 3. Intentar calcular sin factores -> 422
-    calc_fail = await api.post(
+    # 3. Calcular sin factores usa el factor neutro: la tabla es referencia,
+    # no una condicion para costear.
+    calc_neutro = await api.post(
         f"{FIRINGS}/calculate",
         json={
             "sessions": [{"kiln_id": kiln["id"], "firing_type": "LOW"}],
@@ -872,8 +873,10 @@ async def test_horno_nuevo_sin_factores_bloquea_y_permite_configurarlos(
         },
         headers=head(admin_csrf),
     )
-    assert calc_fail.status_code == 422
-    assert calc_fail.json()["error"]["code"] == "OCCUPANCY_FACTOR_NOT_CONFIGURED"
+    assert calc_neutro.status_code == 200
+    calc_neutro_body = calc_neutro.json()
+    assert Decimal(calc_neutro_body["occupancy_factor"]) == Decimal(1)
+    assert calc_neutro_body["total_cost"] == calc_neutro_body["subtotal"]
 
     # 4. Configurar factores vía PUT /kilns/{id}/occupancy-factors
     factors_payload = [
@@ -889,7 +892,7 @@ async def test_horno_nuevo_sin_factores_bloquea_y_permite_configurarlos(
     factors_out = set_factors_resp.json()
     assert len(factors_out) == 2
 
-    # 5. Calcular nuevamente -> 200 éxito
+    # 5. Calcular nuevamente sigue usando costo real, aunque exista tabla.
     calc_ok = await api.post(
         f"{FIRINGS}/calculate",
         json={
@@ -908,6 +911,9 @@ async def test_horno_nuevo_sin_factores_bloquea_y_permite_configurarlos(
         headers=head(admin_csrf),
     )
     assert calc_ok.status_code == 200
+    calc_ok_body = calc_ok.json()
+    assert Decimal(calc_ok_body["occupancy_factor"]) == Decimal(1)
+    assert calc_ok_body["total_cost"] == calc_ok_body["subtotal"]
 
 
 async def test_tarifa_futura_no_aplica_antes_de_su_fecha_efectiva(

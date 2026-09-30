@@ -17,7 +17,6 @@ from app.core.firings import (
     FiringEmptyError,
     FiringVolumeOverflowError,
     LineInput,
-    OccupancyFactorMissingError,
     SessionInput,
     compute_firing,
     line_volume,
@@ -142,15 +141,46 @@ def test_tramos_permitidos_son_las_diez_decenas() -> None:
     assert ALLOWED_BRACKETS == (10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
 
 
-def test_factor_sin_tramo_configurado_falla() -> None:
-    with pytest.raises(OccupancyFactorMissingError):
-        resolve_factor([(1, 10, Decimal("2.0"))], 80)
+def test_factor_sin_tramo_configurado_usa_neutro() -> None:
+    assert resolve_factor([(1, 10, Decimal("2.0"))], 80) == Decimal(1)
 
 
 def test_factor_por_horno_difiere_en_el_mismo_tramo() -> None:
     """La tabla tiene una columna por horno: el tramo solo no basta."""
     assert resolve_factor(FACTORES_CHICO, 80) == Decimal("1.2")
     assert resolve_factor(FACTORES_GRANDE, 80) == Decimal("1.4")
+
+
+@pytest.mark.parametrize(
+    "capacity,expected_percentage,expected_bracket,expected_factor",
+    [
+        ("20000", Decimal("5"), 10, Decimal("2.0")),
+        ("6666.666666666666666666666667", Decimal("15"), 20, Decimal("1.9")),
+        ("2000", Decimal("50"), 50, Decimal("1.6")),
+        ("1250", Decimal("80"), 80, Decimal("1.2")),
+        ("1052.631578947368421052631579", Decimal("95"), 100, Decimal("1.0")),
+    ],
+)
+def test_ocupacion_y_factor_no_cambian_el_precio_canonico(
+    capacity: str,
+    expected_percentage: Decimal,
+    expected_bracket: int,
+    expected_factor: Decimal,
+) -> None:
+    """El tramo de ocupacion se conserva como dato fisico, no como multiplicador."""
+    resultado = compute_firing(
+        [SessionInput("1:LOW", CHICO, "LOW", Decimal("500"), Decimal(capacity))],
+        [LineInput(1, Decimal(10), Decimal(10), Decimal(10), ("1:LOW",), CHICO)],
+        TABLAS,
+    )
+    linea = resultado.lines[0]
+
+    assert linea.occupancy_percentage.quantize(Decimal("0.0001")) == expected_percentage
+    assert linea.occupancy_bracket == expected_bracket
+    assert linea.occupancy_factor == expected_factor
+    assert linea.base_cost == Decimal("500")
+    assert linea.allocated_cost == Decimal("500")
+    assert resultado.total_cost == Decimal("500")
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +220,8 @@ def test_caso_de_referencia_reproduce_la_hoja() -> None:
     - ``Q14 = H14 + K14`` (chico baja + grande alta): 1041.384083
     - ``L14`` ocupacion contra el horno chico: 76.235 % -> tramo 71-80 %
     - ``V23`` factor del horno chico en ese tramo: 1.2
-    - ``R14 = Q14 * V23``: 1249.6609
+    - ``R14 = Q14 * V23``: 1249.6609 en el Excel historico; desde 009K.4.2
+      el pricing canonico usa el costo real Q14, sin ese multiplicador.
     """
     resultado = compute_firing(SESIONES_REFERENCIA, LINEAS_REFERENCIA, TABLAS)
     palta = resultado.lines[0]
@@ -200,7 +231,7 @@ def test_caso_de_referencia_reproduce_la_hoja() -> None:
     assert palta.base_cost.quantize(Decimal("0.01")) == Decimal("1041.38")
     assert palta.occupancy_bracket == 80
     assert palta.occupancy_factor == Decimal("1.2")
-    assert palta.allocated_cost.quantize(Decimal("0.01")) == Decimal("1249.66")
+    assert palta.allocated_cost.quantize(Decimal("0.01")) == Decimal("1041.38")
 
 
 def test_caso_de_referencia_reproduce_tambien_las_otras_dos_piezas() -> None:
@@ -210,10 +241,10 @@ def test_caso_de_referencia_reproduce_tambien_las_otras_dos_piezas() -> None:
 
     assert buho.occupancy_bracket == 10
     assert buho.occupancy_factor == Decimal("3.0")
-    assert buho.allocated_cost.quantize(Decimal("0.0001")) == Decimal("70.0692")
+    assert buho.allocated_cost.quantize(Decimal("0.0001")) == Decimal("23.3564")
 
     assert platos.occupancy_factor == Decimal("3.0")
-    assert platos.allocated_cost.quantize(Decimal("0.0001")) == Decimal("336.3322")
+    assert platos.allocated_cost.quantize(Decimal("0.0001")) == Decimal("112.1107")
 
 
 def test_el_costo_base_de_una_sesion_se_reparte_entero() -> None:
@@ -230,7 +261,8 @@ def test_el_costo_base_de_una_sesion_se_reparte_entero() -> None:
 
 def test_factor_efectivo_de_la_hoja_es_el_ponderado() -> None:
     resultado = compute_firing(SESIONES_REFERENCIA, LINEAS_REFERENCIA, TABLAS)
-    assert resultado.occupancy_factor == resultado.total_cost / resultado.subtotal
+    assert resultado.occupancy_factor == Decimal(1)
+    assert resultado.total_cost == resultado.subtotal
 
 
 # ---------------------------------------------------------------------------

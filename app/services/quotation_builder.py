@@ -606,9 +606,9 @@ def _resolve_production_factor(
 
     Tres entradas posibles, y el orden importa:
 
-    1. **La pantalla nueva manda `production_factor_enabled`** y nada mas. La
-       autoridad del VALOR es entonces Configuracion, no el navegador: un
-       cliente no elige cuanto vale el factor de la casa.
+    1. **La pantalla nueva manda `production_factor_enabled`** y puede mandar
+       `production_factor`. Si esta activado, el valor de la cotizacion gana al
+       default de Configuracion; si falta, se usa Configuracion como sugerencia.
     2. **`production_factor` sin bandera** es una peticion anterior a esta
        fase —o el borrador que vuelve por `_to_input` al confirmar—. Ahi la
        intencion se deduce: un override que no es uno es un factor aplicado, y
