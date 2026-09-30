@@ -1,0 +1,18 @@
+{
+  "release": "010P",
+  "source_revision": "0041",
+  "target_revision": "0045",
+  "timestamp_utc": "",
+  "backup_end_utc": "",
+  "bucket": "cotizador-greda-db-backups",
+  "object": "",
+  "size": null,
+  "sha256": "",
+  "toc_entries": null,
+  "pg_restore_list": "PENDING",
+  "job_execution": "",
+  "backend_prod_revision": "",
+  "frontend_prod_revision": "",
+  "release_backend_sha": "",
+  "release_frontend_sha": ""
+}

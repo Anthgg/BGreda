@@ -1,217 +1,96 @@
-# Cloud Build — BGreda (Backend)
-#
-# Pipeline reproducible y auditable para despliegue en Cloud Run.
-# Nunca usa --source . en produccion.
-#
-# Flujo:
-#   docker build  →  push con SHA  →  gcloud run deploy  →  traffic 100%  →  smoke
-#
-# Ejecutar manualmente:
-#   gcloud builds submit --config cloudbuild.yaml .
-#
-# Variables sustitutas disponibles en Cloud Build:
-#   $PROJECT_ID          proyecto GCP
-#   $COMMIT_SHA          SHA completo del commit (40 hex)
-#   $SHORT_SHA           primeros 7 caracteres del SHA
-#   $REPO_NAME           nombre del repositorio
+# Cloud Build — BGreda backend candidate release 010P.
+# Builds a full-merge-SHA image, deploys by digest with no traffic, and verifies
+# the tagged candidate without changing the service traffic allocation.
 
 substitutions:
   _REGION: southamerica-west1
   _SERVICE: bgreda-api
   _IMAGE: southamerica-west1-docker.pkg.dev/cotizador-greda/cloud-run-source-deploy/bgreda-api
-  _PHASE: "007"
+  _RELEASE_SHA: UNSET
+  _RELEASE_TAG: p010p-unset
+  _PHASE: 010p
 
 steps:
-  # ------------------------------------------------------------------
-  # 1. Construir imagen etiquetada con SHA exacto
-  # ------------------------------------------------------------------
+  - id: validate-release-identity
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -euc
+      - |
+        [[ '$_RELEASE_SHA' =~ ^[0-9a-f]{40}$ ]] || { echo 'RELEASE_SHA must be a full lowercase merge SHA'; exit 1; }
+        [[ '$_RELEASE_TAG' == "p010p-$_RELEASE_SHA" ]] || { echo 'RELEASE_TAG must equal p010p-<full merge SHA>'; exit 1; }
+        echo "RELEASE_SHA=$_RELEASE_SHA"
+        echo "RELEASE_TAG=$_RELEASE_TAG"
+
   - id: docker-build
     name: gcr.io/cloud-builders/docker
     args:
       - build
       - --file=Dockerfile
-      - --tag=$_IMAGE:$COMMIT_SHA
-      - --tag=$_IMAGE:main-latest
-      - --label=git-sha=$COMMIT_SHA
-      - --label=repository=$REPO_NAME
+      - --tag=$_IMAGE:$_RELEASE_TAG
+      - --label=git-sha=$_RELEASE_SHA
+      - --label=repository=BGreda
       - --label=phase=$_PHASE
-      - --cache-from=$_IMAGE:main-latest
       - .
+    waitFor: [validate-release-identity]
 
-  # ------------------------------------------------------------------
-  # 2. Publicar imagen en Artifact Registry
-  # ------------------------------------------------------------------
-  - id: docker-push-sha
+  - id: verify-alembic-image
     name: gcr.io/cloud-builders/docker
+    entrypoint: bash
     args:
-      - push
-      - $_IMAGE:$COMMIT_SHA
-    waitFor:
-      - docker-build
+      - -euc
+      - |
+        HEADS="$$(docker run --rm --entrypoint bash $_IMAGE:$_RELEASE_TAG -euc 'cd /app && python -m alembic heads')"
+        printf '%s\n' "$$HEADS"
+        [[ "$$(printf '%s\n' "$$HEADS" | grep -Ec '^0045([[:space:]]|$)')" == 1 ]] || { echo 'Expected exactly one Alembic head: 0045'; exit 1; }
+        [[ "$$(printf '%s\n' "$$HEADS" | grep -Ec '^[[:alnum:]_-]+([[:space:]].*)?$')" == 1 ]] || { echo 'Expected exactly one Alembic head'; exit 1; }
+        echo 'IMAGE_ALEMBIC_HEAD=0045'
+    waitFor: [docker-build]
 
-  - id: docker-push-alias
+  - id: docker-push-release
     name: gcr.io/cloud-builders/docker
-    args:
-      - push
-      - $_IMAGE:main-latest
-    waitFor:
-      - docker-build
+    args: [push, $_IMAGE:$_RELEASE_TAG]
+    waitFor: [verify-alembic-image]
 
-  # ------------------------------------------------------------------
-  # 3. Capturar revision actual (para rollback si smoke falla)
-  # ------------------------------------------------------------------
-  - id: capture-previous-revision
+  - id: deploy-no-traffic-by-digest
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
       - -euc
       - |
-        PREV=$(gcloud run services describe $_SERVICE \
-          --region=$_REGION \
-          --project=$PROJECT_ID \
-          --format="value(status.latestReadyRevisionName)")
-        echo "PREVIOUS_REVISION=$$PREV" > /workspace/rollback.env
-        echo "Revision anterior capturada: $$PREV"
-    waitFor:
-      - docker-push-sha
-
-  # ------------------------------------------------------------------
-  # 4. Desplegar nueva revision (sin cambiar trafico todavia)
-  # ------------------------------------------------------------------
-  - id: deploy-revision
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: bash
-    args:
-      - -euc
-      - |
-        gcloud run deploy $_SERVICE \
-          --image=$_IMAGE:$COMMIT_SHA \
-          --region=$_REGION \
-          --project=$PROJECT_ID \
+        DIGEST="$$(gcloud artifacts docker images describe '$_IMAGE:$_RELEASE_TAG' --project="$PROJECT_ID" --format='value(image_summary.digest)')"
+        [[ "$$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Artifact Registry did not return an immutable sha256 digest'; exit 1; }
+        gcloud run deploy '$_SERVICE' \
+          --image='$_IMAGE@'"$$DIGEST" \
+          --region='$_REGION' \
+          --project="$PROJECT_ID" \
           --no-traffic \
-          --tag=p007-$SHORT_SHA \
-          --update-labels=git-sha=$COMMIT_SHA,repository=bgreda,phase=$_PHASE
-        echo "Revision desplegada sin trafico. Tag: p007-$SHORT_SHA"
-    waitFor:
-      - capture-previous-revision
+          --tag='$_RELEASE_TAG' \
+          --update-labels=git-sha=$_RELEASE_SHA,repository=bgreda,phase=$_PHASE
+        echo "IMAGE_DIGEST=$$DIGEST" > /workspace/release.env
+    waitFor: [docker-push-release]
 
-  # ------------------------------------------------------------------
-  # 5. Esperar a que la revision quede READY
-  # ------------------------------------------------------------------
-  - id: wait-ready
+  - id: verify-candidate-and-traffic
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
       - -euc
       - |
-        echo "Esperando que la revision este READY..."
-        for i in $(seq 1 30); do
-          READY=$(gcloud run revisions list \
-            --service=$_SERVICE \
-            --region=$_REGION \
-            --project=$PROJECT_ID \
-            --filter="metadata.labels.commit-sha=$COMMIT_SHA OR status.conditions.type=Ready" \
-            --format="value(status.conditions[0].status)" \
-            --sort-by="~metadata.creationTimestamp" \
-            --limit=1)
-          echo "Intento $$i: status=$$READY"
-          if [ "$$READY" = "True" ]; then
-            echo "Revision READY."
-            exit 0
-          fi
-          sleep 5
-        done
-        # Fallback: verificar por tag URL
-        TAG_URL="https://p007-$SHORT_SHA---bgreda-api-ox6cywquca-tl.a.run.app"
-        echo "Verificando via tag URL: $$TAG_URL"
-        curl -fsS "$$TAG_URL/live" && exit 0
-        echo "La revision no alcanzo READY en el tiempo esperado."
-        exit 1
-    waitFor:
-      - deploy-revision
+        source /workspace/release.env
+        SERVICE_JSON="$$(gcloud run services describe '$_SERVICE' --region='$_REGION' --project="$PROJECT_ID" --format=json)"
+        REVISION="$$(python3 -c 'import json,sys; s=json.load(sys.stdin); t=sys.argv[1]; print(next((x.get("revisionName", "") for x in s.get("status", {}).get("traffic", []) if x.get("tag") == t), ""))' '$_RELEASE_TAG' <<< "$$SERVICE_JSON")"
+        [[ -n "$$REVISION" && "$$REVISION" != null ]] || { echo 'Tagged candidate revision was not found'; exit 1; }
+        TAG_URL="$$(python3 -c 'import json,sys; s=json.load(sys.stdin); t=sys.argv[1]; print(next((x.get("url", "") for x in s.get("status", {}).get("traffic", []) if x.get("tag") == t), ""))' '$_RELEASE_TAG' <<< "$$SERVICE_JSON")"
+        [[ -n "$$TAG_URL" && "$$TAG_URL" != null ]] || { echo 'Candidate tag URL was not returned'; exit 1; }
+        REVISION_JSON="$$(gcloud run revisions describe "$$REVISION" --region='$_REGION' --project="$PROJECT_ID" --format=json)"
+        [[ "$$(python3 -c 'import json,sys; r=json.load(sys.stdin); print(next((c.get("status", "") for c in r.get("status", {}).get("conditions", []) if c.get("type") == "Ready"), ""))' <<< "$$REVISION_JSON")" == True ]] || { echo 'Candidate revision is not Ready'; exit 1; }
+        [[ "$$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("spec", {}).get("containers", [{}])[0].get("image", ""))' <<< "$$REVISION_JSON")" == '$_IMAGE@'"$$IMAGE_DIGEST" ]] || { echo 'Candidate revision image does not match the immutable digest'; exit 1; }
+        python3 -c 'import json,sys; s=json.load(sys.stdin); rev=sys.argv[1]; t=s.get("status", {}).get("traffic", []); candidate=sum(x.get("percent") or 0 for x in t if x.get("revisionName") == rev); total=sum(x.get("percent") or 0 for x in t if x.get("revisionName")); assert candidate == 0, f"candidate traffic={candidate}"; assert total == 100, f"service traffic total={total}"' "$$REVISION" <<< "$$SERVICE_JSON" || { echo 'Candidate must remain at 0% and existing service allocation must total 100%'; exit 1; }
+        printf 'BUILD_ID=%s\nIMAGE_DIGEST=%s\nREVISION=%s\nTAG_URL=%s\nTRAFFIC_TOTAL=100\n' "$BUILD_ID" "$$IMAGE_DIGEST" "$$REVISION" "$$TAG_URL"
+    waitFor: [deploy-no-traffic-by-digest]
 
-  # ------------------------------------------------------------------
-  # 6. Smoke basico sobre la revision con tag (sin trafico publico)
-  # ------------------------------------------------------------------
-  - id: smoke-tag-revision
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: bash
-    args:
-      - -euc
-      - |
-        TAG_URL="https://p007-$SHORT_SHA---bgreda-api-ox6cywquca-tl.a.run.app"
-        echo "Smoke sobre revision con tag: $$TAG_URL"
-        curl -fsS "$$TAG_URL/live"
-        echo "  /live: OK"
-        curl -fsS "$$TAG_URL/ready"
-        echo "  /ready: OK"
-        echo "Smoke pre-traffic: PASS"
-    waitFor:
-      - wait-ready
-
-  # ------------------------------------------------------------------
-  # 7. Mover 100% del trafico a la nueva revision
-  # ------------------------------------------------------------------
-  - id: update-traffic
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: bash
-    args:
-      - -euc
-      - |
-        NEW_REV=$(gcloud run revisions list \
-          --service=$_SERVICE \
-          --region=$_REGION \
-          --project=$PROJECT_ID \
-          --sort-by="~metadata.creationTimestamp" \
-          --filter="metadata.labels.commit-sha=$COMMIT_SHA" \
-          --format="value(metadata.name)" \
-          --limit=1)
-        if [ -z "$$NEW_REV" ]; then
-          # Fallback: ultima revision creada
-          NEW_REV=$(gcloud run revisions list \
-            --service=$_SERVICE \
-            --region=$_REGION \
-            --project=$PROJECT_ID \
-            --sort-by="~metadata.creationTimestamp" \
-            --format="value(metadata.name)" \
-            --limit=1)
-        fi
-        echo "Moviendo 100% de trafico a: $$NEW_REV"
-        gcloud run services update-traffic $_SERVICE \
-          --region=$_REGION \
-          --project=$PROJECT_ID \
-          --to-revisions="$$NEW_REV=100"
-        echo "NEW_REVISION=$$NEW_REV" >> /workspace/rollback.env
-        echo "Trafico actualizado: $$NEW_REV = 100%"
-    waitFor:
-      - smoke-tag-revision
-
-  # ------------------------------------------------------------------
-  # 8. Smoke post-trafico (produccion real)
-  # ------------------------------------------------------------------
-  - id: smoke-production
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: bash
-    args:
-      - -euc
-      - |
-        BASE="https://bgreda-api-303244958634.southamerica-west1.run.app"
-        echo "Smoke en produccion: $$BASE"
-        curl -fsS "$$BASE/live"
-        echo "  /live: OK"
-        curl -fsS "$$BASE/ready"
-        echo "  /ready: OK"
-        STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$$BASE/api/v1/auth/csrf")
-        echo "  /api/v1/auth/csrf: HTTP $$STATUS"
-        if [ "$$STATUS" != "200" ]; then echo "csrf endpoint unexpected status"; exit 1; fi
-        echo "Smoke produccion: PASS"
-    waitFor:
-      - update-traffic
-
-# Imagen publicada — registro auditable
 images:
-  - $_IMAGE:$COMMIT_SHA
-  - $_IMAGE:main-latest
+  - $_IMAGE:$_RELEASE_TAG
 
 options:
   logging: CLOUD_LOGGING_ONLY
